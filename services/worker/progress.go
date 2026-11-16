@@ -32,6 +32,7 @@ func recordSample(out *Result, req Request, sample Sample, index, seq int) error
 	if len(data) > 131072 {
 		return errors.New("메시지 크기가 128KiB를 초과합니다.")
 	}
+	out.SimulationTimeMS = offsetMS(req, seq)
 	out.Processed++
 	out.Bytes += len(data)
 	if sample.Message["ty"].(float64) == 3 {
@@ -52,10 +53,17 @@ func recordSample(out *Result, req Request, sample Sample, index, seq int) error
 	return nil
 }
 
-func reporter(started time.Time, progress func(Result)) func(*Result, bool) {
+func reporter(started time.Time, progress func(Result), control *executionControl) func(*Result, bool) {
 	last := time.Time{}
 	return func(out *Result, force bool) {
 		out.ElapsedMS = time.Since(started).Milliseconds()
+		paused, isPaused, _ := control.snapshot()
+		out.PausedMS = paused.Milliseconds()
+		out.ActiveElapsedMS = max(0, out.ElapsedMS-out.PausedMS)
+		out.ExecutionState = "running"
+		if isPaused {
+			out.ExecutionState = "paused"
+		}
 		out.Remaining = out.Planned - out.Processed
 		if out.Transport == "mqtt" {
 			out.Unsent = out.Planned - out.Attempted

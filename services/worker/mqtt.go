@@ -146,7 +146,8 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 		out.ModelVersion = generatorVersion
 	}
 	started := time.Now()
-	report := reporter(started, progress)
+	control := controlFrom(ctx)
+	report := reporter(started, progress, control)
 	report(&out, true)
 	out.Published = 0
 	out.Puback = 0
@@ -168,6 +169,9 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	timeout := time.Duration(profile.TimeoutMS) * time.Millisecond
 	connect := func(id string, client mqtt.Client) error {
 		for attempt := 0; attempt <= profile.ReconnectAttempts; attempt++ {
+			if err := control.gate(ctx, func(force bool) { report(&out, force) }); err != nil {
+				return err
+			}
 			if err := connectPacer.wait(ctx); err != nil {
 				return err
 			}
@@ -234,9 +238,9 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 			}
 		}
 	}
-	scheduledStart := time.Now()
+	scheduledStart := time.Now().Add(-time.Duration(pauseMilliseconds(control)) * time.Millisecond)
 	for seq := 0; seq < req.Config.MessagesPerVehicle; seq++ {
-		if err := sleepReporting(ctx, scheduledStart.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func() { report(&out, false) }); err != nil {
+		if err := waitSchedule(ctx, scheduledStart.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func(force bool) { report(&out, force) }); err != nil {
 			fail("시험 제한시간을 초과했습니다.")
 			return finish(), nil
 		}
@@ -252,11 +256,15 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 				fail("시험 제한시간을 초과했습니다.")
 				return finish(), nil
 			}
+			if err := control.gate(ctx, func(force bool) { report(&out, force) }); err != nil {
+				fail("실행을 중단했습니다.")
+				return finish(), nil
+			}
 			sample := sampleAt(req, i, seq, a, profile.TopicPrefix)
 			if err := recordSample(&out, req, sample, i, seq); err != nil {
 				return finish(), err
 			}
-			out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(scheduledStart).Milliseconds()-offsetMS(req, seq))
+			out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(scheduledStart).Milliseconds()-pauseMilliseconds(control)-offsetMS(req, seq))
 			encoded, _ := json.Marshal(sample.Message)
 			topic := sample.Topic
 			if ctx.Err() != nil {
@@ -272,6 +280,7 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 			}
 			out.Published++
 			out.Puback++
+			report(&out, true)
 			remaining[a.ClientID]--
 			if req.Config.Lifetime == "while_driving" && remaining[a.ClientID] == 0 {
 				client.Disconnect(0)

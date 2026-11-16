@@ -324,6 +324,17 @@ progress {
   border-color: #c58d87;
   white-space: nowrap;
 }
+.run-controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+@media (max-width: 700px) {
+  .live-run {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
 table {
   width: 100%;
   border-collapse: collapse;

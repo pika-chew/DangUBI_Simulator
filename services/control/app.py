@@ -268,6 +268,20 @@ def stop_job(run_id: str):
     return get_job(run_id)
 
 
+@app.post("/api/jobs/{run_id}/pause", status_code=202)
+def pause_job(run_id: str):
+    get_job(run_id)
+    JOBS.pause(run_id, True)
+    return get_job(run_id)
+
+
+@app.post("/api/jobs/{run_id}/resume", status_code=202)
+def resume_job(run_id: str):
+    get_job(run_id)
+    JOBS.pause(run_id, False)
+    return get_job(run_id)
+
+
 @app.get("/api/runs")
 def list_runs():
     with database() as db:

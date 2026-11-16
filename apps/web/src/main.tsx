@@ -85,6 +85,10 @@ type Result = {
   schedule_delay_ms?: number;
   connection_cleanup_confirmed?: boolean;
   forced_termination?: boolean;
+  paused_ms?: number;
+  active_elapsed_ms?: number;
+  simulation_time_ms?: number;
+  wall_limit_seconds?: number;
 };
 type SavedRun = {
   id: string;
@@ -113,11 +117,21 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
     );
   return data;
 }
-const activeStates = new Set(["starting", "running", "stopping"]);
+const activeStates = new Set([
+  "starting",
+  "running",
+  "pausing",
+  "paused",
+  "resuming",
+  "stopping",
+]);
 function stateLabel(result: Result): string {
   const labels: Record<string, string> = {
     starting: "실행 준비 중",
     running: "실행 중",
+    pausing: "일시중지 요청 중",
+    paused: "일시중지됨",
+    resuming: "재개 요청 중",
     stopping: "중단 처리 중",
     stopped: "중단 완료 · 부분 결과",
     failed: "실행 실패 · 결과 확인 필요",
@@ -136,6 +150,7 @@ function App() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [realtime, setRealtime] = useState(true);
   const [stopPending, setStopPending] = useState(false);
+  const [pausePending, setPausePending] = useState(false);
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
     profile: "urban",
@@ -242,6 +257,25 @@ function App() {
         e instanceof Error ? e.message : "중단 요청을 전달하지 못했습니다.",
       );
       setStopPending(false);
+    }
+  }
+  async function pauseResume() {
+    if (!activeJobId) return;
+    setPausePending(true);
+    try {
+      const action = run?.result.job_state === "paused" ? "resume" : "pause";
+      setRun(
+        await api<SavedRun>("/api/jobs/" + activeJobId + "/" + action, {}),
+      );
+      setError("");
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : "일시중지·재개 요청을 전달하지 못했습니다.",
+      );
+    } finally {
+      setPausePending(false);
     }
   }
   useEffect(() => {
@@ -385,18 +419,39 @@ function App() {
                     {((run.result.elapsed_ms || 0) / 1000).toFixed(1)}초 ·
                     PUBACK {run.result.puback_count}건
                   </p>
+                  <p className="note">
+                    정지 {((run.result.paused_ms || 0) / 1000).toFixed(1)}초 ·
+                    정지 제외{" "}
+                    {((run.result.active_elapsed_ms || 0) / 1000).toFixed(1)}초
+                    · 운행 진행{" "}
+                    {((run.result.simulation_time_ms || 0) / 1000).toFixed(1)}초
+                    · 전체 제한 {run.result.wall_limit_seconds ?? "—"}초. 정지
+                    중에도 전체 제한시간은 흐릅니다.
+                  </p>
                 </>
               )}
             </div>
-            <button
-              className="stop"
-              disabled={stopPending || run?.result.job_state === "stopping"}
-              onClick={stop}
-            >
-              {stopPending || run?.result.job_state === "stopping"
-                ? "중단 처리 중…"
-                : "실행 중단"}
-            </button>
+            <div className="run-controls">
+              <button
+                disabled={
+                  pausePending ||
+                  stopPending ||
+                  !["running", "paused"].includes(run?.result.job_state || "")
+                }
+                onClick={pauseResume}
+              >
+                {run?.result.job_state === "paused" ? "실행 재개" : "일시중지"}
+              </button>
+              <button
+                className="stop"
+                disabled={stopPending || run?.result.job_state === "stopping"}
+                onClick={stop}
+              >
+                {stopPending || run?.result.job_state === "stopping"
+                  ? "중단 처리 중…"
+                  : "실행 중단"}
+              </button>
+            </div>
           </section>
         )}
         {!catalog ? (
@@ -853,7 +908,17 @@ function App() {
                         {run.result.forced_termination
                           ? " · Worker 강제 종료"
                           : ""}
-                        . 중단된 운행은 종료 Trip을 새로 만들지 않습니다.
+                        . 중단된 운행은 종료 Trip을 새로 만들지 않습니다. 정지{" "}
+                        {((run.result.paused_ms || 0) / 1000).toFixed(1)}초 ·
+                        정지 제외{" "}
+                        {((run.result.active_elapsed_ms || 0) / 1000).toFixed(
+                          1,
+                        )}
+                        초 · 운행 진행{" "}
+                        {((run.result.simulation_time_ms || 0) / 1000).toFixed(
+                          1,
+                        )}
+                        초.
                       </p>
                     )}
                     <div className="metrics">

@@ -70,6 +70,10 @@ type Result struct {
 	Unsent            int          `json:"unsent_messages"`
 	ScheduleDelayMS   int64        `json:"schedule_delay_ms"`
 	PeakActiveClients int          `json:"peak_active_clients"`
+	PausedMS          int64        `json:"paused_ms"`
+	ActiveElapsedMS   int64        `json:"active_elapsed_ms"`
+	SimulationTimeMS  int64        `json:"simulation_time_ms"`
+	ExecutionState    string       `json:"execution_state"`
 }
 
 func process(req Request) (Result, error) { return processContext(context.Background(), req, nil) }
@@ -150,26 +154,27 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 		out.ModelVersion = generatorVersion
 	}
 	started := time.Now()
-	report := reporter(started, progress)
+	control := controlFrom(ctx)
+	report := reporter(started, progress, control)
 	out.State = "running"
 	report(&out, true)
 	for seq := 0; seq < c.MessagesPerVehicle; seq++ {
 		if req.Realtime && req.Operation != "preview" {
-			if err := sleepReporting(ctx, started.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func() { report(&out, false) }); err != nil {
+			if err := waitSchedule(ctx, started.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func(force bool) { report(&out, force) }); err != nil {
 				out.State = "stopped"
 				report(&out, true)
 				return out, nil
 			}
 		}
 		for i, a := range allocations {
-			if ctx.Err() != nil {
+			if err := control.gate(ctx, func(force bool) { report(&out, force) }); err != nil {
 				out.State = "stopped"
 				report(&out, true)
 				return out, nil
 			}
 			sample := sampleAt(req, i, seq, a, "sim")
 			if req.Realtime {
-				out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(started).Milliseconds()-offsetMS(req, seq))
+				out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(started).Milliseconds()-pauseMilliseconds(control)-offsetMS(req, seq))
 			}
 			if err := recordSample(&out, req, sample, i, seq); err != nil {
 				return Result{}, err
@@ -205,6 +210,8 @@ func main() {
 	}
 	managed := os.Getenv("DANGUBI_MANAGED") == "1"
 	ctx, cancel := context.WithCancel(context.Background())
+	control := newExecutionControl()
+	ctx = context.WithValue(ctx, controlKey{}, control)
 	defer cancel()
 	var progress func(Result)
 	if managed {
@@ -219,6 +226,12 @@ func main() {
 				if err := dec.Decode(&command); err != nil {
 					cancel()
 					return
+				}
+				if command.Command == "pause" {
+					control.request(true)
+				}
+				if command.Command == "resume" {
+					control.request(false)
 				}
 				if command.Command == "stop" {
 					cancel()

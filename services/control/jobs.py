@@ -11,7 +11,7 @@ from typing import Callable
 
 from fastapi import HTTPException
 
-ACTIVE = {"starting", "running", "stopping"}
+ACTIVE = {"starting", "running", "pausing", "paused", "resuming", "stopping"}
 
 
 @dataclass
@@ -21,6 +21,8 @@ class Job:
     mqtt: bool
     process: subprocess.Popen | None = None
     stop_requested: bool = False
+    pause_requested: bool = False
+    wall_limit_seconds: float = 0
     timed_out: bool = False
     forced: bool = False
     thread: threading.Thread | None = None
@@ -70,7 +72,8 @@ class JobManager:
                 raise HTTPException(409, detail="실행이 진행 중이거나 종료 중입니다. 완료 후 새 실행을 시작하세요.")
             if mqtt and not self.mqtt_lock.acquire(blocking=False):
                 raise HTTPException(409, detail="다른 MQTT 실행이 진행 중입니다.")
-            job = Job(run_id, result, mqtt)
+            job = Job(run_id, result, mqtt, wall_limit_seconds=data.get("mqtt", {}).get("max_duration_seconds", timeout))
+            result["wall_limit_seconds"] = job.wall_limit_seconds
             try:
                 with self.database() as db:
                     db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(request), json.dumps(result)))
@@ -90,13 +93,28 @@ class JobManager:
                 job.forced = True
                 job.process.kill()
 
-    def signal_stop(self, job):
+    def send_command(self, job, command):
         if job.process and job.process.poll() is None:
             try:
-                job.process.stdin.write('{"command":"stop"}\n')
+                job.process.stdin.write(json.dumps({"command": command}) + "\n")
                 job.process.stdin.flush()
             except (OSError, ValueError):
                 pass
+
+    def signal_stop(self, job):
+        self.send_command(job, "stop")
+
+    def pause(self, run_id, pause):
+        with self.lock:
+            job = self.active
+            if not job or job.id != run_id or job.stop_requested or job.result.get("job_state") not in ACTIVE:
+                raise HTTPException(409, detail="진행 중인 실행에서만 일시중지·재개할 수 있습니다.")
+            if job.pause_requested == pause:
+                return
+            job.pause_requested = pause
+            job.result["job_state"] = "pausing" if pause else "resuming"
+            self.send_command(job, "pause" if pause else "resume")
+            self.save(job)
 
     def request_stop(self, job, timed_out=False):
         with self.lock:
@@ -134,6 +152,8 @@ class JobManager:
                 job.process = process
                 if job.stop_requested:
                     self.signal_stop(job)
+                elif job.pause_requested:
+                    self.send_command(job, "pause")
             deadline.start()
             while line := process.stdout.readline(1048577):
                 if len(line) > 1048576:
@@ -148,14 +168,16 @@ class JobManager:
                 if event["kind"] != "progress":
                     raise ValueError("Worker 응답 형식 오류")
                 with self.lock:
-                    job.result = {**result, "job_state": "stopping" if job.stop_requested else "running", "connection_cleanup_confirmed": False}
+                    paused = result.get("execution_state") == "paused"
+                    state = "paused" if paused and job.pause_requested else "pausing" if job.pause_requested else "resuming" if paused else "running"
+                    job.result = {**result, "job_state": "stopping" if job.stop_requested else state, "connection_cleanup_confirmed": False, "wall_limit_seconds": job.wall_limit_seconds}
                     self.save(job)
             process.wait(timeout=3)
             if final is None or process.returncode:
                 raise ValueError("Worker 최종 응답을 확인하지 못했습니다.")
             with self.lock:
                 state = "stopped" if final["state"] == "stopped" else "failed" if final["state"] == "mqtt_failed" else "completed"
-                job.result = {**final, "job_state": state, "connection_cleanup_confirmed": final.get("active_clients") == 0}
+                job.result = {**final, "job_state": state, "connection_cleanup_confirmed": final.get("active_clients") == 0, "wall_limit_seconds": job.wall_limit_seconds}
                 if job.timed_out:
                     job.result.update(job_state="failed", errors=["실행 제한시간을 초과해 중단했습니다."])
         except Exception:

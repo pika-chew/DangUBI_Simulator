@@ -296,6 +296,16 @@ def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path):
         running = wait_job(client, run_id, lambda r: r["puback_count"] > 0)
         assert running["result"]["active_clients"] == 2
         assert control.MQTT_LOCK.locked()
+        assert client.post("/api/jobs/" + run_id + "/pause").status_code == 202
+        paused = wait_job(client, run_id, lambda r: r["job_state"] == "paused")
+        count = paused["result"]["puback_count"]
+        time.sleep(0.4)
+        frozen = client.get("/api/jobs/" + run_id).json()["result"]
+        assert frozen["puback_count"] == count
+        assert frozen["active_clients"] == 2
+        assert control.MQTT_LOCK.locked()
+        assert client.post("/api/jobs/" + run_id + "/resume").status_code == 202
+        wait_job(client, run_id, lambda r: r["job_state"] == "running")
         assert client.post("/api/runs", json=body).status_code == 409
         client.post("/api/jobs/" + run_id + "/stop")
         stopped = wait_job(client, run_id, lambda r: r["job_state"] == "stopped")
@@ -314,3 +324,46 @@ def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path):
             broker.kill()
             output, _ = broker.communicate()
         assert broker.returncode == 0, output.decode(errors="replace")
+
+
+def test_pause_resume_preserves_counters_and_timing(client):
+    import time
+    body = request()
+    body["realtime"] = True
+    body["config"].update(messages_per_vehicle=4, interval_ms=300)
+    started = client.post("/api/jobs", json=body).json()
+    run_id = started["id"]
+    wait_job(client, run_id, lambda r: r["processed_messages"] > 0)
+    assert client.post("/api/jobs/" + run_id + "/pause").status_code == 202
+    paused = wait_job(client, run_id, lambda r: r["job_state"] == "paused")
+    assert client.post("/api/jobs/" + run_id + "/pause").status_code == 202
+    time.sleep(0.5)
+    again = client.get("/api/jobs/" + run_id).json()
+    assert again["result"]["processed_messages"] == paused["result"]["processed_messages"]
+    assert again["result"]["simulation_time_ms"] == paused["result"]["simulation_time_ms"]
+    assert again["result"]["paused_ms"] > paused["result"]["paused_ms"]
+    assert client.post("/api/jobs", json=body).status_code == 409
+    assert client.post("/api/jobs/" + run_id + "/resume").status_code == 202
+    assert client.post("/api/jobs/" + run_id + "/resume").status_code == 202
+    completed = wait_job(client, run_id, lambda r: r["job_state"] == "completed")
+    assert completed["result"]["processed_messages"] == 12
+    assert completed["result"]["paused_ms"] >= 450
+    assert completed["result"]["simulation_time_ms"] == 900
+    assert completed["result"]["assignments"] == paused["result"]["assignments"]
+    assert client.post("/api/jobs/" + run_id + "/pause").status_code == 409
+
+
+def test_stop_and_shutdown_while_paused(tmp_path, monkeypatch):
+    monkeypatch.setattr(control, "DB", tmp_path / "paused-shutdown.sqlite3")
+    with TestClient(control.app) as c:
+        body = automatic_request()
+        body["realtime"] = True
+        run_id = c.post("/api/jobs", json=body).json()["id"]
+        c.post("/api/jobs/" + run_id + "/pause")
+        wait_job(c, run_id, lambda r: r["job_state"] == "paused")
+    with control.database() as db:
+        import json
+        result = json.loads(db.execute("SELECT result FROM runs WHERE id=?", (run_id,)).fetchone()[0])
+    assert result["job_state"] == "stopped"
+    assert not result["forced_termination"]
+    assert result["connection_cleanup_confirmed"]
