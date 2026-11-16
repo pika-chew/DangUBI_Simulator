@@ -58,6 +58,7 @@ def build():
     LOCAL.mkdir(exist_ok=True)
     env = os.environ.copy()
     env["GOCACHE"] = str(LOCAL / "go-cache")
+    env["GOMODCACHE"] = str(LOCAL / "go-mod")
     run(["go", "build", "-o", WORKER, "."], cwd=ROOT / "services/worker", env=env)
     run(npm_args() + ["run", "build"], cwd=ROOT / "apps/web")
 
@@ -73,6 +74,7 @@ def main():
     elif args.action == "test":
         env = os.environ.copy()
         env["GOCACHE"] = str(LOCAL / "go-cache")
+        env["GOMODCACHE"] = str(LOCAL / "go-mod")
         run(["go", "test", "./..."], cwd=ROOT / "services/worker", env=env)
         run([PYTHON, "-m", "pytest", "services/control/test_app.py", "-q"])
     else:

@@ -12,7 +12,7 @@ def allowed(name: str) -> bool:
     path = PurePosixPath(name)
     if set(path.parts) & FORBIDDEN_PARTS or path.name == "AGENTS.md":
         return False
-    if path.suffix.lower() in {".pem", ".key", ".crt", ".pfx", ".p12", ".sqlite3", ".png"}:
+    if path.suffix.lower() in {".pem", ".key", ".crt", ".pfx", ".p12", ".sqlite3"}:
         return False
     if path.name.startswith(".env") and path.name != ".env.example":
         return False

@@ -40,6 +40,12 @@ type Sample = Assignment & {
 };
 type Result = {
   run_id: string;
+  transport?: string;
+  errors?: string[];
+  publish_attempts?: number;
+  unconfirmed_messages?: number;
+  reconnect_count?: number;
+  active_clients?: number;
   state: string;
   allocated_clients: number;
   assignment_count: number;
@@ -74,6 +80,9 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
   return data;
 }
 function App() {
+  const [transport, setTransport] = useState<"dry_run" | "mqtt">("dry_run");
+  const [mqttReady, setMqttReady] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const [catalog, setCatalog] = useState<Catalog | null>(null),
     [ty, setTy] = useState("4"),
     [raw, setRaw] = useState("");
@@ -94,13 +103,14 @@ function App() {
   useEffect(() => {
     Promise.all([
       api<Catalog>("/api/schema"),
-      api<{ worker_ready: boolean }>("/api/health"),
+      api<{ worker_ready: boolean; mqtt_ready: boolean }>("/api/health"),
       api<SavedRun[]>("/api/runs"),
     ])
       .then(([c, h, r]) => {
         setCatalog(c);
         setRaw(JSON.stringify(c.profiles["4"].example, null, 2));
         setHistory(r);
+        setMqttReady(h.mqtt_ready);
         setHealth(h.worker_ready ? "Worker 준비 완료" : "Worker 준비 필요");
       })
       .catch((e) => setError(String(e.message)));
@@ -144,7 +154,8 @@ function App() {
       const payload = {
         config,
         message: JSON.parse(raw),
-        transport: "dry_run",
+        transport,
+        confirm_mqtt: confirmed,
       };
       if (preview) {
         const data = await api<{ plan: Result }>("/api/preview", payload);
@@ -183,10 +194,15 @@ function App() {
       </header>
       <main>
         <div className="banner">
-          <b>송신 없는 확인 모드</b>
+          <b>
+            {transport === "dry_run"
+              ? "송신 없는 확인 모드"
+              : "실제 MQTT 송신 모드"}
+          </b>
           <span>
-            AWS 연결·MQTT 발행은 하지 않습니다. 생성 주기는 가상시간에만
-            적용되며 데이터 값은 수동 입력값을 사용합니다.
+            {transport === "dry_run"
+              ? "접속·발행하지 않고 입력과 배정만 확인합니다. 생성 주기는 가상시간에만 적용됩니다."
+              : "서버에 설정된 TLS 접속 정보로 실제 발행합니다. QoS 1 PUBACK는 브로커 수신 확인이며 후속 저장 완료를 의미하지 않습니다."}
           </span>
         </div>
         <nav aria-label="데이터 흐름">
@@ -198,7 +214,9 @@ function App() {
           <i>→</i>
           <span>Go Worker</span>
           <i>→</i>
-          <span className="offline">IoT Core · 미연결</span>
+          <span className="offline">
+            {mqttReady ? "MQTT · 서버 설정 준비" : "IoT Core · 설정 필요"}
+          </span>
         </nav>
         {error && (
           <div role="alert" className="error">
@@ -220,6 +238,32 @@ function App() {
                 </p>
                 <fieldset disabled={busy}>
                   <div className="fields">
+                    <label>
+                      전송 방식
+                      <select
+                        value={transport}
+                        onChange={(e) => {
+                          setTransport(e.target.value as "dry_run" | "mqtt");
+                          setConfirmed(false);
+                        }}
+                      >
+                        <option value="dry_run">송신 없는 확인</option>
+                        <option value="mqtt" disabled={!mqttReady}>
+                          실제 MQTT 송신{!mqttReady ? " · 서버 설정 필요" : ""}
+                        </option>
+                      </select>
+                    </label>
+                    {transport === "mqtt" && (
+                      <label className="include">
+                        <input
+                          type="checkbox"
+                          checked={confirmed}
+                          onChange={(e) => setConfirmed(e.target.checked)}
+                        />
+                        실제 연결·발행을 확인했습니다
+                      </label>
+                    )}
+
                     <label>
                       차량 수
                       <input
@@ -301,8 +345,9 @@ function App() {
                     ).toLocaleString()}
                     건
                   </b>{" "}
-                  · 한 실행 최대 10,000건. 유지 정책은 기록만 하며 접속·해제
-                  동작은 아직 재현하지 않습니다.
+                  · 송신 없는 확인은 최대 10,000건. 실제 송신은 서버 상한을
+                  적용하며 설정한 주기·속도로 제한합니다. 운행 중 유지는 첫
+                  메시지에 접속하고 마지막 메시지 응답 후 해제합니다.
                 </div>
               </section>
               <section className="card">
@@ -419,10 +464,14 @@ function App() {
                   </button>
                   <button
                     className="primary"
-                    disabled={busy}
+                    disabled={busy || (transport === "mqtt" && !confirmed)}
                     onClick={() => execute(false)}
                   >
-                    {busy ? "처리 중…" : "Worker 생성 확인"}
+                    {busy
+                      ? "처리 중…"
+                      : transport === "mqtt"
+                        ? "MQTT 연결·발행"
+                        : "Worker 생성 확인"}
                   </button>
                 </div>
                 <p className="note">
@@ -448,7 +497,18 @@ function App() {
                   </p>
                 ) : (
                   <>
-                    <span className="tag">송신 없는 생성 확인 완료</span>
+                    <span className="tag">
+                      {run.result.state === "mqtt_completed"
+                        ? "MQTT 송신 완료"
+                        : run.result.state === "mqtt_failed"
+                          ? "MQTT 송신 실패·부분 완료"
+                          : "송신 없는 생성 확인 완료"}
+                    </span>
+                    {!!run.result.errors?.length && (
+                      <div className="error" role="alert">
+                        {run.result.errors.join("\n")}
+                      </div>
+                    )}
                     <p className="note">
                       실행 ID <code>{run.id}</code>
                       <br />
@@ -459,7 +519,26 @@ function App() {
                       {[
                         ["생성 확인", run.result.processed_messages + "건"],
                         ["배정 Client", run.result.allocated_clients + "개"],
-                        ["실제 연결", run.result.connected_clients + "개"],
+                        [
+                          "접속 확인 Client",
+                          run.result.connected_clients + "개",
+                        ],
+                        [
+                          "종료 후 연결",
+                          (run.result.active_clients || 0) + "개",
+                        ],
+                        [
+                          "발행 시도",
+                          (run.result.publish_attempts || 0) + "건",
+                        ],
+                        [
+                          "응답 미확인",
+                          (run.result.unconfirmed_messages || 0) + "건",
+                        ],
+                        [
+                          "재연결 시도",
+                          (run.result.reconnect_count || 0) + "회",
+                        ],
                         ["MQTT 발행", run.result.mqtt_published + "건"],
                         ["PUBACK", run.result.puback_count + "건"],
                         [

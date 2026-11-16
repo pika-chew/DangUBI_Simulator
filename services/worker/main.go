@@ -21,6 +21,7 @@ type Request struct {
 	RunID     string         `json:"run_id"`
 	Config    Config         `json:"config"`
 	Message   map[string]any `json:"message"`
+	MQTT      *MQTTProfile   `json:"mqtt,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
@@ -46,6 +47,11 @@ type Result struct {
 	Connected        int          `json:"connected_clients"`
 	Published        int          `json:"mqtt_published"`
 	Puback           int          `json:"puback_count"`
+	Attempted        int          `json:"publish_attempts"`
+	Unconfirmed      int          `json:"unconfirmed_messages"`
+	Reconnects       int          `json:"reconnect_count"`
+	ActiveClients    int          `json:"active_clients"`
+	Errors           []string     `json:"errors"`
 	Samples          []Sample     `json:"samples"`
 }
 
@@ -166,7 +172,13 @@ func main() {
 		fail("요청은 JSON 객체 하나여야 합니다.")
 		return
 	}
-	result, err := process(req)
+	var result Result
+	var err error
+	if req.Operation == "mqtt" {
+		result, err = runMQTT(req)
+	} else {
+		result, err = process(req)
+	}
 	if err != nil {
 		fail(err.Error())
 		return

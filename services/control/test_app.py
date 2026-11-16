@@ -21,7 +21,7 @@ def client(tmp_path, monkeypatch):
 
 
 def request(mode="shared", clients=2, ty="4"):
-    return {"config": {"vehicle_count": 3, "mapping_mode": mode, "client_count": clients, "messages_per_vehicle": 2, "interval_ms": 2000, "connection_lifetime": "always"}, "message": copy.deepcopy(control.CATALOG["profiles"][ty]["example"]), "transport": "dry_run"}
+    return {"config": {"vehicle_count": 3, "mapping_mode": mode, "client_count": clients, "messages_per_vehicle": 2, "interval_ms": 2000, "connection_lifetime": "always"}, "message": copy.deepcopy(control.CATALOG["profiles"][ty]["example"]), "transport": "dry_run", "confirm_mqtt": False}
 
 
 def test_schemas_and_examples():
@@ -59,7 +59,7 @@ def test_two_modes_same_message_count_and_trip(client):
     lambda x: x["message"]["pld"].pop("clt"),
     lambda x: x["message"]["pld"].update(lat=100),
     lambda x: x["message"]["pld"].update(sp="30"),
-    lambda x: x.update(transport="mqtt"),
+    lambda x: x.update(transport="unknown"),
     lambda x: x["config"].update(mapping_mode="dedicated"),
     lambda x: x["config"].update(messages_per_vehicle=10000),
     lambda x: x["config"].update(vehicle_count=True),
@@ -69,3 +69,29 @@ def test_invalid_never_stored(client, mutate):
     mutate(body)
     assert client.post("/api/runs", json=body).status_code == 422
     assert client.get("/api/runs").json() == []
+
+
+def test_mqtt_requires_server_and_user_confirmation(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(control, "MQTT_PROFILE", tmp_path / "missing.json")
+    body = request()
+    body["transport"] = "mqtt"
+    assert client.post("/api/runs", json=body).status_code == 409
+    body["confirm_mqtt"] = True
+    assert client.post("/api/runs", json=body).status_code == 409
+    assert client.get("/api/health").json()["mqtt_ready"] is False
+    assert client.get("/api/runs").json() == []
+
+
+def test_profile_never_saved_and_cap(client, monkeypatch, tmp_path):
+    import json
+    profile = json.loads((control.ROOT / "configs/mqtt.example.json").read_text())
+    profile.update(enabled=True, contract_reviewed=True, max_messages=1)
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    monkeypatch.setattr(control, "MQTT_PROFILE", path)
+    body = request()
+    body.update(transport="mqtt", confirm_mqtt=True)
+    assert client.post("/api/runs", json=body).status_code == 422
+    health = client.get("/api/health").json()
+    assert health["mqtt_ready"] is True
+    assert "ca_file" not in json.dumps(health)

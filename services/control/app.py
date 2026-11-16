@@ -1,10 +1,11 @@
-"""로컬 첫 실행본: API → Go Worker, 실제 MQTT 송신 없음."""
+"""로컬 제어 API: 기본 dry_run, 서버 프로필과 확인을 거친 소량 MQTT 시험."""
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -21,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CATALOG = json.loads((ROOT / "contracts/obd-development.json").read_text(encoding="utf-8"))
 WORKER = ROOT / ".local" / ("worker.exe" if os.name == "nt" else "worker")
 DB = Path(os.environ.get("DANGUBI_DB", str(ROOT / ".local/runs.sqlite3")))
+MQTT_PROFILE = Path(os.environ.get("DANGUBI_MQTT_PROFILE", str(ROOT / ".local/mqtt.json")))
+MQTT_LOCK = threading.Lock()
 app = FastAPI(title="DangUBI 로컬 제어 API", version="0.1.0")
 
 
@@ -48,7 +51,39 @@ class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     config: ConnectionConfig
     message: dict[str, Any]
-    transport: Literal["dry_run"] = "dry_run"
+    transport: Literal["dry_run", "mqtt"] = "dry_run"
+    confirm_mqtt: bool = False
+
+
+class MQTTProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    enabled: bool = False
+    contract_reviewed: bool = False
+    broker_url: str
+    ca_file: str
+    cert_file: str
+    key_file: str
+    topic_prefix: str = "sim"
+    max_clients: int = Field(default=5, ge=1, le=20)
+    max_messages: int = Field(default=20, ge=1, le=100)
+    max_duration_seconds: int = Field(default=30, ge=1, le=30)
+    connect_per_second: int = Field(default=2, ge=1, le=5)
+    publish_per_second: int = Field(default=10, ge=1, le=70)
+    timeout_ms: int = Field(default=3000, ge=100, le=5000)
+    reconnect_attempts: int = Field(default=2, ge=0, le=3)
+
+
+def mqtt_profile():
+    try:
+        profile = MQTTProfile.model_validate_json(MQTT_PROFILE.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        raise HTTPException(409, detail="서버 MQTT 설정이 준비되지 않았습니다. 제품 사용 안내를 확인하세요.")
+    if not profile.enabled or not profile.contract_reviewed:
+        raise HTTPException(409, detail="서버 MQTT 활성화와 수신 규격·시험 토픽 확인이 필요합니다.")
+    result = profile.model_dump()
+    for key in ("ca_file", "cert_file", "key_file"):
+        result[key] = str((ROOT / result[key]).resolve())
+    return result
 
 
 @app.exception_handler(RequestValidationError)
@@ -77,8 +112,17 @@ def call_worker(body: RunRequest, operation: str, run_id: str):
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker가 준비되지 않았습니다. 로컬 준비 작업을 실행하세요.")
     data = {"operation": operation, "run_id": run_id, "config": body.config.model_dump(), "message": body.message}
+    timeout = 30
+    if operation == "mqtt":
+        if not body.confirm_mqtt:
+            raise HTTPException(409, detail="실제 MQTT 송신 확인을 선택하세요.")
+        profile = mqtt_profile()
+        if body.config.client_count > profile["max_clients"] or body.config.vehicle_count * body.config.messages_per_vehicle > profile["max_messages"]:
+            raise HTTPException(422, detail="서버의 실제 송신 Client 수 또는 메시지 상한을 초과했습니다.")
+        data["mqtt"] = profile
+        timeout = profile["max_duration_seconds"] + 15
     try:
-        process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         result = json.loads(process.stdout)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         raise HTTPException(502, detail="Worker 응답을 확인하지 못했습니다.")
@@ -96,7 +140,14 @@ def database():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ready", "worker_ready": WORKER.is_file(), "transport": "dry_run", "aws_connected": False}
+    try:
+        profile = mqtt_profile()
+        mqtt_ready = True
+        limits = {k: profile[k] for k in ("max_clients", "max_messages", "max_duration_seconds")}
+    except HTTPException:
+        mqtt_ready = False
+        limits = None
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "aws_connected": False}
 
 
 @app.get("/api/schema")
@@ -112,7 +163,16 @@ def preview(body: RunRequest):
 @app.post("/api/runs", status_code=201)
 def create_run(body: RunRequest):
     run_id = uuid4().hex
-    result = call_worker(body, "dry_run", run_id)
+    locked = False
+    try:
+        if body.transport == "mqtt":
+            locked = MQTT_LOCK.acquire(blocking=False)
+            if not locked:
+                raise HTTPException(409, detail="다른 MQTT 실행이 진행 중입니다. 완료 후 다시 실행하세요.")
+        result = call_worker(body, body.transport, run_id)
+    finally:
+        if locked:
+            MQTT_LOCK.release()
     created = datetime.now(timezone.utc).isoformat()
     with database() as db:
         db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(body.model_dump()), json.dumps(result)))
