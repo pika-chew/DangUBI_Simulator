@@ -31,3 +31,11 @@ certs/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+
+# 로컬 대화 작업 기록·검토 자료·보조 도구 (제품 사용 안내만 공개)
+/AGENTS.md
+/docs/*
+!/docs/USAGE.md
+/tools/
+/.agents/
+/.codex/

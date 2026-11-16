@@ -1,7 +1,0 @@
-### 터미널에서 python -m http.server 8765 --bind 127.0.0.1 --directory tools/cost-calculator 실행 후 사용
-### 계산 화면
-GET http://127.0.0.1:8765/cost-calculator.html
-
-### 서울 단가 및 시나리오 JSON
-GET http://127.0.0.1:8765/seoul-cost-config.json
-Accept: application/json
