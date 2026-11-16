@@ -1,6 +1,7 @@
 # 프로젝트 작업 규칙
 
 - 사용자 응답, 문서, 작업 보고는 한국어로 작성한다. 기술 식별자는 원문을 유지한다.
+- Git 커밋 메시지는 영어로 작성하고 Conventional Commits 형식의 작업 유형 접두어를 사용한다. 예: feat: add manual OBD preview, fix: correct client assignment, docs: update implementation status. 작업에 따라 feat, fix, docs, test, refactor, chore, build, ci 등을 선택한다. 사용자에게 보내는 설명과 프로젝트 문서는 계속 한국어로 작성한다.
 - 작업 시작 시 목적, 범위, 예상 산출물과 기대 결과를 사용자에게 설명한다.
 - 먼저 docs/STATUS.md, docs/DECISIONS.md, docs/DESIGN.md와 현재 변경사항을 확인한다.
 - 코드 스택과 연결 풀은 사용자 확정이며 개발 기반 구성을 시작했다. AWS 운영 환경은 추후 선택한다. 미확정 수신 규격을 호환성 확정으로 취급하지 않으며 실제 AWS 전송·부하 실행 전 관련 설정을 확인한다.

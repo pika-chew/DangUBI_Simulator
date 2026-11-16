@@ -35,6 +35,8 @@
 
 ## 이번 산출물과 확인
 
+- 커밋 메시지 규칙 반영: 영어 설명과 작업 유형 접두어를 사용하는 형식을 AGENTS·DECISIONS에 기록했다. 코드 변경은 없으며 기존 커밋 이력은 유지한다.
+
 - 이번 구현 산출물: apps/web React 화면·package-lock, services/control FastAPI·requirements.lock·통합 테스트, services/worker Go 엔진·테스트, contracts/obd-development.json, scripts/dev.py와 VS Code 작업. .local에 실행 기록·빌드 결과를 격리했다. 실제 연결·발행·PUBACK 0을 화면에서 구분하며 연결 유지 정책은 현재 기록만 한다.
 
 - 사용자 확정 사항을 작업 규칙에도 반영하고 DATA_FLOW.md를 가로 방향(LR)으로 정리했다. 연결 설정 고정과 허용된 실행 중 설정 변경의 경계를 DESIGN에 명시했다. 문서 간 범위를 대조했으며 이번 산출물은 설계 흐름도다. 본체 구현·AWS 전송은 수행하지 않았다.
