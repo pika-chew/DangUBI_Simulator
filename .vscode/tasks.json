@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "프로젝트: 개발 환경 확인",
+      "type": "process",
+      "command": "python",
+      "args": ["${workspaceFolder}/scripts/check_environment.py"],
+      "problemMatcher": []
+    },
+    {
+      "label": "프로젝트: 변경사항 확인",
+      "type": "process",
+      "command": "git",
+      "args": ["status", "--short"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}
