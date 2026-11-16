@@ -114,6 +114,11 @@ func sleepUntil(ctx context.Context, target time.Time) error {
 }
 
 func runMQTT(req Request) (Result, error) {
+	var err error
+	req, err = normalize(req)
+	if err != nil {
+		return Result{}, err
+	}
 	profile := req.MQTT
 	if err := profile.validate(); err != nil {
 		return Result{}, err
@@ -140,8 +145,10 @@ func runMQTT(req Request) (Result, error) {
 	out.Puback = 0
 	out.Attempted = 0
 	out.Errors = []string{}
-	for i := range out.Samples {
-		out.Samples[i].Topic = fmt.Sprintf("%s/%s/%s/obd", profile.TopicPrefix, req.RunID, out.Samples[i].VehicleID)
+	for _, samples := range [][]Sample{out.Samples, out.TripSummaries} {
+		for i := range samples {
+			samples[i].Topic = fmt.Sprintf("%s/%s/%s/obd", profile.TopicPrefix, req.RunID, samples[i].VehicleID)
+		}
 	}
 	clients := map[string]mqtt.Client{}
 	seen := map[string]bool{}
@@ -206,7 +213,7 @@ func runMQTT(req Request) (Result, error) {
 	}
 	started := time.Now()
 	for seq := 0; seq < req.Config.MessagesPerVehicle; seq++ {
-		if err := sleepUntil(ctx, started.Add(time.Duration(seq)*time.Duration(req.Config.IntervalMS)*time.Millisecond)); err != nil {
+		if err := sleepUntil(ctx, started.Add(time.Duration(offsetMS(req, seq))*time.Millisecond)); err != nil {
 			fail("시험 제한시간을 초과했습니다.")
 			return finish(), nil
 		}
@@ -222,25 +229,9 @@ func runMQTT(req Request) (Result, error) {
 				fail("시험 제한시간을 초과했습니다.")
 				return finish(), nil
 			}
-			raw, _ := json.Marshal(req.Message)
-			var message map[string]any
-			json.Unmarshal(raw, &message)
-			payload := message["pld"].(map[string]any)
-			base := req.Message["pld"].(map[string]any)
-			delta := float64(int64(seq) * req.Config.IntervalMS)
-			message["ts"] = req.Message["ts"].(float64) + delta
-			payload["tid"] = base["tid"].(float64) + float64(i)
-			if message["ty"].(float64) == 4 {
-				payload["clt"] = base["clt"].(float64) + delta
-			} else {
-				for _, key := range []string{"stt", "edt"} {
-					if v, ok := base[key].(float64); ok {
-						payload[key] = v + delta
-					}
-				}
-			}
-			encoded, _ := json.Marshal(message)
-			topic := fmt.Sprintf("%s/%s/%s/obd", profile.TopicPrefix, req.RunID, a.VehicleID)
+			sample := sampleAt(req, i, seq, a, profile.TopicPrefix)
+			encoded, _ := json.Marshal(sample.Message)
+			topic := sample.Topic
 			out.Attempted++
 			if err := waitToken(ctx, client.Publish(topic, 1, false, encoded), timeout); err != nil {
 				out.Unconfirmed++

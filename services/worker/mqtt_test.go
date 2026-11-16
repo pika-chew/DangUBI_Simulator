@@ -26,6 +26,7 @@ type testBroker struct {
 	sockets   []net.Conn
 	ids       map[string]bool
 	published int
+	messages  []map[string]any
 	noAck     bool
 	closeOnce bool
 	closed    bool
@@ -111,6 +112,10 @@ func (b *testBroker) handle(conn net.Conn) {
 		case *packets.PublishPacket:
 			b.mu.Lock()
 			b.published++
+			var message map[string]any
+			if json.Unmarshal(p.Payload, &message) == nil {
+				b.messages = append(b.messages, message)
+			}
 			closeNow := b.closeOnce
 			b.closeOnce = false
 			b.mu.Unlock()
@@ -155,6 +160,38 @@ func TestMQTTTLSModes(t *testing.T) {
 				t.Fatal("브로커 관측 수량 불일치")
 			}
 		})
+	}
+}
+
+func TestAutomaticMQTTIncludesFinalTrip(t *testing.T) {
+	broker, profile := localBroker(t, false, false)
+	profile.MaxMessages = 100
+	profile.MaxDurationSeconds = 15
+	req := automaticRequest()
+	req.Operation = "mqtt"
+	req.MQTT = profile
+	req.Config.VehicleCount = 2
+	req.Config.ClientCount = 1
+	req.Config.IntervalMS = 1000
+	req.Config.Lifetime = "while_driving"
+	req.Generation.DurationSeconds = 10
+	out, err := runMQTT(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Puback != 24 || out.State != "mqtt_completed" || out.Connected != 1 || out.TripCount != 2 {
+		t.Fatalf("자동 MQTT 전송 실패: %+v", out)
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if len(broker.messages) != 24 {
+		t.Fatal("실제 발행 건수 불일치")
+	}
+	for i := 22; i < 24; i++ {
+		m := broker.messages[i]
+		if m["ty"] != float64(3) || m["ts"] != float64(req.Generation.StartTimeMS+10000) {
+			t.Fatal("마지막 Trip 또는 운행 종료 시각 누락")
+		}
 	}
 }
 func TestMQTTUnconfirmedAndLimits(t *testing.T) {

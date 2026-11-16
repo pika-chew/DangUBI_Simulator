@@ -288,6 +288,19 @@ code {
   max-height: 300px;
   overflow: auto;
 }
+.drive-chart {
+  display: block;
+  width: 100%;
+  background: #f5faf9;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+.drive-chart text {
+  font:
+    13px system-ui,
+    sans-serif;
+  fill: #4d6576;
+}
 table {
   width: 100%;
   border-collapse: collapse;

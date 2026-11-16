@@ -17,22 +17,24 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
-	Operation string         `json:"operation"`
-	RunID     string         `json:"run_id"`
-	Config    Config         `json:"config"`
-	Message   map[string]any `json:"message"`
-	MQTT      *MQTTProfile   `json:"mqtt,omitempty"`
+	Operation  string         `json:"operation"`
+	RunID      string         `json:"run_id"`
+	Config     Config         `json:"config"`
+	Message    map[string]any `json:"message"`
+	MQTT       *MQTTProfile   `json:"mqtt,omitempty"`
+	Generation *Generation    `json:"generation,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
 	ClientID  string `json:"client_id"`
 }
 type Sample struct {
-	VehicleID string         `json:"vehicle_id"`
-	ClientID  string         `json:"client_id"`
-	Topic     string         `json:"topic"`
-	Sequence  int            `json:"sequence"`
-	Message   map[string]any `json:"message"`
+	VehicleID    string         `json:"vehicle_id"`
+	ClientID     string         `json:"client_id"`
+	Topic        string         `json:"topic"`
+	Sequence     int            `json:"sequence"`
+	Message      map[string]any `json:"message"`
+	VehicleState string         `json:"vehicle_state,omitempty"`
 }
 type Result struct {
 	RunID            string       `json:"run_id"`
@@ -53,9 +55,19 @@ type Result struct {
 	ActiveClients    int          `json:"active_clients"`
 	Errors           []string     `json:"errors"`
 	Samples          []Sample     `json:"samples"`
+	TripSummaries    []Sample     `json:"trip_summaries,omitempty"`
+	Trace            []TracePoint `json:"trace,omitempty"`
+	ModelVersion     string       `json:"model_version,omitempty"`
+	MicrotripCount   int          `json:"microtrip_count"`
+	TripCount        int          `json:"trip_count"`
 }
 
 func process(req Request) (Result, error) {
+	var err error
+	req, err = normalize(req)
+	if err != nil {
+		return Result{}, err
+	}
 	c := req.Config
 	if c.VehicleCount < 1 || c.VehicleCount > 10000 || c.MessagesPerVehicle < 1 || c.VehicleCount*c.MessagesPerVehicle > 10000 || c.IntervalMS < 1 || c.IntervalMS > 86400000 {
 		return Result{}, errors.New("차량 수·생성 건수·주기를 확인하세요. 한 실행은 최대 10,000건입니다.")
@@ -87,24 +99,26 @@ func process(req Request) (Result, error) {
 	default:
 		return Result{}, errors.New("배정 방식을 확인하세요.")
 	}
-	pld, ok := req.Message["pld"].(map[string]any)
-	if !ok {
-		return Result{}, errors.New("pld 객체가 필요합니다.")
-	}
-	ty, ok := req.Message["ty"].(float64)
-	if !ok || ty != 3 && ty != 4 {
-		return Result{}, errors.New("개발용 OBD 타입은 3 또는 4입니다.")
-	}
-	ts, ok := req.Message["ts"].(float64)
-	if !ok || ts < 0 || ts > 9000000000000000 {
-		return Result{}, errors.New("ts 시각을 확인하세요.")
-	}
-	if _, ok := pld["tid"].(float64); !ok {
-		return Result{}, errors.New("숫자 tid가 필요합니다.")
-	}
-	if ty == 4 {
-		if _, ok := pld["clt"].(float64); !ok {
-			return Result{}, errors.New("Microtrip에 clt가 필요합니다.")
+	if req.Generation == nil {
+		pld, ok := req.Message["pld"].(map[string]any)
+		if !ok {
+			return Result{}, errors.New("pld 객체가 필요합니다.")
+		}
+		ty, ok := req.Message["ty"].(float64)
+		if !ok || ty != 3 && ty != 4 {
+			return Result{}, errors.New("개발용 OBD 타입은 3 또는 4입니다.")
+		}
+		ts, ok := req.Message["ts"].(float64)
+		if !ok || ts < 0 || ts > 9000000000000000 {
+			return Result{}, errors.New("ts 시각을 확인하세요.")
+		}
+		if _, ok := pld["tid"].(float64); !ok {
+			return Result{}, errors.New("숫자 tid가 필요합니다.")
+		}
+		if ty == 4 {
+			if _, ok := pld["clt"].(float64); !ok {
+				return Result{}, errors.New("Microtrip에 clt가 필요합니다.")
+			}
 		}
 	}
 	allocations := make([]Assignment, c.VehicleCount)
@@ -117,32 +131,16 @@ func process(req Request) (Result, error) {
 		limit = 100
 	}
 	out := Result{RunID: req.RunID, Transport: "dry_run", State: "preview", AllocatedClients: clients, AssignmentCount: c.VehicleCount, Assignments: allocations[:limit], Planned: c.VehicleCount * c.MessagesPerVehicle, Samples: []Sample{}}
-	if req.Operation == "preview" {
+	if req.Operation == "preview" && req.Generation == nil {
 		return out, nil
 	}
-	// 단일 실행 안의 차량 배정은 변경하지 않는다. 여기서는 네트워크에 접속하지 않는다.
+	if req.Generation != nil {
+		out.ModelVersion = generatorVersion
+	}
 	for seq := 0; seq < c.MessagesPerVehicle; seq++ {
 		for i, a := range allocations {
-			raw, _ := json.Marshal(req.Message)
-			var msg map[string]any
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				return Result{}, err
-			}
-			payload := msg["pld"].(map[string]any)
-			delta := float64(int64(seq) * c.IntervalMS)
-			msg["ts"] = ts + delta
-			payload["tid"] = pld["tid"].(float64) + float64(i)
-			if ty == 4 {
-				payload["clt"] = pld["clt"].(float64) + delta
-			}
-			if ty == 3 {
-				for _, key := range []string{"stt", "edt"} {
-					if v, ok := pld[key].(float64); ok {
-						payload[key] = v + delta
-					}
-				}
-			}
-			encoded, err := json.Marshal(msg)
+			sample := sampleAt(req, i, seq, a, "sim")
+			encoded, err := json.Marshal(sample.Message)
 			if err != nil {
 				return Result{}, err
 			}
@@ -151,10 +149,27 @@ func process(req Request) (Result, error) {
 			}
 			out.Processed++
 			out.Bytes += len(encoded)
+			if sample.Message["ty"].(float64) == 3 {
+				out.TripCount++
+				if req.Generation != nil && len(out.TripSummaries) < 100 {
+					out.TripSummaries = append(out.TripSummaries, sample)
+				}
+			} else {
+				out.MicrotripCount++
+			}
 			if len(out.Samples) < 10 {
-				out.Samples = append(out.Samples, Sample{a.VehicleID, a.ClientID, fmt.Sprintf("sim/%s/%s/obd", req.RunID, a.VehicleID), seq + 1, msg})
+				out.Samples = append(out.Samples, sample)
+			}
+			if req.Generation != nil && i == 0 && seq < c.MessagesPerVehicle-1 && (seq%max(1, (c.MessagesPerVehicle-2+118)/119) == 0 || seq == c.MessagesPerVehicle-2) {
+				p := sample.Message["pld"].(map[string]any)
+				out.Trace = append(out.Trace, TracePoint{float64(offsetMS(req, seq)) / 1000, sample.VehicleState, p["sp"].(float64), p["rpm"].(float64), p["cdit"].(float64)})
 			}
 		}
+	}
+	if req.Operation == "preview" {
+		out.Processed = 0
+		out.Bytes = 0
+		return out, nil
 	}
 	out.State = "dry_run_completed"
 	return out, nil

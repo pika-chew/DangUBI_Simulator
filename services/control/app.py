@@ -38,8 +38,6 @@ class ConnectionConfig(BaseModel):
 
     @model_validator(mode="after")
     def bounded(self):
-        if self.vehicle_count * self.messages_per_vehicle > 10000:
-            raise ValueError("한 실행의 생성 확인은 최대 10,000건입니다.")
         if self.mapping_mode == "dedicated" and self.client_count != self.vehicle_count:
             raise ValueError("차량별 전체 연결은 차량 수와 Client 수가 같아야 합니다.")
         if self.mapping_mode == "shared" and self.client_count > self.vehicle_count:
@@ -47,12 +45,40 @@ class ConnectionConfig(BaseModel):
         return self
 
 
+class Generation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    profile: Literal["urban", "highway", "congested"]
+    seed: int = Field(ge=-2147483648, le=2147483647)
+    start_time_ms: int = Field(ge=0, le=4102444800000)
+    duration_seconds: int = Field(ge=10, le=3600)
+    start_lat: float = Field(ge=-85, le=85)
+    start_lon: float = Field(ge=-180, le=180)
+    initial_odometer_m: float = Field(ge=0, le=1e9)
+
+
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     config: ConnectionConfig
-    message: dict[str, Any]
+    message: dict[str, Any] | None = None
+    generation: Generation | None = None
     transport: Literal["dry_run", "mqtt"] = "dry_run"
     confirm_mqtt: bool = False
+
+    @model_validator(mode="after")
+    def generation_plan(self):
+        if self.generation:
+            if self.message is not None:
+                raise ValueError("자동 생성 설정과 수동 메시지는 동시에 사용할 수 없습니다.")
+            duration_ms = self.generation.duration_seconds * 1000
+            interval = self.config.interval_ms
+            if interval < 100 or interval > duration_ms // 10 or duration_ms % interval:
+                raise ValueError("생성 주기는 100ms 이상이고 운행시간을 나누어 떨어지게 하며 최소 10구간을 확보해야 합니다.")
+            self.config.messages_per_vehicle = duration_ms // interval + 2
+        elif self.message is None:
+            raise ValueError("수동 메시지 또는 자동 생성 설정이 필요합니다.")
+        if self.config.vehicle_count * self.config.messages_per_vehicle > 10000:
+            raise ValueError("한 실행은 Trip을 포함해 최대 10,000건입니다.")
+        return self
 
 
 class MQTTProfile(BaseModel):
@@ -108,15 +134,20 @@ def validate_message(message: dict[str, Any]):
 
 
 def call_worker(body: RunRequest, operation: str, run_id: str):
-    validate_message(body.message)
+    if body.message is not None:
+        validate_message(body.message)
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker가 준비되지 않았습니다. 로컬 준비 작업을 실행하세요.")
     data = {"operation": operation, "run_id": run_id, "config": body.config.model_dump(), "message": body.message}
+    if body.generation:
+        data["generation"] = body.generation.model_dump()
     timeout = 30
     if operation == "mqtt":
         if not body.confirm_mqtt:
             raise HTTPException(409, detail="실제 MQTT 송신 확인을 선택하세요.")
         profile = mqtt_profile()
+        if body.generation and body.generation.duration_seconds >= profile["max_duration_seconds"]:
+            raise HTTPException(422, detail="자동 운행시간은 실제 송신 전체 제한시간보다 짧아야 합니다. 접속·응답 시간도 필요합니다.")
         if body.config.client_count > profile["max_clients"] or body.config.vehicle_count * body.config.messages_per_vehicle > profile["max_messages"]:
             raise HTTPException(422, detail="서버의 실제 송신 Client 수 또는 메시지 상한을 초과했습니다.")
         data["mqtt"] = profile
@@ -175,8 +206,8 @@ def create_run(body: RunRequest):
             MQTT_LOCK.release()
     created = datetime.now(timezone.utc).isoformat()
     with database() as db:
-        db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(body.model_dump()), json.dumps(result)))
-    return {"id": run_id, "created_at": created, "request": body.model_dump(), "result": result}
+        db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(body.model_dump(exclude_none=True)), json.dumps(result)))
+    return {"id": run_id, "created_at": created, "request": body.model_dump(exclude_none=True), "result": result}
 
 
 @app.get("/api/runs")

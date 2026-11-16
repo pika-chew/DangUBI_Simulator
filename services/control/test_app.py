@@ -95,3 +95,49 @@ def test_profile_never_saved_and_cap(client, monkeypatch, tmp_path):
     health = client.get("/api/health").json()
     assert health["mqtt_ready"] is True
     assert "ca_file" not in json.dumps(health)
+
+
+def automatic_request():
+    body = request()
+    body.pop("message")
+    body["generation"] = {"profile": "urban", "seed": 42, "start_time_ms": 1794783600000, "duration_seconds": 60, "start_lat": 37.5, "start_lon": 127.0, "initial_odometer_m": 500000.0}
+    return body
+
+
+def test_automatic_generation_schema_replay_and_storage(client):
+    body = automatic_request()
+    preview = client.post("/api/preview", json=body)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["plan"]["planned_messages"] == 96
+    assert client.get("/api/runs").json() == []
+    response = client.post("/api/runs", json=body)
+    assert response.status_code == 201, response.text
+    run = response.json()
+    result = run["result"]
+    assert result["microtrip_count"] == 93 and result["trip_count"] == 3
+    assert run["request"]["config"]["messages_per_vehicle"] == 32
+    for sample in result["samples"] + result["trip_summaries"]:
+        control.validate_message(sample["message"])
+    assert client.get("/api/runs/" + run["id"]).json() == run
+    replay = client.post("/api/runs", json=body).json()["result"]
+    assert replay["trace"] == result["trace"]
+    assert [s["message"] for s in replay["trip_summaries"]] == [s["message"] for s in result["trip_summaries"]]
+    body["config"].update(mapping_mode="dedicated", client_count=3)
+    dedicated = client.post("/api/runs", json=body).json()["result"]
+    assert dedicated["trace"] == result["trace"]
+    assert dedicated["planned_messages"] == result["planned_messages"]
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda b: b["config"].update(interval_ms=700),
+    lambda b: b["config"].update(vehicle_count=10000),
+    lambda b: b["generation"].update(start_lat=90),
+    lambda b: b["generation"].update(duration_seconds=5),
+    lambda b: b["generation"].update(profile="unknown"),
+    lambda b: b.update(message=request()["message"]),
+])
+def test_invalid_automatic_not_stored(client, mutate):
+    body = automatic_request()
+    mutate(body)
+    assert client.post("/api/runs", json=body).status_code == 422
+    assert client.get("/api/runs").json() == []
