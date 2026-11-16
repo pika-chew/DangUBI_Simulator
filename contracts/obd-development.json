@@ -1,0 +1,370 @@
+{
+  "profile_version": "obd-development-0.1",
+  "status": "개발용 잠정 규격 · 수신 호환성 미확정",
+  "profiles": {
+    "4": {
+      "title": "OBD Microtrip",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ty",
+          "ts",
+          "pld"
+        ],
+        "properties": {
+          "ty": {
+            "const": 4,
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer",
+            "title": "메시지 시각 · UTC 밀리초",
+            "default": 1794783600000,
+            "minimum": 0,
+            "maximum": 9000000000000000
+          },
+          "pld": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tid",
+              "lat",
+              "lon",
+              "clt"
+            ],
+            "properties": {
+              "tid": {
+                "type": "integer",
+                "title": "운행 번호",
+                "default": 1,
+                "minimum": 0
+              },
+              "lat": {
+                "type": "number",
+                "title": "위도",
+                "default": 37.5,
+                "minimum": -90,
+                "maximum": 90
+              },
+              "lon": {
+                "type": "number",
+                "title": "경도",
+                "default": 127.0,
+                "minimum": -180,
+                "maximum": 180
+              },
+              "clt": {
+                "type": "integer",
+                "title": "수집 시각 · UTC 밀리초",
+                "default": 1794783600000,
+                "minimum": 0,
+                "maximum": 9000000000000000
+              },
+              "fc": {
+                "type": "number",
+                "title": "연료소모량 · 단위 미확정",
+                "default": 12,
+                "minimum": 0
+              },
+              "lc": {
+                "type": "number",
+                "title": "위치 정확도",
+                "default": 5,
+                "minimum": 0
+              },
+              "cdit": {
+                "type": "number",
+                "title": "운행 누적거리 (m)",
+                "default": 1200,
+                "minimum": 0
+              },
+              "rpm": {
+                "type": "integer",
+                "title": "RPM",
+                "default": 1200,
+                "minimum": 0
+              },
+              "sp": {
+                "type": "number",
+                "title": "속도 (km/h · 개발 기준)",
+                "default": 30,
+                "minimum": 0
+              },
+              "em": {
+                "type": "integer",
+                "title": "이벤트 · 표현 미확정",
+                "default": 0,
+                "minimum": 0,
+                "maximum": 127
+              },
+              "el": {
+                "type": "number",
+                "title": "엔진 부하 (%)",
+                "default": 25,
+                "minimum": 0,
+                "maximum": 100
+              },
+              "xyz": {
+                "type": "string",
+                "title": "가속도·각속도 · 단위 미확정",
+                "default": "0,0,0",
+                "pattern": "^-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?$",
+                "maxLength": 120
+              },
+              "vv": {
+                "type": "number",
+                "title": "배터리 전압 (V · 개발 기준)",
+                "default": 12.6,
+                "minimum": 0
+              },
+              "tpos": {
+                "type": "number",
+                "title": "스로틀 (%)",
+                "default": 15,
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        }
+      },
+      "example": {
+        "ty": 4,
+        "ts": 1794783600000,
+        "pld": {
+          "tid": 1,
+          "lat": 37.5,
+          "lon": 127.0,
+          "clt": 1794783600000,
+          "rpm": 1200,
+          "sp": 30,
+          "el": 25,
+          "vv": 12.6
+        }
+      }
+    },
+    "3": {
+      "title": "OBD Trip",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ty",
+          "ts",
+          "pld"
+        ],
+        "properties": {
+          "ty": {
+            "const": 3,
+            "type": "integer"
+          },
+          "ts": {
+            "type": "integer",
+            "title": "메시지 시각 · UTC 밀리초",
+            "default": 1794783600000,
+            "minimum": 0,
+            "maximum": 9000000000000000
+          },
+          "pld": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tid",
+              "stt",
+              "edt",
+              "dis",
+              "tdis",
+              "fc",
+              "stlat",
+              "stlon",
+              "edlat",
+              "edlon",
+              "ctp",
+              "coe",
+              "fct",
+              "hsts",
+              "mesp",
+              "idt",
+              "btv",
+              "gnv",
+              "wut"
+            ],
+            "properties": {
+              "tid": {
+                "type": "integer",
+                "title": "운행 번호",
+                "default": 1,
+                "minimum": 0
+              },
+              "stt": {
+                "type": "integer",
+                "title": "운행 시작 · UTC 밀리초",
+                "default": 1794780000000,
+                "minimum": 0,
+                "maximum": 9000000000000000
+              },
+              "edt": {
+                "type": "integer",
+                "title": "운행 종료 · UTC 밀리초",
+                "default": 1794783600000,
+                "minimum": 0,
+                "maximum": 9000000000000000
+              },
+              "dis": {
+                "type": "number",
+                "title": "운행거리 (m)",
+                "default": 12000,
+                "minimum": 0
+              },
+              "tdis": {
+                "type": "number",
+                "title": "총 주행거리 (m)",
+                "default": 500000,
+                "minimum": 0
+              },
+              "fc": {
+                "type": "number",
+                "title": "연료소모량 · 단위 미확정",
+                "default": 120,
+                "minimum": 0
+              },
+              "stlat": {
+                "type": "number",
+                "title": "시작 위도",
+                "default": 37.5,
+                "minimum": -90,
+                "maximum": 90
+              },
+              "stlon": {
+                "type": "number",
+                "title": "시작 경도",
+                "default": 127.0,
+                "minimum": -180,
+                "maximum": 180
+              },
+              "edlat": {
+                "type": "number",
+                "title": "종료 위도",
+                "default": 37.6,
+                "minimum": -90,
+                "maximum": 90
+              },
+              "edlon": {
+                "type": "number",
+                "title": "종료 경도",
+                "default": 127.1,
+                "minimum": -180,
+                "maximum": 180
+              },
+              "ctp": {
+                "type": "number",
+                "title": "평균 냉각수 온도",
+                "default": 85
+              },
+              "coe": {
+                "type": "number",
+                "title": "탄소 배출량 · 단위 미확정",
+                "default": 100,
+                "minimum": 0
+              },
+              "fct": {
+                "type": "number",
+                "title": "연료차단 시간 · 단위 미확정",
+                "default": 10,
+                "minimum": 0
+              },
+              "hsts": {
+                "type": "number",
+                "title": "최고 속도",
+                "default": 80,
+                "minimum": 0
+              },
+              "mesp": {
+                "type": "number",
+                "title": "평균 속도",
+                "default": 40,
+                "minimum": 0
+              },
+              "idt": {
+                "type": "number",
+                "title": "공회전 시간 · 단위 미확정",
+                "default": 60,
+                "minimum": 0
+              },
+              "btv": {
+                "type": "number",
+                "title": "시동 OFF 전압",
+                "default": 12.6,
+                "minimum": 0
+              },
+              "gnv": {
+                "type": "number",
+                "title": "발전기 전압",
+                "default": 14.2,
+                "minimum": 0
+              },
+              "wut": {
+                "type": "number",
+                "title": "웜업 시간 · 단위 미확정",
+                "default": 30,
+                "minimum": 0
+              },
+              "usm": {
+                "type": "integer",
+                "title": "연결 휴대폰 번호 · 가상값만",
+                "default": 0,
+                "minimum": 0
+              },
+              "est": {
+                "type": "number",
+                "title": "80~100km 운행시간 · 단위 미확정",
+                "default": 10,
+                "minimum": 0
+              },
+              "fwv": {
+                "type": "string",
+                "title": "펌웨어 버전 · 자료형 미확정",
+                "default": "1.0.0",
+                "maxLength": 50
+              },
+              "dtvt": {
+                "type": "number",
+                "title": "주행시간 · 단위 미확정",
+                "default": 3600,
+                "minimum": 0
+              }
+            }
+          }
+        }
+      },
+      "example": {
+        "ty": 3,
+        "ts": 1794783600000,
+        "pld": {
+          "tid": 1,
+          "stt": 1794780000000,
+          "edt": 1794783600000,
+          "dis": 12000,
+          "tdis": 500000,
+          "fc": 120,
+          "stlat": 37.5,
+          "stlon": 127.0,
+          "edlat": 37.6,
+          "edlon": 127.1,
+          "ctp": 85,
+          "coe": 100,
+          "fct": 10,
+          "hsts": 80,
+          "mesp": 40,
+          "idt": 60,
+          "btv": 12.6,
+          "gnv": 14.2,
+          "wut": 30
+        }
+      }
+    }
+  }
+}

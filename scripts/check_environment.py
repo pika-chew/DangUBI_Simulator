@@ -2,6 +2,7 @@
 
 import shutil
 import sys
+from pathlib import Path
 
 
 def main() -> int:
@@ -9,6 +10,8 @@ def main() -> int:
     missing = []
     for name in required:
         found = shutil.which(name) is not None
+        if name == "npm" and not found:
+            found = (Path(__file__).resolve().parents[1] / ".local/npm/package/bin/npm-cli.js").is_file() and shutil.which("node") is not None
         print(f"{'FOUND' if found else 'MISSING'}: {name}")
         if not found:
             missing.append(name)

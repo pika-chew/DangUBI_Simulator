@@ -1,0 +1,323 @@
+{
+  "formatVersion": "v1.0",
+  "disclaimer": "This pricing list is for informational purposes only. All prices are subject to the additional terms included in the pricing pages on http://aws.amazon.com. All Free Tier prices are also subject to the terms included at https://aws.amazon.com/free/",
+  "offerCode": "AWSIoT",
+  "version": "20261003053120",
+  "publicationDate": "2026-10-03T05:31:20Z",
+  "products": {
+    "Z2YZMSKKUYE66W8U": {
+      "sku": "Z2YZMSKKUYE66W8U",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-ConnectionMinutes",
+        "operation": "",
+        "protocol": "MQTT",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "DJ8WDRYXTMD9WSEH": {
+      "sku": "DJ8WDRYXTMD9WSEH",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-DirectMessages",
+        "operation": "",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "DAFVJW5ZV4W7GX7A": {
+      "sku": "DAFVJW5ZV4W7GX7A",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-RulesTriggered",
+        "operation": "",
+        "eventType": "Operation",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "FS9B45JDVNHM2RQ3": {
+      "sku": "FS9B45JDVNHM2RQ3",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-RegistryAndShadowOperations",
+        "operation": "",
+        "eventType": "Operation",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "4857MJJEDUQUG78P": {
+      "sku": "4857MJJEDUQUG78P",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-ActionsExecuted",
+        "operation": "",
+        "eventType": "Request",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "KQ4URJ2CUVNS3PXU": {
+      "sku": "KQ4URJ2CUVNS3PXU",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-Messages",
+        "operation": "",
+        "protocol": "Any",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    },
+    "XXTT3JTFKDGZ7ET7": {
+      "sku": "XXTT3JTFKDGZ7ET7",
+      "productFamily": "AWSIoT",
+      "attributes": {
+        "servicecode": "AWSIoT",
+        "location": "Asia Pacific (Seoul)",
+        "locationType": "AWS Region",
+        "usagetype": "APN2-DirectMessagesWithConfirmation",
+        "operation": "",
+        "regionCode": "ap-northeast-2",
+        "servicename": "AWS IoT"
+      }
+    }
+  },
+  "terms": {
+    "OnDemand": {
+      "DAFVJW5ZV4W7GX7A": {
+        "DAFVJW5ZV4W7GX7A.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "DAFVJW5ZV4W7GX7A",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "DAFVJW5ZV4W7GX7A.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "DAFVJW5ZV4W7GX7A.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.18 per million rules triggered",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "RulesTriggered",
+              "pricePerUnit": {
+                "USD": "0.0000001800"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "Z2YZMSKKUYE66W8U": {
+        "Z2YZMSKKUYE66W8U.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "Z2YZMSKKUYE66W8U",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "Z2YZMSKKUYE66W8U.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "Z2YZMSKKUYE66W8U.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.096 per million minutes of connection",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "Minutes",
+              "pricePerUnit": {
+                "USD": "0.0000000960"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "FS9B45JDVNHM2RQ3": {
+        "FS9B45JDVNHM2RQ3.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "FS9B45JDVNHM2RQ3",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "FS9B45JDVNHM2RQ3.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "FS9B45JDVNHM2RQ3.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$1.50 per million Device Shadow and Device Registry Operations",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "Operations",
+              "pricePerUnit": {
+                "USD": "0.0000015000"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "4857MJJEDUQUG78P": {
+        "4857MJJEDUQUG78P.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "4857MJJEDUQUG78P",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "4857MJJEDUQUG78P.JRTCKXETXF.6YS6EN2CT7": {
+              "rateCode": "4857MJJEDUQUG78P.JRTCKXETXF.6YS6EN2CT7",
+              "description": "$0.18 per million actions executed",
+              "beginRange": "0",
+              "endRange": "Inf",
+              "unit": "ActionsExecuted",
+              "pricePerUnit": {
+                "USD": "0.0000001800"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "DJ8WDRYXTMD9WSEH": {
+        "DJ8WDRYXTMD9WSEH.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "DJ8WDRYXTMD9WSEH",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "DJ8WDRYXTMD9WSEH.JRTCKXETXF.ZN357FEBCK": {
+              "rateCode": "DJ8WDRYXTMD9WSEH.JRTCKXETXF.ZN357FEBCK",
+              "description": "$0.00000216 per Direct Message from 0 to 1,000,000,000 for DirectMessages in Asia Pacific (Seoul)",
+              "beginRange": "0",
+              "endRange": "1000000000",
+              "unit": "Direct Messages",
+              "pricePerUnit": {
+                "USD": "0.0000021600"
+              },
+              "appliesTo": []
+            },
+            "DJ8WDRYXTMD9WSEH.JRTCKXETXF.9UCY5BG95Z": {
+              "rateCode": "DJ8WDRYXTMD9WSEH.JRTCKXETXF.9UCY5BG95Z",
+              "description": "$0.00000168 per Direct Message from 1,000,000,000 to 5,000,000,000 for DirectMessages in Asia Pacific (Seoul)",
+              "beginRange": "1000000000",
+              "endRange": "5000000000",
+              "unit": "Direct Messages",
+              "pricePerUnit": {
+                "USD": "0.0000016800"
+              },
+              "appliesTo": []
+            },
+            "DJ8WDRYXTMD9WSEH.JRTCKXETXF.TZN6KSERSS": {
+              "rateCode": "DJ8WDRYXTMD9WSEH.JRTCKXETXF.TZN6KSERSS",
+              "description": "$0.00000144 per Direct Message from 5,000,000,000 for DirectMessages in Asia Pacific (Seoul)",
+              "beginRange": "5000000000",
+              "endRange": "Inf",
+              "unit": "Direct Messages",
+              "pricePerUnit": {
+                "USD": "0.0000014400"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "XXTT3JTFKDGZ7ET7": {
+        "XXTT3JTFKDGZ7ET7.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "XXTT3JTFKDGZ7ET7",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "XXTT3JTFKDGZ7ET7.JRTCKXETXF.ZN357FEBCK": {
+              "rateCode": "XXTT3JTFKDGZ7ET7.JRTCKXETXF.ZN357FEBCK",
+              "description": "$0.000003 per Direct Messages with Confirmation from 0 to 1,000,000,000 for DirectMessagesWithConfirmation in Asia Pacific (Seoul)",
+              "beginRange": "0",
+              "endRange": "1000000000",
+              "unit": "Direct Messages with Confirmation",
+              "pricePerUnit": {
+                "USD": "0.0000030000"
+              },
+              "appliesTo": []
+            },
+            "XXTT3JTFKDGZ7ET7.JRTCKXETXF.9UCY5BG95Z": {
+              "rateCode": "XXTT3JTFKDGZ7ET7.JRTCKXETXF.9UCY5BG95Z",
+              "description": "$0.0000024 per Direct Messages with Confirmation from 1,000,000,000 to 5,000,000,000 for DirectMessagesWithConfirmation in Asia Pacific (Seoul)",
+              "beginRange": "1000000000",
+              "endRange": "5000000000",
+              "unit": "Direct Messages with Confirmation",
+              "pricePerUnit": {
+                "USD": "0.0000024000"
+              },
+              "appliesTo": []
+            },
+            "XXTT3JTFKDGZ7ET7.JRTCKXETXF.TZN6KSERSS": {
+              "rateCode": "XXTT3JTFKDGZ7ET7.JRTCKXETXF.TZN6KSERSS",
+              "description": "$0.00000204 per Direct Messages with Confirmation from 5,000,000,000 for DirectMessagesWithConfirmation in Asia Pacific (Seoul)",
+              "beginRange": "5000000000",
+              "endRange": "Inf",
+              "unit": "Direct Messages with Confirmation",
+              "pricePerUnit": {
+                "USD": "0.0000020400"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      },
+      "KQ4URJ2CUVNS3PXU": {
+        "KQ4URJ2CUVNS3PXU.JRTCKXETXF": {
+          "offerTermCode": "JRTCKXETXF",
+          "sku": "KQ4URJ2CUVNS3PXU",
+          "effectiveDate": "2026-10-01T00:00:00Z",
+          "priceDimensions": {
+            "KQ4URJ2CUVNS3PXU.JRTCKXETXF.ZN357FEBCK": {
+              "rateCode": "KQ4URJ2CUVNS3PXU.JRTCKXETXF.ZN357FEBCK",
+              "description": "$1.20 per million messages - first 1 billion messages/month",
+              "beginRange": "0",
+              "endRange": "1000000000",
+              "unit": "Messages",
+              "pricePerUnit": {
+                "USD": "0.0000012000"
+              },
+              "appliesTo": []
+            },
+            "KQ4URJ2CUVNS3PXU.JRTCKXETXF.9UCY5BG95Z": {
+              "rateCode": "KQ4URJ2CUVNS3PXU.JRTCKXETXF.9UCY5BG95Z",
+              "description": "$0.96 per million messages - next 4 billion messages/month",
+              "beginRange": "1000000000",
+              "endRange": "5000000000",
+              "unit": "Messages",
+              "pricePerUnit": {
+                "USD": "0.0000009600"
+              },
+              "appliesTo": []
+            },
+            "KQ4URJ2CUVNS3PXU.JRTCKXETXF.TZN6KSERSS": {
+              "rateCode": "KQ4URJ2CUVNS3PXU.JRTCKXETXF.TZN6KSERSS",
+              "description": "$0.84 per million messages - over 5 billion messages/month",
+              "beginRange": "5000000000",
+              "endRange": "Inf",
+              "unit": "Messages",
+              "pricePerUnit": {
+                "USD": "0.0000008400"
+              },
+              "appliesTo": []
+            }
+          },
+          "termAttributes": {}
+        }
+      }
+    }
+  },
+  "attributesList": {}
+}

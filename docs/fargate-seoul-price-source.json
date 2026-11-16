@@ -1,0 +1,20 @@
+{
+  "source": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonECS/current/ap-northeast-2/index.json",
+  "publicationDate": "2026-11-11T23:46:23Z",
+  "rates": [
+    {
+      "SKU": "KJE68NNYFF2BQG98",
+      "Usage": "APN2-Fargate-GB-Hours",
+      "Description": "AWS Fargate - Memory  - Asia Pacific (Seoul)",
+      "Unit": "hours",
+      "USD": "0.0051100000"
+    },
+    {
+      "SKU": "DS579H2QDYXPJDKE",
+      "Usage": "APN2-Fargate-vCPU-Hours:perCPU",
+      "Description": "AWS Fargate - vCPU  - Asia Pacific (Seoul)",
+      "Unit": "hours",
+      "USD": "0.0465600000"
+    }
+  ]
+}

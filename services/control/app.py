@@ -1,0 +1,145 @@
+"""로컬 첫 실행본: API → Go Worker, 실제 MQTT 송신 없음."""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+from pathlib import Path
+from typing import Any, Literal
+from uuid import uuid4
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from jsonschema import Draft202012Validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+ROOT = Path(__file__).resolve().parents[2]
+CATALOG = json.loads((ROOT / "contracts/obd-development.json").read_text(encoding="utf-8"))
+WORKER = ROOT / ".local" / ("worker.exe" if os.name == "nt" else "worker")
+DB = Path(os.environ.get("DANGUBI_DB", str(ROOT / ".local/runs.sqlite3")))
+app = FastAPI(title="DangUBI 로컬 제어 API", version="0.1.0")
+
+
+class ConnectionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    vehicle_count: int = Field(ge=1, le=10000)
+    mapping_mode: Literal["shared", "dedicated"]
+    client_count: int = Field(ge=1, le=10000)
+    messages_per_vehicle: int = Field(ge=1, le=10000)
+    interval_ms: int = Field(ge=1, le=86400000)
+    connection_lifetime: Literal["always", "while_driving"] = "always"
+
+    @model_validator(mode="after")
+    def bounded(self):
+        if self.vehicle_count * self.messages_per_vehicle > 10000:
+            raise ValueError("한 실행의 생성 확인은 최대 10,000건입니다.")
+        if self.mapping_mode == "dedicated" and self.client_count != self.vehicle_count:
+            raise ValueError("차량별 전체 연결은 차량 수와 Client 수가 같아야 합니다.")
+        if self.mapping_mode == "shared" and self.client_count > self.vehicle_count:
+            raise ValueError("풀 Client 수는 차량 수 이하여야 합니다.")
+        return self
+
+
+class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    config: ConnectionConfig
+    message: dict[str, Any]
+    transport: Literal["dry_run"] = "dry_run"
+
+
+@app.exception_handler(RequestValidationError)
+async def input_error(_request: Request, exc: RequestValidationError):
+    details = [" / ".join(str(v) for v in e["loc"][1:]) + ": " + str(e.get("ctx", {}).get("error", "입력값의 형식·범위를 확인하세요.")) for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": details})
+
+
+def validate_message(message: dict[str, Any]):
+    if type(message.get("ty")) is not int or message["ty"] not in (3, 4):
+        raise HTTPException(422, detail=["ty: 개발용 OBD 타입은 3 또는 4입니다."])
+    profile = CATALOG["profiles"][str(message["ty"])]
+    errors = sorted(Draft202012Validator(profile["schema"]).iter_errors(message), key=lambda e: str(e.path))
+    if errors:
+        descriptions = {"required": "필수 항목이 누락됐습니다.", "type": "자료형을 확인하세요.", "minimum": "허용 최솟값 미만입니다.", "maximum": "허용 최댓값을 초과했습니다.", "additionalProperties": "규격에 없는 항목이 포함됐습니다.", "pattern": "값의 표현 형식을 확인하세요.", "maxLength": "허용 길이를 초과했습니다.", "const": "허용되지 않은 값입니다."}
+        raise HTTPException(422, detail=[f"{' / '.join(map(str, e.path)) or '메시지'}: {descriptions.get(e.validator, '입력값을 확인하세요.')}" for e in errors[:20]])
+    payload = message["pld"]
+    if message["ty"] == 3 and payload["stt"] > payload["edt"]:
+        raise HTTPException(422, detail=["Trip 시작 시각은 종료 시각 이하여야 합니다."])
+    if len(json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()) > 131072:
+        raise HTTPException(422, detail=["메시지는 128KiB 이하여야 합니다."])
+
+
+def call_worker(body: RunRequest, operation: str, run_id: str):
+    validate_message(body.message)
+    if not WORKER.is_file():
+        raise HTTPException(503, detail="Worker가 준비되지 않았습니다. 로컬 준비 작업을 실행하세요.")
+    data = {"operation": operation, "run_id": run_id, "config": body.config.model_dump(), "message": body.message}
+    try:
+        process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        result = json.loads(process.stdout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        raise HTTPException(502, detail="Worker 응답을 확인하지 못했습니다.")
+    if process.returncode or "error" in result:
+        raise HTTPException(422, detail=result.get("error", "Worker 처리에 실패했습니다."))
+    return result
+
+
+def database():
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DB)
+    connection.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT, request TEXT, result TEXT)")
+    return connection
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "transport": "dry_run", "aws_connected": False}
+
+
+@app.get("/api/schema")
+def schema():
+    return CATALOG
+
+
+@app.post("/api/preview")
+def preview(body: RunRequest):
+    return {"message": body.message, "plan": call_worker(body, "preview", "preview")}
+
+
+@app.post("/api/runs", status_code=201)
+def create_run(body: RunRequest):
+    run_id = uuid4().hex
+    result = call_worker(body, "dry_run", run_id)
+    created = datetime.now(timezone.utc).isoformat()
+    with database() as db:
+        db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(body.model_dump()), json.dumps(result)))
+    return {"id": run_id, "created_at": created, "request": body.model_dump(), "result": result}
+
+
+@app.get("/api/runs")
+def list_runs():
+    with database() as db:
+        rows = db.execute("SELECT id,created,result FROM runs ORDER BY created DESC LIMIT 30").fetchall()
+    return [{"id": row[0], "created_at": row[1], "result": json.loads(row[2])} for row in rows]
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str):
+    with database() as db:
+        row = db.execute("SELECT created,request,result FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, detail="실행 기록이 없습니다.")
+    return {"id": run_id, "created_at": row[0], "request": json.loads(row[1]), "result": json.loads(row[2])}
+
+
+@app.patch("/api/runs/{run_id}")
+def frozen_run(run_id: str):
+    get_run(run_id)
+    raise HTTPException(409, detail="실행 설정과 배정표는 고정됩니다. 다른 조건은 새 실행으로 비교하세요.")
+
+
+if (ROOT / "apps/web/dist").is_dir():
+    app.mount("/", StaticFiles(directory=ROOT / "apps/web/dist", html=True), name="web")
