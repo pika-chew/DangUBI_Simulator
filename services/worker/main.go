@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -23,6 +27,7 @@ type Request struct {
 	Message    map[string]any `json:"message"`
 	MQTT       *MQTTProfile   `json:"mqtt,omitempty"`
 	Generation *Generation    `json:"generation,omitempty"`
+	Realtime   bool           `json:"realtime,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
@@ -37,32 +42,39 @@ type Sample struct {
 	VehicleState string         `json:"vehicle_state,omitempty"`
 }
 type Result struct {
-	RunID            string       `json:"run_id"`
-	Transport        string       `json:"transport"`
-	State            string       `json:"state"`
-	AllocatedClients int          `json:"allocated_clients"`
-	AssignmentCount  int          `json:"assignment_count"`
-	Assignments      []Assignment `json:"assignments"`
-	Planned          int          `json:"planned_messages"`
-	Processed        int          `json:"processed_messages"`
-	Bytes            int          `json:"payload_bytes"`
-	Connected        int          `json:"connected_clients"`
-	Published        int          `json:"mqtt_published"`
-	Puback           int          `json:"puback_count"`
-	Attempted        int          `json:"publish_attempts"`
-	Unconfirmed      int          `json:"unconfirmed_messages"`
-	Reconnects       int          `json:"reconnect_count"`
-	ActiveClients    int          `json:"active_clients"`
-	Errors           []string     `json:"errors"`
-	Samples          []Sample     `json:"samples"`
-	TripSummaries    []Sample     `json:"trip_summaries,omitempty"`
-	Trace            []TracePoint `json:"trace,omitempty"`
-	ModelVersion     string       `json:"model_version,omitempty"`
-	MicrotripCount   int          `json:"microtrip_count"`
-	TripCount        int          `json:"trip_count"`
+	RunID             string       `json:"run_id"`
+	Transport         string       `json:"transport"`
+	State             string       `json:"state"`
+	AllocatedClients  int          `json:"allocated_clients"`
+	AssignmentCount   int          `json:"assignment_count"`
+	Assignments       []Assignment `json:"assignments"`
+	Planned           int          `json:"planned_messages"`
+	Processed         int          `json:"processed_messages"`
+	Bytes             int          `json:"payload_bytes"`
+	Connected         int          `json:"connected_clients"`
+	Published         int          `json:"mqtt_published"`
+	Puback            int          `json:"puback_count"`
+	Attempted         int          `json:"publish_attempts"`
+	Unconfirmed       int          `json:"unconfirmed_messages"`
+	Reconnects        int          `json:"reconnect_count"`
+	ActiveClients     int          `json:"active_clients"`
+	Errors            []string     `json:"errors"`
+	Samples           []Sample     `json:"samples"`
+	TripSummaries     []Sample     `json:"trip_summaries,omitempty"`
+	Trace             []TracePoint `json:"trace,omitempty"`
+	ModelVersion      string       `json:"model_version,omitempty"`
+	MicrotripCount    int          `json:"microtrip_count"`
+	TripCount         int          `json:"trip_count"`
+	ElapsedMS         int64        `json:"elapsed_ms"`
+	Remaining         int          `json:"remaining_messages"`
+	Unsent            int          `json:"unsent_messages"`
+	ScheduleDelayMS   int64        `json:"schedule_delay_ms"`
+	PeakActiveClients int          `json:"peak_active_clients"`
 }
 
-func process(req Request) (Result, error) {
+func process(req Request) (Result, error) { return processContext(context.Background(), req, nil) }
+
+func processContext(ctx context.Context, req Request, progress func(Result)) (Result, error) {
 	var err error
 	req, err = normalize(req)
 	if err != nil {
@@ -72,7 +84,7 @@ func process(req Request) (Result, error) {
 	if c.VehicleCount < 1 || c.VehicleCount > 10000 || c.MessagesPerVehicle < 1 || c.VehicleCount*c.MessagesPerVehicle > 10000 || c.IntervalMS < 1 || c.IntervalMS > 86400000 {
 		return Result{}, errors.New("차량 수·생성 건수·주기를 확인하세요. 한 실행은 최대 10,000건입니다.")
 	}
-	if req.Operation != "preview" && req.Operation != "dry_run" {
+	if req.Operation != "preview" && req.Operation != "dry_run" && req.Operation != "plan" {
 		return Result{}, errors.New("송신 없는 확인만 지원합니다.")
 	}
 	if c.Lifetime != "always" && c.Lifetime != "while_driving" {
@@ -131,74 +143,111 @@ func process(req Request) (Result, error) {
 		limit = 100
 	}
 	out := Result{RunID: req.RunID, Transport: "dry_run", State: "preview", AllocatedClients: clients, AssignmentCount: c.VehicleCount, Assignments: allocations[:limit], Planned: c.VehicleCount * c.MessagesPerVehicle, Samples: []Sample{}}
-	if req.Operation == "preview" && req.Generation == nil {
+	if req.Operation == "plan" || req.Operation == "preview" && req.Generation == nil {
 		return out, nil
 	}
 	if req.Generation != nil {
 		out.ModelVersion = generatorVersion
 	}
+	started := time.Now()
+	report := reporter(started, progress)
+	out.State = "running"
+	report(&out, true)
 	for seq := 0; seq < c.MessagesPerVehicle; seq++ {
+		if req.Realtime && req.Operation != "preview" {
+			if err := sleepReporting(ctx, started.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func() { report(&out, false) }); err != nil {
+				out.State = "stopped"
+				report(&out, true)
+				return out, nil
+			}
+		}
 		for i, a := range allocations {
+			if ctx.Err() != nil {
+				out.State = "stopped"
+				report(&out, true)
+				return out, nil
+			}
 			sample := sampleAt(req, i, seq, a, "sim")
-			encoded, err := json.Marshal(sample.Message)
-			if err != nil {
+			if req.Realtime {
+				out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(started).Milliseconds()-offsetMS(req, seq))
+			}
+			if err := recordSample(&out, req, sample, i, seq); err != nil {
 				return Result{}, err
 			}
-			if len(encoded) > 131072 {
-				return Result{}, errors.New("메시지 크기가 128KiB를 초과합니다.")
-			}
-			out.Processed++
-			out.Bytes += len(encoded)
-			if sample.Message["ty"].(float64) == 3 {
-				out.TripCount++
-				if req.Generation != nil && len(out.TripSummaries) < 100 {
-					out.TripSummaries = append(out.TripSummaries, sample)
-				}
-			} else {
-				out.MicrotripCount++
-			}
-			if len(out.Samples) < 10 {
-				out.Samples = append(out.Samples, sample)
-			}
-			if req.Generation != nil && i == 0 && seq < c.MessagesPerVehicle-1 && (seq%max(1, (c.MessagesPerVehicle-2+118)/119) == 0 || seq == c.MessagesPerVehicle-2) {
-				p := sample.Message["pld"].(map[string]any)
-				out.Trace = append(out.Trace, TracePoint{float64(offsetMS(req, seq)) / 1000, sample.VehicleState, p["sp"].(float64), p["rpm"].(float64), p["cdit"].(float64)})
-			}
+			report(&out, false)
 		}
 	}
 	if req.Operation == "preview" {
 		out.Processed = 0
 		out.Bytes = 0
+		out.State = "preview"
+		out.Remaining = out.Planned
 		return out, nil
 	}
 	out.State = "dry_run_completed"
+	report(&out, true)
 	return out, nil
 }
 func main() {
-	dec := json.NewDecoder(io.LimitReader(os.Stdin, 1048577))
+	reader := bufio.NewReaderSize(os.Stdin, 1048577)
+	first, err := reader.ReadSlice('\n')
+	if len(first) > 1048576 || (err != nil && err != io.EOF) {
+		fail("요청 크기를 확인하세요.")
+		return
+	}
+	// 첫 요청은 한 줄 JSON이다. 기존 EOF 종료 요청도 허용한다.
+	dec := json.NewDecoder(io.MultiReader(bytes.NewReader(first), reader))
 	dec.DisallowUnknownFields()
 	var req Request
 	if err := dec.Decode(&req); err != nil {
 		fail("요청 JSON을 읽을 수 없습니다.")
 		return
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		fail("요청은 JSON 객체 하나여야 합니다.")
-		return
+	managed := os.Getenv("DANGUBI_MANAGED") == "1"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var progress func(Result)
+	if managed {
+		encoder := json.NewEncoder(os.Stdout)
+		progress = func(out Result) { encoder.Encode(map[string]any{"kind": "progress", "result": out}) }
+		go func() {
+			// 제어 API가 사라져 stdin이 닫혀도 실행을 멈춘다.
+			for {
+				var command struct {
+					Command string `json:"command"`
+				}
+				if err := dec.Decode(&command); err != nil {
+					cancel()
+					return
+				}
+				if command.Command == "stop" {
+					cancel()
+					return
+				}
+			}
+		}()
+	} else {
+		var extra any
+		if err := dec.Decode(&extra); err != io.EOF {
+			fail("요청은 JSON 객체 하나여야 합니다.")
+			return
+		}
 	}
 	var result Result
-	var err error
 	if req.Operation == "mqtt" {
-		result, err = runMQTT(req)
+		result, err = runMQTTContext(ctx, req, progress)
 	} else {
-		result, err = process(req)
+		result, err = processContext(ctx, req, progress)
 	}
 	if err != nil {
 		fail(err.Error())
 		return
 	}
-	json.NewEncoder(os.Stdout).Encode(result)
+	if managed {
+		json.NewEncoder(os.Stdout).Encode(map[string]any{"kind": "result", "result": result})
+	} else {
+		json.NewEncoder(os.Stdout).Encode(result)
+	}
 }
 func fail(message string) {
 	json.NewEncoder(os.Stdout).Encode(map[string]string{"error": message})

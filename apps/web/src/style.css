@@ -301,6 +301,29 @@ code {
     sans-serif;
   fill: #4d6576;
 }
+.live-run {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: center;
+  border-color: #65ab9e;
+}
+.live-run > div {
+  flex: 1;
+}
+.live-run .note {
+  margin-bottom: 10px;
+}
+progress {
+  width: 100%;
+  height: 18px;
+  accent-color: #087c70;
+}
+.stop {
+  color: #922f28;
+  border-color: #c58d87;
+  white-space: nowrap;
+}
 table {
   width: 100%;
   border-collapse: collapse;

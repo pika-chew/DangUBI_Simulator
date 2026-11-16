@@ -6,6 +6,8 @@ import os
 import sqlite3
 import subprocess
 import threading
+from contextlib import asynccontextmanager, contextmanager
+from services.control.jobs import JobManager
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -24,7 +26,16 @@ WORKER = ROOT / ".local" / ("worker.exe" if os.name == "nt" else "worker")
 DB = Path(os.environ.get("DANGUBI_DB", str(ROOT / ".local/runs.sqlite3")))
 MQTT_PROFILE = Path(os.environ.get("DANGUBI_MQTT_PROFILE", str(ROOT / ".local/mqtt.json")))
 MQTT_LOCK = threading.Lock()
-app = FastAPI(title="DangUBI 로컬 제어 API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app):
+    JOBS.recover()
+    try:
+        yield
+    finally:
+        JOBS.shutdown()
+
+
+app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifespan)
 
 
 class ConnectionConfig(BaseModel):
@@ -63,6 +74,7 @@ class RunRequest(BaseModel):
     generation: Generation | None = None
     transport: Literal["dry_run", "mqtt"] = "dry_run"
     confirm_mqtt: bool = False
+    realtime: bool = False
 
     @model_validator(mode="after")
     def generation_plan(self):
@@ -78,6 +90,8 @@ class RunRequest(BaseModel):
             raise ValueError("수동 메시지 또는 자동 생성 설정이 필요합니다.")
         if self.config.vehicle_count * self.config.messages_per_vehicle > 10000:
             raise ValueError("한 실행은 Trip을 포함해 최대 10,000건입니다.")
+        if self.realtime and not self.generation and (self.config.messages_per_vehicle - 1) * self.config.interval_ms > 3600000:
+            raise ValueError("실제 시간 실행은 최대 3,600초입니다.")
         return self
 
 
@@ -133,12 +147,12 @@ def validate_message(message: dict[str, Any]):
         raise HTTPException(422, detail=["메시지는 128KiB 이하여야 합니다."])
 
 
-def call_worker(body: RunRequest, operation: str, run_id: str):
+def prepare_worker(body: RunRequest, operation: str, run_id: str):
     if body.message is not None:
         validate_message(body.message)
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker가 준비되지 않았습니다. 로컬 준비 작업을 실행하세요.")
-    data = {"operation": operation, "run_id": run_id, "config": body.config.model_dump(), "message": body.message}
+    data = {"operation": operation, "run_id": run_id, "config": body.config.model_dump(), "message": body.message, "realtime": body.realtime and operation != "preview"}
     if body.generation:
         data["generation"] = body.generation.model_dump()
     timeout = 30
@@ -152,6 +166,11 @@ def call_worker(body: RunRequest, operation: str, run_id: str):
             raise HTTPException(422, detail="서버의 실제 송신 Client 수 또는 메시지 상한을 초과했습니다.")
         data["mqtt"] = profile
         timeout = profile["max_duration_seconds"] + 15
+    return data, timeout
+
+
+def call_worker(body: RunRequest, operation: str, run_id: str):
+    data, timeout = prepare_worker(body, operation, run_id)
     try:
         process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         result = json.loads(process.stdout)
@@ -162,11 +181,19 @@ def call_worker(body: RunRequest, operation: str, run_id: str):
     return result
 
 
+@contextmanager
 def database():
     DB.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB)
     connection.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT, request TEXT, result TEXT)")
-    return connection
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+JOBS = JobManager(database, MQTT_LOCK)
 
 
 @app.get("/api/health")
@@ -178,7 +205,7 @@ def health():
     except HTTPException:
         mqtt_ready = False
         limits = None
-    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "aws_connected": False}
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "aws_connected": False, "active_job_id": JOBS.active_id()}
 
 
 @app.get("/api/schema")
@@ -193,6 +220,8 @@ def preview(body: RunRequest):
 
 @app.post("/api/runs", status_code=201)
 def create_run(body: RunRequest):
+    if body.realtime:
+        raise HTTPException(409, detail="실제 시간 실행은 /api/jobs에서 시작하세요.")
     run_id = uuid4().hex
     locked = False
     try:
@@ -208,6 +237,35 @@ def create_run(body: RunRequest):
     with database() as db:
         db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(body.model_dump(exclude_none=True)), json.dumps(result)))
     return {"id": run_id, "created_at": created, "request": body.model_dump(exclude_none=True), "result": result}
+
+
+@app.post("/api/jobs", status_code=202)
+def start_job(body: RunRequest):
+    run_id = uuid4().hex
+    data, _ = prepare_worker(body, body.transport, run_id)
+    if body.transport == "mqtt":
+        timeout = data["mqtt"]["max_duration_seconds"] + 5
+    elif body.realtime:
+        duration_ms = body.generation.duration_seconds * 1000 if body.generation else (body.config.messages_per_vehicle - 1) * body.config.interval_ms
+        timeout = duration_ms / 1000 + 10
+    else:
+        timeout = 30
+    return JOBS.start(run_id, body.model_dump(exclude_none=True), data, WORKER, timeout)
+
+
+@app.get("/api/jobs/{run_id}")
+def get_job(run_id: str):
+    run = get_run(run_id)
+    if "job_state" not in run["result"]:
+        raise HTTPException(409, detail="이 기록은 실행 제어를 지원하지 않는 이전 방식의 실행입니다.")
+    return run
+
+
+@app.post("/api/jobs/{run_id}/stop", status_code=202)
+def stop_job(run_id: str):
+    get_job(run_id)
+    JOBS.stop(run_id)
+    return get_job(run_id)
 
 
 @app.get("/api/runs")

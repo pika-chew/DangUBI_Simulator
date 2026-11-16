@@ -4,3 +4,5 @@ Python FastAPI 제어 API입니다. 개발 스키마 검증, Go Worker 프로세
 
 dry_run을 기본으로 지원하며, 서버 MQTT 프로필 활성화·수신 규격 확인·사용자 송신 확인이 갖춰진 경우 소량 TLS MQTT 시험을 수행합니다. 접속 자격은 브라우저나 실행 기록으로 전달하지 않습니다. 실행법과 API 검증은 ../../docs/USAGE.md를 참고하세요.
 실행 관리와 데이터 생성·MQTT 처리를 분리합니다.
+
+POST /api/jobs로 시작하고 GET /api/jobs/{id}로 조회, POST /api/jobs/{id}/stop으로 중단합니다. 단일 프로세스 실행 관리·부분 결과 저장·서버 종료 정리·재시작 미완료 표시를 지원합니다.

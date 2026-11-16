@@ -78,11 +78,24 @@ type Result = {
   model_version?: string;
   microtrip_count?: number;
   trip_count?: number;
+  job_state?: string;
+  elapsed_ms?: number;
+  remaining_messages?: number;
+  unsent_messages?: number;
+  schedule_delay_ms?: number;
+  connection_cleanup_confirmed?: boolean;
+  forced_termination?: boolean;
 };
 type SavedRun = {
   id: string;
   created_at: string;
-  request: { config: Config; message?: Message; generation?: Generation };
+  request: {
+    config: Config;
+    message?: Message;
+    generation?: Generation;
+    realtime?: boolean;
+    transport?: "dry_run" | "mqtt";
+  };
   result: Result;
 };
 async function api<T>(url: string, body?: unknown): Promise<T> {
@@ -100,7 +113,29 @@ async function api<T>(url: string, body?: unknown): Promise<T> {
     );
   return data;
 }
+const activeStates = new Set(["starting", "running", "stopping"]);
+function stateLabel(result: Result): string {
+  const labels: Record<string, string> = {
+    starting: "실행 준비 중",
+    running: "실행 중",
+    stopping: "중단 처리 중",
+    stopped: "중단 완료 · 부분 결과",
+    failed: "실행 실패 · 결과 확인 필요",
+    interrupted: "이전 실행 종료 미확인",
+  };
+  return (
+    labels[result.job_state || ""] ||
+    (result.state === "mqtt_completed"
+      ? "MQTT 송신 완료"
+      : result.state === "mqtt_failed"
+        ? "MQTT 송신 실패·부분 완료"
+        : "송신 없는 생성 확인 완료")
+  );
+}
 function App() {
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [realtime, setRealtime] = useState(true);
+  const [stopPending, setStopPending] = useState(false);
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
     profile: "urban",
@@ -134,18 +169,81 @@ function App() {
   useEffect(() => {
     Promise.all([
       api<Catalog>("/api/schema"),
-      api<{ worker_ready: boolean; mqtt_ready: boolean }>("/api/health"),
+      api<{
+        worker_ready: boolean;
+        mqtt_ready: boolean;
+        active_job_id?: string;
+      }>("/api/health"),
       api<SavedRun[]>("/api/runs"),
     ])
-      .then(([c, h, r]) => {
+      .then(async ([c, h, r]) => {
         setCatalog(c);
         setRaw(JSON.stringify(c.profiles["4"].example, null, 2));
         setHistory(r);
         setMqttReady(h.mqtt_ready);
         setHealth(h.worker_ready ? "Worker 준비 완료" : "Worker 준비 필요");
+        if (h.active_job_id) {
+          setActiveJobId(h.active_job_id);
+          const saved = await api<SavedRun>("/api/jobs/" + h.active_job_id);
+          setRun(saved);
+          setConfig(saved.request.config);
+          setTransport(saved.request.transport || "dry_run");
+          setRealtime(saved.request.realtime ?? false);
+          if (saved.request.generation) {
+            setMode("automatic");
+            setGeneration(saved.request.generation);
+          } else if (saved.request.message) {
+            setMode("manual");
+            setTy(String(saved.request.message.ty));
+            setRaw(JSON.stringify(saved.request.message, null, 2));
+          }
+        }
       })
       .catch((e) => setError(String(e.message)));
   }, []);
+  useEffect(() => {
+    if (!activeJobId) return;
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const saved = await api<SavedRun>("/api/jobs/" + activeJobId);
+        if (canceled) return;
+        setRun(saved);
+        if (!activeStates.has(saved.result.job_state || "")) {
+          setActiveJobId(null);
+          setStopPending(false);
+          setHistory(await api<SavedRun[]>("/api/runs"));
+          return;
+        }
+      } catch (e) {
+        if (!canceled)
+          setError(
+            e instanceof Error ? e.message : "실행 상태를 확인하지 못했습니다.",
+          );
+      }
+      if (!canceled) timer = setTimeout(poll, 1000);
+    }
+    void poll();
+    return () => {
+      canceled = true;
+      clearTimeout(timer);
+    };
+  }, [activeJobId]);
+  const locked = busy || !!activeJobId;
+  async function stop() {
+    if (!activeJobId) return;
+    setStopPending(true);
+    try {
+      setRun(await api<SavedRun>("/api/jobs/" + activeJobId + "/stop", {}));
+      setError("");
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "중단 요청을 전달하지 못했습니다.",
+      );
+      setStopPending(false);
+    }
+  }
   useEffect(() => {
     setPlan(null);
   }, [raw, config, mode, generation]);
@@ -189,13 +287,15 @@ function App() {
           : { message: JSON.parse(raw) }),
         transport,
         confirm_mqtt: confirmed,
+        realtime: transport === "dry_run" && realtime,
       };
       if (preview) {
         const data = await api<{ plan: Result }>("/api/preview", payload);
         setPlan(data.plan);
       } else {
-        const saved = await api<SavedRun>("/api/runs", payload);
+        const saved = await api<SavedRun>("/api/jobs", payload);
         setRun(saved);
+        setActiveJobId(saved.id);
         setHistory(await api<SavedRun[]>("/api/runs"));
       }
     } catch (e) {
@@ -236,7 +336,9 @@ function App() {
           </b>
           <span>
             {transport === "dry_run"
-              ? "접속·발행하지 않고 입력과 배정만 확인합니다. 생성 주기는 가상시간에만 적용됩니다."
+              ? realtime
+                ? "접속·발행 없이 설정한 주기에 맞춰 데이터를 생성합니다. 실행 상태를 조회하거나 중단할 수 있습니다."
+                : "접속·발행 없이 가상시간으로 즉시 데이터를 생성합니다."
               : "서버에 설정된 TLS 접속 정보로 실제 발행합니다. QoS 1 PUBACK는 브로커 수신 확인이며 후속 저장 완료를 의미하지 않습니다."}
           </span>
         </div>
@@ -258,6 +360,45 @@ function App() {
             {error}
           </div>
         )}
+        {activeJobId && (
+          <section className="card live-run" aria-live="polite">
+            <div>
+              <h2>
+                {run?.id === activeJobId
+                  ? stateLabel(run.result)
+                  : "실행 상태 불러오는 중"}
+              </h2>
+              <p className="note">
+                실행 ID <code>{activeJobId}</code> · 설정과 차량·Client 배정은
+                고정됩니다. 화면을 새로 열어도 진행 중인 실행을 다시 조회합니다.
+              </p>
+              {run?.id === activeJobId && (
+                <>
+                  <progress
+                    aria-label="생성 진행률"
+                    max={Math.max(1, run.result.planned_messages)}
+                    value={run.result.processed_messages}
+                  />
+                  <p>
+                    {run.result.processed_messages.toLocaleString()} /{" "}
+                    {run.result.planned_messages.toLocaleString()}건 생성 · 경과{" "}
+                    {((run.result.elapsed_ms || 0) / 1000).toFixed(1)}초 ·
+                    PUBACK {run.result.puback_count}건
+                  </p>
+                </>
+              )}
+            </div>
+            <button
+              className="stop"
+              disabled={stopPending || run?.result.job_state === "stopping"}
+              onClick={stop}
+            >
+              {stopPending || run?.result.job_state === "stopping"
+                ? "중단 처리 중…"
+                : "실행 중단"}
+            </button>
+          </section>
+        )}
         {!catalog ? (
           <section className="card">입력 규격을 불러오는 중입니다.</section>
         ) : (
@@ -271,7 +412,7 @@ function App() {
                   실행 전에 설정하고 실행 기록에 고정합니다. 다른 조건은 새
                   실행으로 비교하세요.
                 </p>
-                <fieldset disabled={busy}>
+                <fieldset disabled={locked}>
                   <div className="fields">
                     <label>
                       데이터 생성 방식
@@ -283,6 +424,29 @@ function App() {
                       >
                         <option value="manual">수동 입력</option>
                         <option value="automatic">자동 주행 생성</option>
+                      </select>
+                    </label>
+                    <label>
+                      실행 시간
+                      <select
+                        value={
+                          transport === "mqtt"
+                            ? "realtime"
+                            : realtime
+                              ? "realtime"
+                              : "virtual"
+                        }
+                        disabled={transport === "mqtt"}
+                        onChange={(e) =>
+                          setRealtime(e.target.value === "realtime")
+                        }
+                      >
+                        <option value="realtime">
+                          실제 시간 · 주기에 맞춰 실행
+                        </option>
+                        <option value="virtual">
+                          가상시간 · 즉시 생성 확인
+                        </option>
                       </select>
                     </label>
                     <label>
@@ -422,7 +586,7 @@ function App() {
                       → 정차 → 재출발 → 운행 종료 순서입니다. 실차 보정 전 근사
                       모델이며 실제 도로를 따르지 않습니다.
                     </p>
-                    <fieldset disabled={busy}>
+                    <fieldset disabled={locked}>
                       <label>
                         운행 프로필
                         <select
@@ -513,7 +677,7 @@ function App() {
                       {catalog.status}. 단위·자료형이 불명확한 필드는 표시된
                       개발 기준으로만 확인합니다.
                     </p>
-                    <fieldset disabled={busy}>
+                    <fieldset disabled={locked}>
                       <label>
                         메시지 종류
                         <select
@@ -615,7 +779,7 @@ function App() {
                 <textarea
                   aria-label="OBD JSON"
                   spellCheck={false}
-                  disabled={busy || mode === "automatic"}
+                  disabled={locked || mode === "automatic"}
                   value={
                     mode === "automatic"
                       ? plan?.samples?.[0]
@@ -626,24 +790,24 @@ function App() {
                   onChange={(e) => setRaw(e.target.value)}
                 />
                 <div className="actions">
-                  <button disabled={busy} onClick={() => execute(true)}>
+                  <button disabled={locked} onClick={() => execute(true)}>
                     입력·배정 확인
                   </button>
                   <button
                     className="primary"
-                    disabled={busy || (transport === "mqtt" && !confirmed)}
+                    disabled={locked || (transport === "mqtt" && !confirmed)}
                     onClick={() => execute(false)}
                   >
                     {busy
                       ? "처리 중…"
                       : transport === "mqtt"
-                        ? "MQTT 연결·발행"
-                        : "Worker 생성 확인"}
+                        ? "MQTT 실행 시작"
+                        : "생성 실행 시작"}
                   </button>
                 </div>
                 <p className="note">
                   {mode === "automatic"
-                    ? "운행 조건으로 Microtrip과 Trip을 함께 생성합니다. 송신 없는 확인은 가상시간으로 즉시 실행합니다."
+                    ? "운행 조건으로 Microtrip과 Trip을 함께 생성합니다. 실제 시간은 설정한 주기에 맞춰 실행하고, 가상시간은 즉시 생성합니다."
                     : "여러 차량에 입력값을 복제하고 차량별 운행 번호와 시각을 갱신합니다."}
                 </p>
                 {plan && (
@@ -665,13 +829,7 @@ function App() {
                   </p>
                 ) : (
                   <>
-                    <span className="tag">
-                      {run.result.state === "mqtt_completed"
-                        ? "MQTT 송신 완료"
-                        : run.result.state === "mqtt_failed"
-                          ? "MQTT 송신 실패·부분 완료"
-                          : "송신 없는 생성 확인 완료"}
-                    </span>
+                    <span className="tag">{stateLabel(run.result)}</span>
                     {!!run.result.errors?.length && (
                       <div className="error" role="alert">
                         {run.result.errors.join("\n")}
@@ -683,18 +841,62 @@ function App() {
                       확인 시각{" "}
                       {new Date(run.created_at).toLocaleString("ko-KR")}
                     </p>
+                    {run.result.job_state && (
+                      <p className="note">
+                        경과 {((run.result.elapsed_ms || 0) / 1000).toFixed(1)}
+                        초 · 연결 정리{" "}
+                        {activeStates.has(run.result.job_state)
+                          ? "실행 중"
+                          : run.result.connection_cleanup_confirmed
+                            ? "확인됨"
+                            : "미확인"}
+                        {run.result.forced_termination
+                          ? " · Worker 강제 종료"
+                          : ""}
+                        . 중단된 운행은 종료 Trip을 새로 만들지 않습니다.
+                      </p>
+                    )}
                     <div className="metrics">
                       {[
                         ["생성 확인", run.result.processed_messages + "건"],
-                        ["Microtrip", (run.result.microtrip_count ?? 0) + "건"],
-                        ["Trip", (run.result.trip_count ?? 0) + "건"],
+                        [
+                          "미생성",
+                          (run.result.remaining_messages ??
+                            Math.max(
+                              0,
+                              run.result.planned_messages -
+                                run.result.processed_messages,
+                            )) + "건",
+                        ],
+                        [
+                          "발행 미시도",
+                          (run.result.unsent_messages ?? 0) + "건",
+                        ],
+                        [
+                          "최대 주기 지연",
+                          (run.result.schedule_delay_ms ?? 0) + "ms",
+                        ],
+                        [
+                          "Microtrip",
+                          run.result.microtrip_count === undefined
+                            ? "기록 없음"
+                            : run.result.microtrip_count + "건",
+                        ],
+                        [
+                          "Trip",
+                          run.result.trip_count === undefined
+                            ? "기록 없음"
+                            : run.result.trip_count + "건",
+                        ],
                         ["배정 Client", run.result.allocated_clients + "개"],
                         [
                           "접속 확인 Client",
                           run.result.connected_clients + "개",
                         ],
                         [
-                          "종료 후 연결",
+                          activeStates.has(run.result.job_state || "")
+                            ? "현재 연결"
+                            : "최종 보고 연결",
                           (run.result.active_clients || 0) + "개",
                         ],
                         [
@@ -777,7 +979,7 @@ function App() {
                     <button
                       className="history"
                       key={h.id}
-                      disabled={busy}
+                      disabled={locked}
                       onClick={() => load(h.id)}
                     >
                       <span>
@@ -820,7 +1022,7 @@ function DrivingResult({ result }: { result: Result }) {
     <>
       <h3>첫 차량의 속도·상태 변화</h3>
       <p className="note">
-        v000001 · 생성 모델 {result.model_version} · 생성 계획 기준이며 전송
+        v000001 · 생성 모델 {result.model_version} · 생성된 구간 기준이며 전송
         성공 건수와 별개입니다.
       </p>
       <svg

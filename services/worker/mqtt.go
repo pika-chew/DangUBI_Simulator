@@ -86,17 +86,16 @@ func (p *pacer) wait(ctx context.Context) error {
 	return nil
 }
 func waitToken(ctx context.Context, token mqtt.Token, limit time.Duration) error {
-	deadline, ok := ctx.Deadline()
-	if ok && time.Until(deadline) < limit {
-		limit = time.Until(deadline)
-	}
-	if limit <= 0 {
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
 		return context.DeadlineExceeded
+	case <-token.Done():
+		return token.Error()
 	}
-	if !token.WaitTimeout(limit) {
-		return context.DeadlineExceeded
-	}
-	return token.Error()
 }
 func sleepUntil(ctx context.Context, target time.Time) error {
 	delay := time.Until(target)
@@ -113,7 +112,9 @@ func sleepUntil(ctx context.Context, target time.Time) error {
 	}
 }
 
-func runMQTT(req Request) (Result, error) {
+func runMQTT(req Request) (Result, error) { return runMQTTContext(context.Background(), req, nil) }
+
+func runMQTTContext(parent context.Context, req Request, progress func(Result)) (Result, error) {
 	var err error
 	req, err = normalize(req)
 	if err != nil {
@@ -124,7 +125,7 @@ func runMQTT(req Request) (Result, error) {
 		return Result{}, err
 	}
 	copyReq := req
-	copyReq.Operation = "dry_run"
+	copyReq.Operation = "plan"
 	out, err := process(copyReq)
 	if err != nil {
 		return Result{}, err
@@ -137,10 +138,16 @@ func runMQTT(req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(profile.MaxDurationSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(profile.MaxDurationSeconds)*time.Second)
 	defer cancel()
 	out.Transport = "mqtt"
 	out.State = "mqtt_running"
+	if req.Generation != nil {
+		out.ModelVersion = generatorVersion
+	}
+	started := time.Now()
+	report := reporter(started, progress)
+	report(&out, true)
 	out.Published = 0
 	out.Puback = 0
 	out.Attempted = 0
@@ -173,6 +180,14 @@ func runMQTT(req Request) (Result, error) {
 					out.Connected++
 					seen[id] = true
 				}
+				out.ActiveClients = 0
+				for _, c := range clients {
+					if c.IsConnectionOpen() {
+						out.ActiveClients++
+					}
+				}
+				out.PeakActiveClients = max(out.PeakActiveClients, out.ActiveClients)
+				report(&out, true)
 				return nil
 			}
 			client.Disconnect(0)
@@ -191,12 +206,20 @@ func runMQTT(req Request) (Result, error) {
 		options := mqtt.NewClientOptions().AddBroker(profile.BrokerURL).SetClientID(a.ClientID).SetTLSConfig(tlsConfig.Clone()).SetProtocolVersion(4).SetCleanSession(true).SetAutoReconnect(false).SetConnectRetry(false).SetConnectTimeout(timeout).SetWriteTimeout(timeout).SetKeepAlive(30 * time.Second).SetPingTimeout(timeout)
 		clients[a.ClientID] = mqtt.NewClient(options)
 	}
-	fail := func(message string) { out.State = "mqtt_failed"; out.Errors = append(out.Errors, message) }
+	fail := func(message string) {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			out.State = "stopped"
+		} else {
+			out.State = "mqtt_failed"
+			out.Errors = append(out.Errors, message)
+		}
+	}
 	finish := func() Result {
 		for _, client := range clients {
 			client.Disconnect(0)
 		}
 		out.ActiveClients = 0
+		report(&out, true)
 		return out
 	}
 	if req.Config.Lifetime == "always" {
@@ -211,9 +234,9 @@ func runMQTT(req Request) (Result, error) {
 			}
 		}
 	}
-	started := time.Now()
+	scheduledStart := time.Now()
 	for seq := 0; seq < req.Config.MessagesPerVehicle; seq++ {
-		if err := sleepUntil(ctx, started.Add(time.Duration(offsetMS(req, seq))*time.Millisecond)); err != nil {
+		if err := sleepReporting(ctx, scheduledStart.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func() { report(&out, false) }); err != nil {
 			fail("시험 제한시간을 초과했습니다.")
 			return finish(), nil
 		}
@@ -230,9 +253,18 @@ func runMQTT(req Request) (Result, error) {
 				return finish(), nil
 			}
 			sample := sampleAt(req, i, seq, a, profile.TopicPrefix)
+			if err := recordSample(&out, req, sample, i, seq); err != nil {
+				return finish(), err
+			}
+			out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(scheduledStart).Milliseconds()-offsetMS(req, seq))
 			encoded, _ := json.Marshal(sample.Message)
 			topic := sample.Topic
+			if ctx.Err() != nil {
+				fail("실행을 중단했습니다.")
+				return finish(), nil
+			}
 			out.Attempted++
+			report(&out, true)
 			if err := waitToken(ctx, client.Publish(topic, 1, false, encoded), timeout); err != nil {
 				out.Unconfirmed++
 				fail("발행 응답을 확인하지 못했습니다. 중복 가능성이 있어 자동 재발행하지 않습니다.")
@@ -244,6 +276,13 @@ func runMQTT(req Request) (Result, error) {
 			if req.Config.Lifetime == "while_driving" && remaining[a.ClientID] == 0 {
 				client.Disconnect(0)
 			}
+			out.ActiveClients = 0
+			for _, c := range clients {
+				if c.IsConnectionOpen() {
+					out.ActiveClients++
+				}
+			}
+			report(&out, false)
 		}
 	}
 	out.State = "mqtt_completed"
