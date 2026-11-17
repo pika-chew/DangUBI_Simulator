@@ -495,6 +495,63 @@ def workspace_create_plan(body: WorkspacePlanRequest):
     return workspace_get_record("plan:"+record_id)
 
 
+class ScheduleExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    plan_key: str
+    realtime: bool = True
+    mapping_mode: Literal["shared", "dedicated"] = "shared"
+    client_count: int = Field(default=1, ge=1, le=100)
+    force_end_trip: bool = False
+
+
+@app.post("/api/workspace/execute", status_code=202)
+def workspace_execute(body: ScheduleExecutionRequest):
+    from functools import partial
+    from services.control.schedule import instant
+    from services.control.schedule_execution import execute
+    saved = workspace_get_record(body.plan_key)
+    if saved["kind"] != "plan":
+        raise HTTPException(422, detail="저장된 일정을 선택하세요.")
+    source = WorkspacePlanRequest.model_validate(saved["request"])
+    req = source.fleet or source.schedule
+    start, end = instant(req.measurement.start), instant(req.measurement.end)
+    if end-start > 3600000 or saved["planned_messages"] > 10000:
+        raise HTTPException(422, detail="초기 일정 실행은 측정 기간1시간·10,000메시지 이하입니다. 장기 계획 조회와 실행 상한은 다릅니다.")
+    vehicle_ids=[v["vehicle_id"] for v in saved["result"]["vehicles"]]
+    clients=len(vehicle_ids) if body.mapping_mode=="dedicated" else body.client_count
+    if clients > len(vehicle_ids):
+        raise HTTPException(422, detail="연결 풀 Client 수는 차량 수 이하여야 합니다.")
+    preview = preview_fleet if source.fleet else plan_schedule
+    trips={}
+    planned=0
+    for vehicle in vehicle_ids:
+        rows=[]
+        for offset in range(0,10001,100):
+            page=preview(req,offset=offset,limit=100,vehicle_id=vehicle)
+            rows.extend(page["trips"])
+            if not page["has_more"]:
+                break
+        trips[vehicle]=rows
+        for row in rows:
+            count=row["microtrip_count"]+row["trip_count"]
+            if body.force_end_trip and row["continues_after_window"]:
+                count += 0 if (end-row["start_ms"]) % req.interval_ms == 0 else 1
+            planned+=count
+    if planned>10000:
+        raise HTTPException(422,detail="시험용 Trip을 포함한 실행은10,000메시지 이하여야 합니다.")
+    run_id=uuid4().hex
+    assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}"} for i,v in enumerate(vehicle_ids)]
+    config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":"always"}
+    request={"config":config,"transport":"dry_run","realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
+    checkpoint_epoch=CHECKPOINTS.stats()["epoch"]
+    def generate(vehicle,key,offset):
+        if source.fleet:
+            return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
+        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
+    data={"operation":"dry_run","config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"trips_by_vehicle":trips,"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime}
+    return JOBS.start(run_id,request,data,WORKER,(end-start)/1000+30 if body.realtime else 120,runner=partial(execute,JOBS))
+
+
 class DeleteWorkspaceRecords(BaseModel):
     model_config=ConfigDict(extra="forbid",strict=True)
     keys: list[str]=Field(min_length=1,max_length=30)

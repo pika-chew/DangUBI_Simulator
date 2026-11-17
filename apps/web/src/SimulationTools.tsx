@@ -76,6 +76,7 @@ export type TracePoint = {
   };
 };
 export type Sample = Assignment & {
+  synthetic_trip?:boolean;
   sequence: number;
   topic: string;
   message: Message;
@@ -153,6 +154,8 @@ export type SavedRun = {
     message?: Message;
     generation?: Generation;
     realtime?: boolean;
+    source_plan_key?:string;
+    schedule_plan?:unknown;
     transport?: "dry_run" | "mqtt";
   };
   result: Result;
@@ -1397,8 +1400,8 @@ export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample
   return <div className="message-viewer">
     <div className="view-switch" role="group" aria-label="메시지 보기 형식"><button aria-pressed={table} onClick={()=>setTable(true)}>표로 보기</button><button aria-pressed={!table} onClick={()=>setTable(false)}>JSON으로 보기</button><span className="note">현재 페이지 {samples.length}건 · 행을 선택해 전체 항목 확인</span></div>
     {!samples.length ? <p className="empty-state">표시할 메시지가 없습니다.</p> : !table ? <pre className="json-view">{JSON.stringify(samples.map(s=>s.message),null,2)}</pre> : <div className={`message-split ${inspect ? "with-inspector" : ""}`}>
-      <div className="table-scroll message-index"><table><thead><tr><th>선택</th><th>시각 (KST)</th><th>차량</th><th>종류</th><th>속도 (km/h)</th><th>RPM</th><th>거리 (m)</th></tr></thead><tbody>{samples.map((s,i)=><tr key={s.vehicle_id+":"+s.sequence} className={picked===i && inspect ? "is-selected" : ""}><td><button aria-label={`메시지 ${s.sequence} 상세`} aria-pressed={picked===i && inspect} onClick={()=>{setPicked(i);setInspect(true);}}>{s.sequence}</button></td><td title={String(s.message.ts)}>{new Date(s.message.ts).toLocaleTimeString("ko-KR",{timeZone:"Asia/Seoul",hour12:false})}</td><td>{s.vehicle_id}</td><td>{s.message.ty===3 ? "Trip" : "Microtrip"}</td><td title={s.message.ty===3 ? "전체 운행 평균 속도" : "현재 속도"}>{display("",s.message.ty===3 ? s.message.pld.mesp : s.message.pld.sp)}</td><td>{display("",s.message.pld.rpm)}</td><td>{display("",s.message.ty===3 ? s.message.pld.dis : s.message.pld.cdit)}</td></tr>)}</tbody></table></div>
-      {inspect && current && <section className="message-detail"><div className="panel-heading"><h4>{current.vehicle_id} · {profile?.title || "메시지"}</h4><button onClick={()=>setInspect(false)} aria-label="메시지 상세 닫기">×</button></div><div className="table-scroll"><table><thead><tr><th>항목</th><th>필드</th><th>값</th></tr></thead><tbody>{rows.map(([key,title,value])=><tr key={key}><td>{title}</td><td><code>{key}</code></td><td>{display(key,value)}</td></tr>)}</tbody></table></div>{!localOnly && <details><summary>로컬 배정·참고 토픽</summary><p className="note">Client {current.client_id} · {current.topic}<br/>재생성 조회의 토픽은 당시 전송 토픽을 보장하지 않습니다.</p></details>}</section>}
+      <div className="table-scroll message-index"><table><thead><tr><th>선택</th><th>시각 (KST)</th><th>차량</th><th>종류</th><th>속도 (km/h)</th><th>RPM</th><th>거리 (m)</th></tr></thead><tbody>{samples.map((s,i)=><tr key={s.vehicle_id+":"+s.sequence} className={picked===i && inspect ? "is-selected" : ""}><td><button aria-label={`메시지 ${s.sequence} 상세`} aria-pressed={picked===i && inspect} onClick={()=>{setPicked(i);setInspect(true);}}>{s.sequence}</button></td><td title={String(s.message.ts)}>{new Date(s.message.ts).toLocaleTimeString("ko-KR",{timeZone:"Asia/Seoul",hour12:false})}</td><td>{s.vehicle_id}</td><td>{s.synthetic_trip ? "시험용 Trip" : s.message.ty===3 ? "Trip" : "Microtrip"}</td><td title={s.message.ty===3 ? "전체 운행 평균 속도" : "현재 속도"}>{display("",s.message.ty===3 ? s.message.pld.mesp : s.message.pld.sp)}</td><td>{display("",s.message.pld.rpm)}</td><td>{display("",s.message.ty===3 ? s.message.pld.dis : s.message.pld.cdit)}</td></tr>)}</tbody></table></div>
+      {inspect && current && <section className="message-detail"><div className="panel-heading"><h4>{current.vehicle_id} · {current.synthetic_trip ? "시험용 Trip" : profile?.title || "메시지"}</h4><button onClick={()=>setInspect(false)} aria-label="메시지 상세 닫기">×</button></div><div className="table-scroll"><table><thead><tr><th>항목</th><th>필드</th><th>값</th></tr></thead><tbody>{rows.map(([key,title,value])=><tr key={key}><td>{title}</td><td><code>{key}</code></td><td>{display(key,value)}</td></tr>)}</tbody></table></div>{!localOnly && <details><summary>로컬 배정·참고 토픽</summary><p className="note">Client {current.client_id} · {current.topic}<br/>재생성 조회의 토픽은 당시 전송 토픽을 보장하지 않습니다.</p></details>}</section>}
     </div>}
     <p className="note">표는 한국어 항목명과 소수 최대6자리로 표시합니다. JSON에는 OBD 본문만 표시하며 로컬 설명정보를 넣지 않습니다.</p>
   </div>;

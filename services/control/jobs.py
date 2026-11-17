@@ -56,10 +56,10 @@ class JobManager:
                                   errors=["제어 API가 재시작되어 이전 실행의 최종 상태를 확인할 수 없습니다. 자동 재실행하지 않습니다."])
                     db.execute("UPDATE runs SET result=? WHERE id=?", (json.dumps(result), run_id))
 
-    def start(self, run_id, request, data, worker, timeout):
+    def start(self, run_id, request, data, worker, timeout, runner=None):
         mqtt = data["operation"] == "mqtt"
         c = data["config"]
-        planned = c["vehicle_count"] * c["messages_per_vehicle"]
+        planned = data.get("planned_messages", c["vehicle_count"] * c["messages_per_vehicle"])
         result = dict(run_id=run_id, transport=data["operation"], state="starting", job_state="starting",
                       allocated_clients=c["client_count"], assignment_count=c["vehicle_count"], assignments=[],
                       planned_messages=planned, processed_messages=0, remaining_messages=planned,
@@ -78,7 +78,7 @@ class JobManager:
                 with self.database() as db:
                     db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(request), json.dumps(result)))
                 self.active = job
-                job.thread = threading.Thread(target=self.run, args=(job, data, worker, timeout), daemon=True)
+                job.thread = threading.Thread(target=runner or self.run, args=(job, data, worker, timeout), daemon=True)
                 job.thread.start()
             except BaseException:
                 self.active = None

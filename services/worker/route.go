@@ -21,6 +21,13 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	if g.ModelVersion == koreaVersion || isPowertrain(g.ModelVersion) {
 		arterial.Limit = 50
 	}
+	if g.ModelVersion == trafficVersion {
+		// 제한표지가 지정된 간선 구간의 개발 가정. 차로 수로 속도를 추정하지 않는다.
+		arterial = roadContext{"외곽 간선 · 제한표지", []float64{60, 70, 80}[rng.Intn(3)], .08}
+		if g.Profile == "urban" || g.Profile == "congested" {
+			arterial = roadContext{"지정 간선 · 제한표지", 60, .12}
+		}
+	}
 	alley := roadContext{"골목·좁은 도로", 20, .2}
 	ramp := roadContext{"진출입로", 50, 0}
 	highway := roadContext{"고속 도로", 100, 0}
@@ -99,7 +106,8 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	}
 	rng := rand.New(rand.NewSource(g.Seed + int64(index)*1000003))
 	eventRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0xabc123))
-	timedEvents := g.ModelVersion == eventVersion
+	timedEvents := g.ModelVersion == eventVersion || g.ModelVersion == trafficVersion
+	variableFlow := g.ModelVersion == trafficVersion
 	clock := newEventClock(g.Seed+int64(index)*1000003+0x74696d65, g.AnomalyEventsPerHour)
 	if !timedEvents || !g.cache.eligible[index] {
 		clock = newEventClock(0, 0)
@@ -140,6 +148,8 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	accel := map[string]float64{"신중": .8, "보통": 1.2, "적극": 1.6}[p.Style]
 	decel := 1.5
 	preference := .8 + rng.Float64()*.18
+	desiredFactor := preference
+	lastStop := -120.0
 	if p.Weather == "젖은 노면" || p.Weather == "강우·젖은 노면" {
 		accel *= .8
 		decel *= .8
@@ -208,6 +218,11 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		}
 		// 같은 교통 상황 안에서 작은 속도 편차만 허용한다.
 		target := road.Limit / 3.6 * preference * flowFactor * (.95 + rng.Float64()*.05)
+		if variableFlow {
+			desiredFactor += .22*(preference-desiredFactor) + (rng.Float64()*2-1)*.09
+			desiredFactor = max(.62, min(.99, desiredFactor))
+			target = road.Limit / 3.6 * desiredFactor * flowFactor
+		}
 		reason := flowReason
 		if flowFactor < .6 {
 			road.StopChance = .35
@@ -235,7 +250,11 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			target = max(0, v-6-eventRNG.Float64()*4)
 		}
 		curvature := 0.0
-		turn := road.Name != "고속 도로" && rng.Float64() < .18
+		turnChance := .18
+		if variableFlow {
+			turnChance = .045
+		}
+		turn := road.Name != "고속 도로" && rng.Float64() < turnChance
 		uturn := turn && (road.Name == "도심 도로" || road.Name == "골목·좁은 도로") && rng.Float64() < .08
 		if korean {
 			uturn = false
@@ -302,6 +321,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			appendSegment(transition, target, entering, "목표 속도 전환 · "+reason, grade, 0, realEvent)
 		}
 		hold := 8 + rng.Float64()*32
+		if variableFlow {
+			hold = 3 + rng.Float64()*9
+		}
 		hold = min(hold, max(0, p.Duration-t-v/decel-2))
 		turnReason := reason
 		if turn && curvature != 0 {
@@ -330,8 +352,19 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		} else {
 			hold = max(.1, hold)
 		}
-		appendSegment(max(.000001, hold), v, road, turnReason, grade, curvature, realEvent)
-		if rng.Float64() < road.StopChance && p.Duration-t > v/decel+8 {
+		holdEnd := v
+		if variableFlow && !turn && event == "" && v > 0 {
+			holdEnd = max(0, min(road.Limit/3.6, v+(rng.Float64()*2-1)*min(.22*hold, 1.4)))
+		}
+		appendSegment(max(.000001, hold), holdEnd, road, turnReason, grade, curvature, realEvent)
+		stopChance := road.StopChance
+		if variableFlow {
+			stopChance = 1 - math.Exp(-hold*road.StopChance/65)
+			if t-lastStop < 70 {
+				stopChance = 0
+			}
+		}
+		if rng.Float64() < stopChance && p.Duration-t > v/decel+8 {
 			appendSegment(v/decel, 0, road, "정차 전 감속", grade, 0, "")
 			stopReason := "신호 대기"
 			if flowFactor < .6 {
@@ -340,6 +373,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 				stopReason = "잠시 볼일 · 시동 유지"
 			}
 			appendSegment(min(6+rng.Float64()*25, max(0, p.Duration-t-5)), 0, road, stopReason, grade, 0, "")
+			lastStop = t
 		}
 	}
 	g.cache.plans[index] = p

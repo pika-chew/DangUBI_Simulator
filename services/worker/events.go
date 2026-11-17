@@ -5,10 +5,12 @@ import (
 	"math/rand"
 )
 
+const trafficVersion = "combustion-traffic-7"
+
 const eventVersion = "combustion-events-6"
 
 func isPowertrain(version string) bool {
-	return version == powertrainVersion || version == eventVersion
+	return version == powertrainVersion || version == eventVersion || version == trafficVersion
 }
 
 // 절대 운행 시간의 포아송 후보 시계. 대기/변속/회복 중 놓친 후보는 적립하지 않는다.

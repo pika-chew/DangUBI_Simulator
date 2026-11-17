@@ -49,16 +49,16 @@ func normalize(req Request) (Request, error) {
 	if len(req.Message) > 0 {
 		return req, errors.New("자동 생성 설정과 수동 메시지는 동시에 사용할 수 없습니다.")
 	}
-	if g.ModelVersion != "" && g.ModelVersion != generatorVersion && g.ModelVersion != scenarioVersion && g.ModelVersion != routeVersion && g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion {
+	if g.ModelVersion != "" && g.ModelVersion != generatorVersion && g.ModelVersion != scenarioVersion && g.ModelVersion != routeVersion && g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion && g.ModelVersion != trafficVersion {
 		return req, errors.New("생성 모델 버전을 확인하세요.")
 	}
-	if g.Weather != "" && g.Weather != "dry" && g.Weather != "rain" || g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion && g.Weather != "" {
+	if g.Weather != "" && g.Weather != "dry" && g.Weather != "rain" || g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion && g.ModelVersion != trafficVersion && g.Weather != "" {
 		return req, errors.New("날씨 조건은 국내 기본 규칙 v4/v5/v6의 건조·강우만 지원합니다.")
 	}
-	if g.EngineStart != "" && g.EngineStart != "cold" && g.EngineStart != "warm" || g.EngineStart != "" && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion {
+	if g.EngineStart != "" && g.EngineStart != "cold" && g.EngineStart != "warm" || g.EngineStart != "" && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion && g.ModelVersion != trafficVersion {
 		return req, errors.New("엔진 시작 상태는 v5/v6의 냉간·온간만 지원합니다.")
 	}
-	if g.AnomalyIntensity != "" && (g.ModelVersion != eventVersion || (g.AnomalyIntensity != "low" && g.AnomalyIntensity != "medium" && g.AnomalyIntensity != "high")) {
+	if g.AnomalyIntensity != "" && (g.ModelVersion != eventVersion && g.ModelVersion != trafficVersion || (g.AnomalyIntensity != "low" && g.AnomalyIntensity != "medium" && g.AnomalyIntensity != "high")) {
 		return req, errors.New("이상 주행 강도는 v6의 낮음·보통·높음만 지원합니다.")
 	}
 	if math.IsNaN(g.AnomalyVehiclePercent) || math.IsNaN(g.AnomalyEventsPerHour) || g.AnomalyVehiclePercent < 0 || g.AnomalyVehiclePercent > 100 || g.AnomalyEventsPerHour < 0 || g.AnomalyEventsPerHour > 60 {
@@ -69,7 +69,7 @@ func normalize(req Request) (Request, error) {
 	req.Generation = &clone
 	g = req.Generation
 	duration := int64(g.DurationSeconds) * 1000
-	if (g.Profile != "urban" && g.Profile != "highway" && g.Profile != "congested" && (g.Profile != "mixed" || g.ModelVersion != scenarioVersion && g.ModelVersion != routeVersion && g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion)) || g.Seed < -2147483648 || g.Seed > 2147483647 || g.StartTimeMS < 0 || g.StartTimeMS > 4102444800000 || g.DurationSeconds < 10 || g.DurationSeconds > 3600 || req.Config.IntervalMS < 100 || req.Config.IntervalMS > duration/10 || duration%req.Config.IntervalMS != 0 || math.IsNaN(g.StartLat) || math.IsNaN(g.StartLon) || math.IsNaN(g.InitialOdometerM) || math.Abs(g.StartLat) > 85 || math.Abs(g.StartLon) > 180 || g.InitialOdometerM < 0 || g.InitialOdometerM > 1e9 {
+	if (g.Profile != "urban" && g.Profile != "highway" && g.Profile != "congested" && (g.Profile != "mixed" || g.ModelVersion != scenarioVersion && g.ModelVersion != routeVersion && g.ModelVersion != koreaVersion && g.ModelVersion != powertrainVersion && g.ModelVersion != eventVersion && g.ModelVersion != trafficVersion)) || g.Seed < -2147483648 || g.Seed > 2147483647 || g.StartTimeMS < 0 || g.StartTimeMS > 4102444800000 || g.DurationSeconds < 10 || g.DurationSeconds > 3600 || req.Config.IntervalMS < 100 || req.Config.IntervalMS > duration/10 || duration%req.Config.IntervalMS != 0 || math.IsNaN(g.StartLat) || math.IsNaN(g.StartLon) || math.IsNaN(g.InitialOdometerM) || math.Abs(g.StartLat) > 85 || math.Abs(g.StartLon) > 180 || g.InitialOdometerM < 0 || g.InitialOdometerM > 1e9 {
 		return req, errors.New("자동 생성의 프로필·시각·좌표·운행시간·주기를 확인하세요. 주기는 운행시간을 나누어 떨어지게 하고 최소 10구간을 확보해야 합니다.")
 	}
 	req.Config.MessagesPerVehicle = int(duration/req.Config.IntervalMS) + 2 // t=0, 종료 Microtrip, Trip 포함

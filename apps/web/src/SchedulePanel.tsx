@@ -303,6 +303,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         <p>{roads[trip.road_profile]} · 실제 운행 {clock(trip.start_ms)} → {clock(trip.end_ms)}</p>
         <p className="note">관측 범위 {clock(trip.observed_start_ms)} → {clock(trip.observed_end_ms)}{trip.started_before_window && " · 측정 시작 전 출발"}{trip.continues_after_window && " · 측정 종료 후에도 운행 중"}</p>
         <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>
+        {!trip.continues_after_window && <p className="note">선택 운행은 측정 기간 안에 정상 종료하므로 시험용 Trip 옵션이 비활성화됩니다.</p>}
         <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>선택 운행 OBD 생성·조회</button>
         <p className="note">먼저 가까운 중간 상태에서 이어 계산합니다. 처음 조회하는 먼 구간은 요청당 최대16회·48시간의 운행을 나누어 준비한 뒤 자동으로 조회합니다.</p>
         {restoration && <div className="schedule-status" role="status">
@@ -316,7 +317,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
     {summary && trip && <section className="card" hidden={view !== "data"}>
       <h2>차량 데이터</h2>
       <p>{vehicle} · {clock(trip.start_ms)} 출발 · 모델 {summary.model}</p>
-      <p className="note">출발 위치 {summary.initial_state.lat.toFixed(6)}, {summary.initial_state.lon.toFixed(6)} · 초기 총주행거리 {(summary.initial_state.odometer_m / 1000).toFixed(3)} km · 냉각수 {summary.initial_state.coolant_c.toFixed(1)}℃. 주차 냉각은 외기 20℃·시정수 2시간의 개발 근사입니다.</p>
+      <p className="note">출발 위치 {summary.initial_state.lat.toFixed(6)}, {summary.initial_state.lon.toFixed(6)} · 초기 총주행거리 {(summary.initial_state.odometer_m / 1000).toFixed(3)} km.</p>
       <div className={`schedule-trip-status ${summary.synthetic_trip ? "synthetic" : ""}`}><b>{summary.trip ? summary.synthetic_trip ? "시험용 종료 Trip" : "정상 종료 Trip" : "종료 Trip 없음"}</b><p>{summary.trip ? summary.synthetic_trip ? "측정 종료까지의 값만 집계한 시험 요약입니다. 실제 운행 종료가 아닙니다." : "실제 출발부터 종료까지의 전체 운행 요약입니다. 아래 조회 구간을 좁혀도 이 요약은 바뀌지 않습니다." : "이 운행은 측정 종료 이후에도 계속됩니다. 종료 전에는 정상 Trip을 생성하지 않습니다."}</p></div>
       {summary.trip && <details><summary>Trip 요약 · 표/JSON 보기</summary>{renderMessages([summary.trip], vehicle)}</details>}
       <h3>Microtrip 구간 조회</h3>
@@ -328,7 +329,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       {loaded && <>
         <p className="schedule-range">조회 완료 · {clock(loaded.start)} → {clock(loaded.end)} · Microtrip {loaded.data.microtrip_count.toLocaleString()}건</p>
         <SpeedChart trace={loaded.data.trace} start={loaded.start} end={loaded.end} departure={trip.start_ms} disabled={!!busy} onRange={(a, b) => void query(a, b)} />
-        {!!loaded.data.trace.length && <details><summary>주행 상태표 · 최대 120점</summary><div className="table-scroll"><table className="schedule-trace"><thead><tr><th>시각 (KST)</th><th>속도 (km/h)</th><th>RPM</th><th>상태</th><th>도로·상황</th><th>냉각수 (℃)</th></tr></thead><tbody>{loaded.data.trace.map(p => <tr key={p.elapsed_seconds}><td>{clock(trip.start_ms + p.elapsed_seconds * 1000)}</td><td>{p.speed_kmh.toFixed(1)}</td><td>{p.rpm.toFixed(0)}</td><td>{p.state}</td><td>{p.context?.road} · {p.context?.reason}</td><td>{p.context?.coolant_c?.toFixed(1)}</td></tr>)}</tbody></table></div></details>}
+        {!!loaded.data.trace.length && <details><summary>주행 상태표 · 최대 120점</summary><div className="table-scroll"><table className="schedule-trace"><thead><tr><th>시각 (KST)</th><th>속도 (km/h)</th><th>RPM</th><th>상태</th><th>도로·상황</th></tr></thead><tbody>{loaded.data.trace.map(p => <tr key={p.elapsed_seconds}><td>{clock(trip.start_ms + p.elapsed_seconds * 1000)}</td><td>{p.speed_kmh.toFixed(1)}</td><td>{p.rpm.toFixed(0)}</td><td>{p.state}</td><td>{p.context?.road} · {p.context?.reason}</td></tr>)}</tbody></table></div></details>}
         <div className="schedule-actions"><b>Microtrip · {loaded.data.microtrip_count ? loaded.offset + 1 : 0}~{loaded.offset + loaded.data.messages.length} / {loaded.data.microtrip_count.toLocaleString()}건</b><button disabled={!!busy || loaded.offset === 0} onClick={() => void query(loaded.start, loaded.end, Math.max(0, loaded.offset - 100))}>이전 100건</button><button disabled={!!busy || !loaded.data.has_more} onClick={() => void query(loaded.start, loaded.end, loaded.offset + 100)}>다음 100건</button></div>
         <div className="interval-messages">{renderMessages(loaded.data.messages, vehicle, loaded.offset)}</div>
         <p className="note">조회 결과는 설정으로 재생성한 합성 데이터이며 브로커 수신 기록이 아닙니다. 표/JSON에는 OBD 본문만 표시하고 도로 상황과 모델 정보는 별도로 표시합니다.</p>

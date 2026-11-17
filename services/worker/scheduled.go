@@ -62,7 +62,7 @@ func scheduledOBD(input Request) (Result, error) {
 		return Result{}, errors.New("이상 이벤트 빈도·강도를 확인하세요.")
 	}
 	n := int((span + s.IntervalMS - 1) / s.IntervalMS)
-	r := Request{Config: Config{VehicleCount: 1, ClientCount: 1, MessagesPerVehicle: n + 1, IntervalMS: s.IntervalMS}, Generation: &Generation{ModelVersion: eventVersion, Seed: s.Seed, Profile: s.Profile, StartTimeMS: s.StartMS, DurationSeconds: int(span / 1000), StartLat: s.Lat, StartLon: s.Lon, InitialOdometerM: s.Odometer, Weather: "dry", Continuity: &s.Continuity}}
+	r := Request{Config: Config{VehicleCount: 1, ClientCount: 1, MessagesPerVehicle: n + 1, IntervalMS: s.IntervalMS}, Generation: &Generation{ModelVersion: trafficVersion, Seed: s.Seed, Profile: s.Profile, StartTimeMS: s.StartMS, DurationSeconds: int(span / 1000), StartLat: s.Lat, StartLon: s.Lon, InitialOdometerM: s.Odometer, Weather: "dry", Continuity: &s.Continuity}}
 	if s.AnomalyEligible {
 		r.Generation.AnomalyVehiclePercent = 100
 	}
@@ -83,7 +83,7 @@ func scheduledOBD(input Request) (Result, error) {
 			last = -1
 		}
 	}
-	out := &ScheduledOutput{Model: "schedule-obd-1/event-6", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
+	out := &ScheduledOutput{Model: "schedule-obd-2/traffic-7", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
 	_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
 	for seq := first + int64(s.Offset); seq <= last && len(out.Messages) < s.Limit; seq++ {
 		out.Messages = append(out.Messages, message(int(seq)))

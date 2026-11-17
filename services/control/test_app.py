@@ -1018,3 +1018,81 @@ def test_workspace_plan_rejects_ambiguous_sources_and_can_replay(client):
     key=plan["trips"][0]["trip_key"]
     first=client.post("/api/schedules/obd/v000001/"+key,json={"schedule":reloaded["request"]["schedule"]}).json()
     assert first["microtrip_count"]==30 and first["trip"]["ty"]==3
+
+
+def wait_workspace_job(client, run_id):
+    import time
+    for _ in range(500):
+        run=client.get('/api/jobs/'+run_id).json()
+        if run['result']['job_state'] not in control.ACTIVE:
+            return run
+        time.sleep(.02)
+    raise AssertionError('일정 실행이 완료되지 않았습니다.')
+
+
+def test_workspace_schedule_execution_matches_query_and_mapping(client):
+    schedule=scheduled_obd_body()['schedule']
+    schedule['measurement']['end']='2026-11-17T13:01:00+09:00'
+    saved=client.post('/api/workspace/plans',json={'title':'전체 자동 실행','schedule':schedule}).json()
+    rows=client.post('/api/schedules/preview',json=schedule).json()['trips']
+    expected=client.post('/api/schedules/obd/v000001/'+rows[0]['trip_key'],json={'schedule':schedule}).json()
+    started=client.post('/api/workspace/execute',json={'plan_key':saved['key'],'realtime':False,'mapping_mode':'dedicated'})
+    assert started.status_code==202,started.text
+    result=wait_workspace_job(client,started.json()['id'])['result']
+    assert result['job_state']=='completed',result
+    assert result['processed_messages']==result['planned_messages']==31
+    assert result['microtrip_count']==30 and result['trip_count']==1
+    assert result['samples'][0]['message']==expected['messages'][0]
+    assert result['mqtt_published']==result['puback_count']==result['connected_clients']==0
+    assert len(result['samples'])<=10
+    assert result['assignments'][0]['vehicle_id']=='v000001'
+    assert client.get('/api/workspace/records/'+saved['key']).json()==saved
+
+
+def test_workspace_schedule_execution_rejects_long_plan(client):
+    saved=client.post('/api/workspace/plans',json={'title':'장기 일정','fleet':fleet_example()}).json()
+    response=client.post('/api/workspace/execute',json={'plan_key':saved['key']})
+    assert response.status_code==422
+    assert client.get('/api/health').json()['active_job_id'] is None
+
+
+def test_workspace_schedule_pause_stop_and_no_fake_trip(client):
+    import time
+    schedule=scheduled_obd_body()['schedule']
+    schedule['measurement']['end']='2026-11-17T13:01:00+09:00'
+    saved=client.post('/api/workspace/plans',json={'title':'제어 시험','schedule':schedule}).json()
+    started=client.post('/api/workspace/execute',json={'plan_key':saved['key']}).json()
+    run_id=started['id']
+    client.post('/api/jobs/'+run_id+'/pause')
+    for _ in range(100):
+        result=client.get('/api/jobs/'+run_id).json()['result']
+        if result['job_state']=='paused':break
+        time.sleep(.02)
+    assert result['job_state']=='paused'
+    count=result['processed_messages']
+    time.sleep(.1)
+    assert client.get('/api/jobs/'+run_id).json()['result']['processed_messages']==count
+    assert client.post('/api/workspace/delete',json={'keys':['run:'+run_id],'confirm':True}).status_code==409
+    client.post('/api/jobs/'+run_id+'/resume')
+    client.post('/api/jobs/'+run_id+'/stop')
+    result=wait_workspace_job(client,run_id)['result']
+    assert result['job_state']=='stopped' and result['trip_count']==0
+    assert control.JOBS.active_id() is None
+
+
+def test_workspace_schedule_interleaves_vehicles_and_forced_boundary(client):
+    schedule=scheduled_obd_body()['schedule']
+    schedule['measurement']['end']='2026-11-17T13:00:30+09:00'
+    schedule['vehicles'].append({'vehicle_id':'v000002','trips':[{'start':'2026-11-17T13:00:04+09:00','end':'2026-11-17T13:01:00+09:00','road_profile':'highway'}]})
+    saved=client.post('/api/workspace/plans',json={'title':'경계 시험','schedule':schedule}).json()
+    for forced,expected in [(False,30),(True,30)]:
+        response=client.post('/api/workspace/execute',json={'plan_key':saved['key'],'realtime':False,'force_end_trip':forced,'client_count':1})
+        assert response.status_code==202,response.text
+        result=wait_workspace_job(client,response.json()['id'])['result']
+        assert result['job_state']=='completed',result
+        assert result['planned_messages']==result['processed_messages']==expected
+        assert result['trip_count']==(2 if forced else 0)
+        assert len({a['client_id'] for a in result['assignments']})==1
+        assert len({s['vehicle_id'] for s in result['samples']})==2
+        stamps=[s['message']['ts'] for s in result['samples']]
+        assert stamps==sorted(stamps)
