@@ -58,19 +58,18 @@ func TestAnalysisExactDurationAndStops(t *testing.T) {
 	near(t, clipped.Idle, 6)
 }
 func TestAnalysisMatchesTripAndIntervalInvariant(t *testing.T) {
-	for _, version := range []string{generatorVersion, scenarioVersion, routeVersion} {
-		r := scenarioRequest(600)
+	for _, version := range []string{generatorVersion, scenarioVersion, routeVersion, koreaVersion} {
+		r := auditRequest{Request: scenarioRequest(600)}
 		r.Generation.ModelVersion = version
 		r.Generation.Profile = "urban"
-		r, _ = normalize(r)
-		generated, err := process(r)
+		r, _ = normalizeAudit(r)
+		generated, err := process(r.Request)
 		if err != nil {
 			t.Fatal(err)
 		}
-		r.Operation = "analysis"
 		r.TraceUntilMS = 600000
 		r.AnalysisProcessed = generated.Processed
-		out, err := process(r)
+		out, err := processAudit(r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,20 +83,19 @@ func TestAnalysisMatchesTripAndIntervalInvariant(t *testing.T) {
 		near(t, out.Analysis.Summary.Idle, idle)
 		near(t, out.Analysis.Summary.VehicleSeconds, 1800)
 		r.Config.IntervalMS = 4000
-		r, _ = normalize(r)
+		r, _ = normalizeAudit(r)
 		r.AnalysisProcessed = r.Config.VehicleCount * r.Config.MessagesPerVehicle
-		second, err := process(r)
+		second, err := processAudit(r)
 		if err != nil || !reflect.DeepEqual(out.Analysis.Summary, second.Analysis.Summary) {
 			t.Fatal("보고 주기에 따라 통계 변경", version, err)
 		}
 	}
 }
 func TestAnalysisPartialAndBoundaries(t *testing.T) {
-	r := routeRequest(600)
-	r.Operation = "analysis"
+	r := auditRequest{Request: routeRequest(600)}
 	r.AnalysisProcessed = 5
 	r.TraceUntilMS = 600000
-	out, err := process(r)
+	out, err := processAudit(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,30 +105,29 @@ func TestAnalysisPartialAndBoundaries(t *testing.T) {
 	}
 	r.AnalysisVehicle = 3
 	r.TraceUntilMS = 2000
-	if _, err := process(r); err == nil {
+	if _, err := processAudit(r); err == nil {
 		t.Fatal("미래 구간 분석")
 	}
 	r.AnalysisProcessed = 0
-	if _, err := process(r); err == nil {
+	if _, err := processAudit(r); err == nil {
 		t.Fatal("미생성 차량 미래 분석")
 	}
 	r.AnalysisVehicle = 0
 	r.AnalysisProcessed = 0
-	out, err = process(r)
+	out, err = processAudit(r)
 	if err != nil || out.Analysis.Summary.VehicleSeconds != 0 {
 		t.Fatal("빈 분석", err)
 	}
 }
 func TestAnalysisFleetPageAndEligibility(t *testing.T) {
-	r := routeRequest(60)
+	r := auditRequest{Request: routeRequest(60)}
 	r.Config.VehicleCount = 60
 	r.Generation.AnomalyVehiclePercent = 25
 	r.Generation.AnomalyEventsPerHour = 60
-	r, _ = normalize(r)
-	r.Operation = "analysis"
+	r, _ = normalizeAudit(r)
 	r.TraceUntilMS = 60000
 	r.AnalysisProcessed = r.Config.VehicleCount * r.Config.MessagesPerVehicle
-	out, err := process(r)
+	out, err := processAudit(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +136,7 @@ func TestAnalysisFleetPageAndEligibility(t *testing.T) {
 		t.Fatal("분석 대상·페이지", a)
 	}
 	r.AnalysisOffset = 50
-	b, err := process(r)
+	b, err := processAudit(r)
 	if err != nil || len(b.Analysis.Vehicles) != 10 || b.Analysis.Vehicles[0].VehicleID != "v000051" || !reflect.DeepEqual(a.Summary, b.Analysis.Summary) {
 		t.Fatal("분석 페이지", err)
 	}
@@ -148,7 +145,7 @@ func TestAnalysisFleetPageAndEligibility(t *testing.T) {
 	r.TraceStartMS = 10000
 	r.TraceUntilMS = 20000
 	r.AnalysisOffset = 0
-	one, err := process(r)
+	one, err := processAudit(r)
 	if err != nil {
 		t.Fatal(err)
 	}

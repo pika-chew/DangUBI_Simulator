@@ -60,7 +60,7 @@ func modelVersion(g *Generation) string {
 }
 
 func getScenario(req Request, index int) *scenarioPlan {
-	if req.Generation.ModelVersion == routeVersion {
+	if req.Generation.ModelVersion == routeVersion || req.Generation.ModelVersion == koreaVersion {
 		return getRouteScenario(req, index)
 	}
 	g := req.Generation

@@ -21,21 +21,18 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
-	Operation         string         `json:"operation"`
-	RunID             string         `json:"run_id"`
-	Config            Config         `json:"config"`
-	Message           map[string]any `json:"message"`
-	MQTT              *MQTTProfile   `json:"mqtt,omitempty"`
-	Generation        *Generation    `json:"generation,omitempty"`
-	TraceVehicle      int            `json:"trace_vehicle,omitempty"`
-	TraceStartMS      int64          `json:"trace_start_ms,omitempty"`
-	TraceUntilMS      int64          `json:"trace_until_ms,omitempty"`
-	TraceOffset       int            `json:"trace_offset,omitempty"`
-	TraceLimit        int            `json:"trace_limit,omitempty"`
-	AnalysisVehicle   int            `json:"analysis_vehicle,omitempty"`
-	AnalysisProcessed int            `json:"analysis_processed,omitempty"`
-	AnalysisOffset    int            `json:"analysis_offset,omitempty"`
-	Realtime          bool           `json:"realtime,omitempty"`
+	Operation    string         `json:"operation"`
+	RunID        string         `json:"run_id"`
+	Config       Config         `json:"config"`
+	Message      map[string]any `json:"message"`
+	MQTT         *MQTTProfile   `json:"mqtt,omitempty"`
+	Generation   *Generation    `json:"generation,omitempty"`
+	TraceVehicle int            `json:"trace_vehicle,omitempty"`
+	TraceStartMS int64          `json:"trace_start_ms,omitempty"`
+	TraceUntilMS int64          `json:"trace_until_ms,omitempty"`
+	TraceOffset  int            `json:"trace_offset,omitempty"`
+	TraceLimit   int            `json:"trace_limit,omitempty"`
+	Realtime     bool           `json:"realtime,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
@@ -83,7 +80,6 @@ type Result struct {
 	PausedMS          int64            `json:"paused_ms"`
 	ActiveElapsedMS   int64            `json:"active_elapsed_ms"`
 	SimulationTimeMS  int64            `json:"simulation_time_ms"`
-	Analysis          *AnalysisReport  `json:"analysis,omitempty"`
 	Scenario          *ScenarioSummary `json:"scenario,omitempty"`
 	events            map[int]int
 	ExecutionState    string `json:"execution_state"`
@@ -101,7 +97,7 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 	if c.VehicleCount < 1 || c.VehicleCount > 10000 || c.MessagesPerVehicle < 1 || c.VehicleCount*c.MessagesPerVehicle > 10000 || c.IntervalMS < 1 || c.IntervalMS > 86400000 {
 		return Result{}, errors.New("차량 수·생성 건수·주기를 확인하세요. 한 실행은 최대 10,000건입니다.")
 	}
-	if req.Operation != "preview" && req.Operation != "dry_run" && req.Operation != "plan" && req.Operation != "trace" && req.Operation != "analysis" {
+	if req.Operation != "preview" && req.Operation != "dry_run" && req.Operation != "plan" && req.Operation != "trace" {
 		return Result{}, errors.New("송신 없는 확인만 지원합니다.")
 	}
 	if c.Lifetime != "always" && c.Lifetime != "while_driving" {
@@ -160,11 +156,6 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 		limit = 100
 	}
 	out := Result{RunID: req.RunID, Transport: "dry_run", State: "preview", AllocatedClients: clients, AssignmentCount: c.VehicleCount, Assignments: allocations[:limit], Planned: c.VehicleCount * c.MessagesPerVehicle, Samples: []Sample{}}
-	if req.Operation == "analysis" {
-		var err error
-		out.Analysis, err = analyzeDrive(req)
-		return out, err
-	}
 	if req.Operation == "trace" {
 		if req.Generation == nil || req.TraceVehicle < 1 || req.TraceVehicle > c.VehicleCount || req.TraceStartMS < 0 || req.TraceStartMS > req.TraceUntilMS || req.TraceUntilMS < 0 || req.TraceUntilMS > int64(req.Generation.DurationSeconds)*1000 {
 			return Result{}, errors.New("차량·조회 구간을 확인하세요.")

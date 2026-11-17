@@ -6,6 +6,7 @@ import (
 )
 
 const routeVersion = "combustion-route-3"
+const koreaVersion = "combustion-korea-4"
 
 type routePart struct {
 	End  float64
@@ -17,6 +18,9 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	duration := float64(g.DurationSeconds)
 	urban := roadContext{"도심 도로", 50, .35}
 	arterial := roadContext{"간선 도로", 70, .12}
+	if g.ModelVersion == koreaVersion {
+		arterial.Limit = 50
+	}
 	alley := roadContext{"골목·좁은 도로", 20, .2}
 	ramp := roadContext{"진출입로", 50, 0}
 	highway := roadContext{"고속 도로", 100, 0}
@@ -99,9 +103,19 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	if rng.Float64() < .15 {
 		p.Weather = "젖은 노면"
 	}
+	korean := g.ModelVersion == koreaVersion
+	weatherFactor := 1.0
+	if korean {
+		p.Weather = "건조"
+		if g.Weather == "rain" {
+			p.Weather = "강우·젖은 노면"
+			weatherFactor = .8
+		}
+	}
+	effectiveRoad := func(road roadContext) roadContext { road.Limit *= weatherFactor; return road }
 	route := buildRoute(g, rand.New(rand.NewSource(g.Seed+int64(index)*1000003+0x726f7574)))
 	routeUntil := p.Duration
-	currentRoad := route[0].Road
+	currentRoad := effectiveRoad(route[0].Road)
 	flowUntil, flowFactor, grade := 0.0, 1.0, 0.0
 	flowReason := "원활한 흐름"
 	contextRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0x666c6f77))
@@ -110,10 +124,12 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	accel := map[string]float64{"신중": .8, "보통": 1.2, "적극": 1.6}[p.Style]
 	decel := 1.5
 	preference := .8 + rng.Float64()*.18
-	if p.Weather == "젖은 노면" {
+	if p.Weather == "젖은 노면" || p.Weather == "강우·젖은 노면" {
 		accel *= .8
 		decel *= .8
-		preference *= .9
+		if !korean {
+			preference *= .9
+		}
 	}
 	appendSegment := func(dt, end float64, road roadContext, reason string, grade, curvature float64, event string) {
 		requested := dt
@@ -136,7 +152,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	for t < p.Duration-1e-7 {
 		part := routeAt(route, t)
 		routeUntil = part.End
-		currentRoad = part.Road
+		currentRoad = effectiveRoad(part.Road)
 		left := p.Duration - t
 		if left <= v/decel+3 {
 			routeUntil = p.Duration // 종료 감속은 마지막 수 초의 경계보다 우선한다.
@@ -170,7 +186,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		}
 		if routeUntil < p.Duration && routeUntil-t <= 60 {
 			next := routeAt(route, routeUntil)
-			target = min(target, next.Road.Limit/3.6)
+			target = min(target, next.Road.Limit*weatherFactor/3.6)
 		}
 		target *= min(1, 1-grade*1.5)
 		target = min(target, decel*max(0, p.Duration-t-3)/3) // 끝에서 급정지하지 않도록 여유 확보
@@ -190,6 +206,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		curvature := 0.0
 		turn := road.Name != "고속 도로" && rng.Float64() < .18
 		uturn := turn && (road.Name == "도심 도로" || road.Name == "골목·좁은 도로") && rng.Float64() < .08
+		if korean {
+			uturn = false
+		} // 실제 경로의 유턴 허용 지점을 알 수 없으므로 기본 생성하지 않는다.
 		turnSign := rng.Intn(2)
 		radius := 30 + rng.Float64()*70
 		if uturn {
@@ -223,7 +242,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if transition > 0 {
 			// 감속 중에는 이전 구간 속도까지 허용하는 진입 구간으로 표시한다.
 			entering := road
-			entering.Limit = max(road.Limit, v*3.6)
+			if !korean {
+				entering.Limit = max(road.Limit, v*3.6)
+			}
 			realEvent := ""
 			if event == "급가속" && target > v || event == "급감속" && target < v {
 				realEvent = event
@@ -236,6 +257,12 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if turn && curvature != 0 {
 			angle := math.Pi / 2
 			turnReason = "커브·교차로 회전"
+			if korean {
+				turnReason = "도로 커브"
+				if road.Name == "진출입로" {
+					turnReason = "진출입로 커브"
+				}
+			}
 			if uturn {
 				angle = math.Pi
 				turnReason = "저속 유턴"

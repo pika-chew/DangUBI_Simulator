@@ -164,7 +164,7 @@ func TestMQTTTLSModes(t *testing.T) {
 }
 
 func TestAutomaticMQTTIncludesFinalTrip(t *testing.T) {
-	for _, version := range []string{scenarioVersion, routeVersion} {
+	for _, version := range []string{scenarioVersion, routeVersion, koreaVersion} {
 		t.Run(version, func(t *testing.T) { testAutomaticMQTTIncludesFinalTrip(t, version) })
 	}
 }

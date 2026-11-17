@@ -278,7 +278,7 @@ func analysisSegments(req Request, index int) ([]motionSegment, bool) {
 	}
 	return out, false
 }
-func analyzeDrive(req Request) (*AnalysisReport, error) {
+func analyzeDrive(req auditRequest) (*AnalysisReport, error) {
 	if req.Generation == nil || req.AnalysisVehicle < 0 || req.AnalysisVehicle > req.Config.VehicleCount || req.AnalysisProcessed < 0 || req.AnalysisProcessed > req.Config.VehicleCount*req.Config.MessagesPerVehicle || req.AnalysisOffset < 0 || req.AnalysisOffset > 10000 || req.TraceStartMS < 0 || req.TraceUntilMS < req.TraceStartMS || req.TraceUntilMS > int64(req.Generation.DurationSeconds)*1000 {
 		return nil, errors.New("운행 분석의 차량·생성 범위·페이지를 확인하세요.")
 	}
@@ -306,7 +306,7 @@ func analyzeDrive(req Request) (*AnalysisReport, error) {
 		if end <= start {
 			continue
 		}
-		segments, eligible := analysisSegments(req, i)
+		segments, eligible := analysisSegments(req.Request, i)
 		s := summarizeSegments(segments, start, end, eligible)
 		if req.Generation.cache != nil {
 			delete(req.Generation.cache.plans, i)
@@ -320,4 +320,27 @@ func analyzeDrive(req Request) (*AnalysisReport, error) {
 	sort.Slice(report.Summary.Roads, func(i, j int) bool { return report.Summary.Roads[i].Name < report.Summary.Roads[j].Name })
 	finishStats(&report.Summary)
 	return report, nil
+}
+
+// 아래 집계는 개발 시험 전용이다. 실행 Worker나 공개 API에는 포함하지 않는다.
+type auditRequest struct {
+	Request
+	AnalysisVehicle   int
+	AnalysisProcessed int
+	AnalysisOffset    int
+}
+type auditResult struct{ Analysis *AnalysisReport }
+
+func normalizeAudit(req auditRequest) (auditRequest, error) {
+	normalized, err := normalize(req.Request)
+	req.Request = normalized
+	return req, err
+}
+func processAudit(req auditRequest) (auditResult, error) {
+	req, err := normalizeAudit(req)
+	if err != nil {
+		return auditResult{}, err
+	}
+	report, err := analyzeDrive(req)
+	return auditResult{report}, err
 }

@@ -36,6 +36,7 @@ type Assignment = { vehicle_id: string; client_id: string };
 type Generation = {
   profile: "urban" | "highway" | "congested" | "mixed";
   model_version?: string;
+  weather?: "dry" | "rain";
   anomaly_vehicle_percent?: number;
   anomaly_events_per_hour?: number;
   seed: number;
@@ -177,7 +178,8 @@ function App() {
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
     profile: "mixed",
-    model_version: "combustion-route-3",
+    model_version: "combustion-korea-4",
+    weather: "dry",
     anomaly_vehicle_percent: 5,
     anomaly_events_per_hour: 2,
     seed: 42,
@@ -717,10 +719,11 @@ function App() {
                       <em>02</em> 자동 주행 설정
                     </h2>
                     <p className="note">
-                      경로 기반 v3는 도로 연결 순서와 구간 유지를 반영하며, 가상
+                      기본 v4는 도심 기본 속도와 강우 조건을 반영하며, 가상
                       혼잡·운전자 성향에 따라 짧은 가감속·정속·시동 유지 정차를
-                      반복합니다. 커브·유턴과 경사·노면도 근사합니다. 실제
-                      도로망·차량 간 상호작용·실차 보정은 포함하지 않습니다.
+                      반복합니다. 도로 커브·경사도 근사하며 유턴은 기본 생성하지
+                      않습니다. 실제 도로망·차량 간 상호작용·실차 보정은
+                      포함하지 않습니다.
                     </p>
                     <fieldset disabled={locked}>
                       <label htmlFor="setting-9">
@@ -762,6 +765,10 @@ function App() {
                               setGeneration({
                                 ...generation,
                                 model_version: e.target.value,
+                                weather:
+                                  e.target.value === "combustion-korea-4"
+                                    ? generation.weather || "dry"
+                                    : undefined,
                                 profile:
                                   e.target.value === "combustion-demo-1" &&
                                   generation.profile === "mixed"
@@ -772,6 +779,9 @@ function App() {
                               })
                             }
                           >
+                            <option value="combustion-korea-4">
+                              국내 기본 규칙 v4 · 근사
+                            </option>
                             <option value="combustion-route-3">
                               경로 기반 모델 v3 · 근사
                             </option>
@@ -783,6 +793,24 @@ function App() {
                             </option>
                           </select>
                         </label>
+                        {generation.model_version === "combustion-korea-4" && (
+                          <label>
+                            날씨 조건 <Info name="날씨 조건" />
+                            <select
+                              aria-label="날씨 조건"
+                              value={generation.weather || "dry"}
+                              onChange={(e) =>
+                                setGeneration({
+                                  ...generation,
+                                  weather: e.target.value as "dry" | "rain",
+                                })
+                              }
+                            >
+                              <option value="dry">건조</option>
+                              <option value="rain">강우 · 젖은 노면</option>
+                            </select>
+                          </label>
+                        )}
                         <label>
                           이상 대상 차량 비율 (%)
                           <input
@@ -1704,7 +1732,6 @@ function DrivingResult({
       <div className="interval-messages">
         <MessageViewer samples={intervalSamples} catalog={catalog} />
       </div>
-      <DrivingAnalysis result={result} range={hasQuery ? loadedRange : null} />
       <h3>종료 Trip 요약</h3>
       <div className="table-scroll">
         <table>
@@ -1758,23 +1785,10 @@ const explanations: Record<string, string> = {
     "수동 모드에서 차량마다 만들 메시지 수입니다. 자동 모드에서는 시작·종료 Microtrip과 종료 Trip을 포함해 자동 계산합니다.",
   "생성 주기 (밀리초)":
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
+  "날씨 조건":
+    "v4의 실행 전체에 적용할 가상 날씨입니다. 강우·젖은 노면은 도로 기본 속도 상한의 80%를 제어 상한으로 쓰고 가감속도 완화합니다. 실제 기상 조회, 폭우·결빙·가변 속도표지는 포함하지 않습니다.",
   "운행 프로필":
-    "v3는 합성 경로의 연결 순서와 구간 지속시간을 먼저 정하고 교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v2/v1 기록은 기존 모델로 재생성합니다.",
-  "분석 차량": "선택 범위에 0초보다 긴 생성 운행이 있는 차량 수입니다.",
-  "차량별 시간 합계":
-    "각 차량에서 분석한 시간을 합산합니다. 3대가 1시간씩이면 10,800 차량·초이며 실제 실행 대기시간과 다릅니다.",
-  평균속도:
-    "분석한 전체 거리 합계를 차량별 분석시간 합계로 나눈 시간 가중 평균입니다.",
-  "주행 중 평균속도":
-    "정차(속도 0) 시간을 제외한 운행시간으로 계산한 평균속도입니다. 주행시간이 없으면 0으로 표시합니다.",
-  "정차 비율": "분석한 차량별 시간 합계 중 속도가 계속 0인 구간의 비율입니다.",
-  "정차 구간 수":
-    "이어진 정차를 하나로 묶습니다. 웜업·종료 대기와 선택 구간 경계의 부분 정차도 포함합니다.",
-  "최장 정차": "분석 범위 안에서 관측한 연속 정차시간의 최댓값입니다.",
-  "전체 거리 합계":
-    "분석 범위의 속도 구간을 적분해 얻은 차량별 거리의 합계입니다.",
-  "이상 발생 차량":
-    "분석 구간에서 내부 이상 이벤트가 새로 발생한 차량 수 / 분석 차량 수입니다.",
+    "v4는 도심 기본 속도와 선택한 가상 날씨를 적용하고, 합성 경로의 연결 순서와 구간 지속시간·교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v3/v2/v1 기록은 기존 모델로 재생성합니다.",
   "생성 확인":
     "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
   미생성:
@@ -1948,540 +1962,5 @@ function MessageViewer({
         개발 규격을 따르며 JSON 원본과 전송 내용은 바꾸지 않습니다.
       </p>
     </div>
-  );
-}
-
-type AnalysisBin = {
-  label: string;
-  seconds: number;
-  percent: number;
-  count: number;
-};
-type AnalysisStats = {
-  vehicle_seconds: number;
-  distance_m: number;
-  average_speed_kmh: number;
-  moving_average_speed_kmh: number;
-  peak_speed_kmh: number;
-  idle_seconds: number;
-  idle_percent: number;
-  stop_episodes: number;
-  longest_stop_seconds: number;
-  speed_bins: AnalysisBin[];
-  acceleration_bins: AnalysisBin[];
-  stop_duration_bins: AnalysisBin[];
-  roads: {
-    name: string;
-    seconds: number;
-    percent: number;
-    entries: number;
-    longest_seconds: number;
-  }[];
-  traffic_labels: AnalysisBin[];
-  events: Record<string, number>;
-  event_count: number;
-  events_per_vehicle_hour: number;
-  eligible_vehicle_seconds: number;
-  events_per_eligible_hour: number;
-  analyzed_vehicles: number;
-  eligible_vehicles: number;
-  event_vehicles: number;
-};
-type DriveAnalysisResponse = {
-  analysis: {
-    analysis_version: string;
-    model_version: string;
-    processed_snapshot: number;
-    configured_vehicles: number;
-    target_eligible_vehicles: number;
-    configured_events_per_hour: number;
-    summary: AnalysisStats;
-    vehicles: {
-      vehicle_id: string;
-      start_seconds: number;
-      end_seconds: number;
-      vehicle_seconds: number;
-      average_speed_kmh: number;
-      idle_percent: number;
-      stop_episodes: number;
-      event_count: number;
-      eligible: boolean;
-    }[];
-    vehicle_offset: number;
-    vehicle_total: number;
-  };
-  references: {
-    method: string;
-    source_page: string;
-    cycles: {
-      name: string;
-      description: string;
-      url: string;
-      sha256: string;
-      summary: Pick<
-        AnalysisStats,
-        | "vehicle_seconds"
-        | "average_speed_kmh"
-        | "peak_speed_kmh"
-        | "idle_percent"
-        | "speed_bins"
-      >;
-    }[];
-  };
-  source: string;
-};
-function Distribution({
-  title,
-  bins,
-  unit,
-  reference,
-}: {
-  title: string;
-  bins: AnalysisBin[];
-  unit: string;
-  reference?: AnalysisBin[];
-}) {
-  return (
-    <section className="analysis-distribution">
-      <h4>{title}</h4>
-      {bins.map((bin, i) => (
-        <div className="analysis-bin" key={bin.label}>
-          <span>{bin.label}</span>
-          <div
-            className="analysis-bars"
-            role="img"
-            aria-label={`${bin.label}: 생성 ${bin.percent.toFixed(2)}%${reference ? `, 참고 ${reference[i]?.percent.toFixed(2)}%` : ""}`}
-          >
-            <div className="analysis-bar">
-              <i
-                style={{ width: Math.min(100, Math.max(0, bin.percent)) + "%" }}
-              />
-            </div>
-            {reference && (
-              <div className="analysis-bar reference">
-                <i
-                  style={{
-                    width:
-                      Math.min(100, Math.max(0, reference[i]?.percent || 0)) +
-                      "%",
-                  }}
-                />
-              </div>
-            )}
-          </div>
-          <span>
-            {bin.percent.toFixed(2)}% ·{" "}
-            {unit === "회" ? bin.count : bin.seconds.toFixed(2)}
-            {unit}
-            {reference && (
-              <small>참고 {reference[i]?.percent.toFixed(2)}%</small>
-            )}
-          </span>
-        </div>
-      ))}
-    </section>
-  );
-}
-function DrivingAnalysis({
-  result,
-  range,
-}: {
-  result: Result;
-  range: { start: number; end: string; vehicle: number } | null;
-}) {
-  const [data, setData] = useState<DriveAnalysisResponse | null>(null);
-  const [scope, setScope] = useState("fleet");
-  const [scopeShown, setScopeShown] = useState("");
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const [reference, setReference] = useState("");
-  const request = useRef(0);
-  const lastParams = useRef<{
-    scope: string;
-    start: number;
-    end: string;
-    vehicle: number;
-  } | null>(null);
-  async function load(selectedScope = scope, offset = 0, frozen = false) {
-    const params =
-      frozen && lastParams.current
-        ? lastParams.current
-        : {
-            scope: selectedScope,
-            start: range?.start || 0,
-            end: range?.end || "",
-            vehicle: range?.vehicle || 1,
-          };
-    if (params.scope === "vehicle" && !range) return;
-    const id = ++request.current;
-    setBusy(true);
-    setError("");
-    try {
-      let suffix = "?vehicle_offset=" + offset;
-      if (params.scope === "vehicle")
-        suffix +=
-          "&vehicle_number=" +
-          params.vehicle +
-          "&start_seconds=" +
-          params.start +
-          (params.end !== "" ? "&end_seconds=" + params.end : "");
-      if (frozen && data)
-        suffix += "&processed_snapshot=" + data.analysis.processed_snapshot;
-      const response = await api<DriveAnalysisResponse>(
-        "/api/runs/" + result.run_id + "/analysis" + suffix,
-      );
-      if (id !== request.current) return;
-      setData(response);
-      lastParams.current = params;
-      setScopeShown(
-        params.scope === "fleet"
-          ? "전체 차량 · 생성 완료 구간"
-          : "차량 " +
-              params.vehicle +
-              " · " +
-              params.start +
-              "~" +
-              params.end +
-              "초",
-      );
-    } catch (e) {
-      if (id === request.current)
-        setError(e instanceof Error ? e.message : "분석 조회 실패");
-    } finally {
-      if (id === request.current) setBusy(false);
-    }
-  }
-  useEffect(() => {
-    if (
-      ![
-        "starting",
-        "running",
-        "pausing",
-        "paused",
-        "resuming",
-        "stopping",
-      ].includes(result.job_state || "")
-    )
-      void load("fleet");
-    return () => {
-      request.current++;
-    };
-  }, [result.run_id]);
-  useEffect(() => {
-    if (scope === "vehicle" && range) void load("vehicle");
-  }, [scope, range?.start, range?.end, range?.vehicle]);
-  const report = data?.analysis,
-    s = report?.summary;
-  const ref = data?.references.cycles.find((c) => c.name === reference);
-  const fmt = (n: number, d = 2) =>
-    n.toLocaleString("ko-KR", { maximumFractionDigits: d });
-  return (
-    <section className="driving-analysis">
-      <h3>운행 분포 분석</h3>
-      <p className="note">
-        그래프의 표시 점이 아닌 내부 운행 구간에서 시간·거리를 적분합니다. 조회
-        결과는 요약값이며 DB에 추가 저장하거나 MQTT로 발행하지 않습니다.
-      </p>
-      <div className="fields">
-        <label>
-          분석 범위
-          <select
-            value={scope}
-            onChange={(e) => {
-              setScope(e.target.value);
-              if (e.target.value === "fleet") void load("fleet");
-            }}
-          >
-            <option value="fleet">전체 차량 · 생성 완료 구간</option>
-            <option value="vehicle" disabled={!range}>
-              현재 조회 차량 · 선택 구간
-            </option>
-          </select>
-        </label>
-        <label>
-          공개 시험 사이클 비교
-          <select
-            value={reference}
-            onChange={(e) => setReference(e.target.value)}
-          >
-            <option value="">비교 안 함</option>
-            <option value="UDDS">EPA UDDS · 도시 시험</option>
-            <option value="HWFET">EPA HWFET · 고속 시험</option>
-          </select>
-        </label>
-      </div>
-      <button disabled={busy} onClick={() => void load()}>
-        운행 분석 조회 · 갱신
-      </button>
-      {busy && <p role="status">운행 구간을 분석하고 있습니다.</p>}
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-      {s && report && (
-        <>
-          <p className="note" aria-live="polite">
-            {scopeShown} · 생성 {report.processed_snapshot.toLocaleString()}건
-            시점 · {report.model_version} · {report.analysis_version}
-          </p>
-          <div className="metrics">
-            {[
-              ["분석 차량", s.analyzed_vehicles + "대"],
-              ["차량별 시간 합계", fmt(s.vehicle_seconds) + "초"],
-              ["평균속도", fmt(s.average_speed_kmh) + "km/h"],
-              ["주행 중 평균속도", fmt(s.moving_average_speed_kmh) + "km/h"],
-              ["정차 비율", fmt(s.idle_percent) + "%"],
-              ["정차 구간 수", s.stop_episodes + "회"],
-              ["최장 정차", fmt(s.longest_stop_seconds) + "초"],
-              ["전체 거리 합계", fmt(s.distance_m / 1000) + "km"],
-              [
-                "이상 발생 차량",
-                s.event_vehicles + " / " + s.analyzed_vehicles + "대",
-              ],
-            ].map(([name, value]) => (
-              <div className="metric" key={name}>
-                <span>
-                  {name}
-                  <Info name={name} />
-                </span>
-                <b>{value}</b>
-              </div>
-            ))}
-          </div>
-          <p className="note">
-            전체 비율은 차량별 시간을 합한 값으로 계산합니다. 평균속도=총
-            거리÷차량별 시간 합계이며, 주행 중 평균은 정차시간을 제외합니다.
-            정차는 속도가 계속 0인 구간을 묶으며 웜업·종료 대기와 선택 구간
-            경계에서 잘린 정차도 포함합니다.
-          </p>
-          {ref && (
-            <div className="reference-note">
-              <b>
-                {ref.name} · {ref.description}
-              </b>
-              <p>
-                생성 데이터와 미국의 정해진 속도 시험 사이클을 비교합니다. 한국
-                실차 분포·합격 기준이 아닙니다. 운행시간과 도로 구성도 서로 다를
-                수 있습니다.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>항목</th>
-                    <th>생성 결과</th>
-                    <th>공개 시험 사이클</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>차량별 시간 합계 / 사이클 시간</td>
-                    <td>{fmt(s.vehicle_seconds)}초</td>
-                    <td>{fmt(ref.summary.vehicle_seconds)}초</td>
-                  </tr>
-                  <tr>
-                    <td>평균속도</td>
-                    <td>{fmt(s.average_speed_kmh)}km/h</td>
-                    <td>{fmt(ref.summary.average_speed_kmh)}km/h</td>
-                  </tr>
-                  <tr>
-                    <td>최고속도</td>
-                    <td>{fmt(s.peak_speed_kmh)}km/h</td>
-                    <td>{fmt(ref.summary.peak_speed_kmh)}km/h</td>
-                  </tr>
-                  <tr>
-                    <td>정차 비율</td>
-                    <td>{fmt(s.idle_percent)}%</td>
-                    <td>{fmt(ref.summary.idle_percent)}%</td>
-                  </tr>
-                </tbody>
-              </table>
-              <p>
-                초록: 생성 · 주황: 참고.{" "}
-                <a href={ref.url} target="_blank" rel="noreferrer">
-                  EPA 원문
-                </a>{" "}
-                ·{" "}
-                <a
-                  href={data?.references.source_page}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  자료 설명
-                </a>
-              </p>
-              <p className="note">{data?.references.method}</p>
-            </div>
-          )}
-          <Distribution
-            title="속도별 체류시간 (%) · km/h"
-            bins={s.speed_bins}
-            unit="초"
-            reference={ref?.summary.speed_bins}
-          />
-          <Distribution
-            title="가감속 크기별 시간 (%) · m/s²"
-            bins={s.acceleration_bins}
-            unit="초"
-          />
-          <Distribution
-            title="정차 지속시간별 횟수 (%)"
-            bins={s.stop_duration_bins}
-            unit="회"
-          />
-          <h4>도로별 체류</h4>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>도로</th>
-                  <th>시간</th>
-                  <th>비율</th>
-                  <th>진입 구간 수</th>
-                  <th>최장 연속</th>
-                </tr>
-              </thead>
-              <tbody>
-                {s.roads.map((r) => (
-                  <tr key={r.name}>
-                    <td>{r.name}</td>
-                    <td>{fmt(r.seconds)}초</td>
-                    <td>{fmt(r.percent)}%</td>
-                    <td>{r.entries}</td>
-                    <td>{fmt(r.longest_seconds)}초</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="note">
-            도로 이름이 유지된 연속 구간을 묶습니다. 보호구역은 이름에 표시하며
-            v1은 도로 구분이 없습니다.
-          </p>
-          <Distribution
-            title="상황 설명에 표시된 혼잡·앞차 시간"
-            bins={s.traffic_labels}
-            unit="초"
-          />
-          <p className="note">
-            상황 설명에 혼잡·정체 또는 앞차가 명시된 구간만 분류합니다. 기타에는
-            회전·웜업 등이 포함되므로 실제 정체 노출 전체를 뜻하지 않습니다.
-          </p>
-          <h4>이상 대상과 실제 발생</h4>
-          <table>
-            <tbody>
-              <tr>
-                <th>전체 설정의 이상 대상 차량</th>
-                <td>
-                  {report.target_eligible_vehicles} /{" "}
-                  {report.configured_vehicles}대
-                </td>
-              </tr>
-              <tr>
-                <th>분석 구간의 대상 차량 / 발생 차량</th>
-                <td>
-                  {s.eligible_vehicles}대 / {s.event_vehicles}대
-                </td>
-              </tr>
-              <tr>
-                <th>급가속 / 급감속 / 급회전</th>
-                <td>
-                  {s.events["급가속"] || 0} / {s.events["급감속"] || 0} /{" "}
-                  {s.events["급회전"] || 0}회
-                </td>
-              </tr>
-              <tr>
-                <th>설정 빈도 / 실제 대상 운행시간당 발생</th>
-                <td>
-                  {fmt(report.configured_events_per_hour)} /{" "}
-                  {s.eligible_vehicle_seconds > 0
-                    ? fmt(s.events_per_eligible_hour)
-                    : "계산 불가"}
-                  회/차량·시간
-                </td>
-              </tr>
-              <tr>
-                <th>전체 운행시간당 발생</th>
-                <td>
-                  {s.vehicle_seconds > 0
-                    ? fmt(s.events_per_vehicle_hour)
-                    : "계산 불가"}
-                  회/차량·시간
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p className="note">
-            설정 빈도는 현재 35초 기준 확률의 입력값이며 실제 횟수를 보장하지
-            않습니다. 이벤트 구간 시작 후 1초(1초 미만 구간은 종료) 도달을 발생
-            시점으로 세며, 선택 구간에서 새로 발생한 횟수만 집계합니다. 메시지
-            건수와 다릅니다. v1은 이상 대상 기능이 없습니다.
-          </p>
-          <h4>차량별 비교 · 최대 50대씩</h4>
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>차량</th>
-                  <th>분석 시간</th>
-                  <th>평균속도</th>
-                  <th>정차 비율</th>
-                  <th>정차 구간</th>
-                  <th>이상 대상</th>
-                  <th>발생</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.vehicles.map((v) => (
-                  <tr key={v.vehicle_id}>
-                    <td>{v.vehicle_id}</td>
-                    <td>{fmt(v.vehicle_seconds)}초</td>
-                    <td>{fmt(v.average_speed_kmh)}km/h</td>
-                    <td>{fmt(v.idle_percent)}%</td>
-                    <td>{v.stop_episodes}</td>
-                    <td>{v.eligible ? "대상" : "아님"}</td>
-                    <td>{v.event_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p>
-            {report.vehicle_total}대 중{" "}
-            {report.vehicles.length ? report.vehicle_offset + 1 : 0}~
-            {report.vehicle_offset + report.vehicles.length}대
-          </p>
-          <div className="view-switch">
-            <button
-              disabled={busy || report.vehicle_offset === 0}
-              onClick={() =>
-                void load(scope, Math.max(0, report.vehicle_offset - 50), true)
-              }
-            >
-              이전 50대
-            </button>
-            <button
-              disabled={
-                busy ||
-                report.vehicle_offset + report.vehicles.length >=
-                  report.vehicle_total
-              }
-              onClick={() => void load(scope, report.vehicle_offset + 50, true)}
-            >
-              다음 50대
-            </button>
-          </div>
-          <p className="note">
-            {data?.source} 분석 시점은 조회 시 고정하며 새 진행 상황은 갱신
-            버튼으로 확인합니다. 현재 수치에 따라 생성 모델을 자동 보정하지
-            않습니다.
-          </p>
-          <details>
-            <summary>운행 분석 요약 JSON</summary>
-            <pre>{JSON.stringify(report, null, 2)}</pre>
-          </details>
-        </>
-      )}
-    </section>
   );
 }
