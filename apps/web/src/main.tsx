@@ -25,6 +25,9 @@ type Catalog = {
   profiles: Record<string, Profile>;
 };
 type Config = {
+  publish_mode?: "serial" | "parallel";
+  max_in_flight?: number;
+  queue_capacity?: number;
   vehicle_count: number;
   mapping_mode: "shared" | "dedicated";
   client_count: number;
@@ -85,6 +88,17 @@ type TimingSummary = {
   p95_upper_ms: number;
 };
 type Result = {
+  transmission?: {
+    mode: string;
+    max_in_flight: number;
+    queue_capacity: number;
+    queued_messages: number;
+    in_flight: number;
+    peak_queued: number;
+    peak_in_flight: number;
+    backpressure_count: number;
+    discarded_queued: number;
+  };
   performance?: {
     generation: TimingSummary;
     schedule: TimingSummary;
@@ -369,12 +383,21 @@ function App() {
     setConfig((old) => {
       const next = {
         ...old,
-        [key]: ["mapping_mode", "connection_lifetime"].includes(key)
+        [key]: ["mapping_mode", "connection_lifetime", "publish_mode"].includes(
+          key,
+        )
           ? value
           : Number(value),
       } as Config;
       if (next.mapping_mode === "dedicated")
         next.client_count = next.vehicle_count;
+      next.max_in_flight =
+        next.publish_mode === "parallel"
+          ? Math.max(
+              1,
+              Math.min(next.max_in_flight || 1, next.client_count, 100),
+            )
+          : 1;
       return next;
     });
   }
@@ -675,6 +698,50 @@ function App() {
                         <option value="while_driving">운행 중 유지</option>
                       </select>
                     </label>
+                    <label>
+                      전송 처리 방식 <Info name="전송 처리 방식" />
+                      <select
+                        aria-label="전송 처리 방식"
+                        value={config.publish_mode || "serial"}
+                        onChange={(e) =>
+                          changeConfig("publish_mode", e.target.value)
+                        }
+                      >
+                        <option value="serial">순차 전송</option>
+                        <option value="parallel">Client별 동시 전송</option>
+                      </select>
+                    </label>
+                    {config.publish_mode === "parallel" && (
+                      <>
+                        <label>
+                          동시 처리 Client 수{" "}
+                          <Info name="동시 처리 Client 수" />
+                          <input
+                            aria-label="동시 처리 Client 수"
+                            type="number"
+                            min={1}
+                            max={Math.min(config.client_count, 100)}
+                            value={config.max_in_flight || 1}
+                            onChange={(e) =>
+                              changeConfig("max_in_flight", e.target.value)
+                            }
+                          />
+                        </label>
+                        <label>
+                          대기 메시지 상한 <Info name="대기 메시지 상한" />
+                          <input
+                            aria-label="대기 메시지 상한"
+                            type="number"
+                            min={1}
+                            max={1000}
+                            value={config.queue_capacity || 100}
+                            onChange={(e) =>
+                              changeConfig("queue_capacity", e.target.value)
+                            }
+                          />
+                        </label>
+                      </>
+                    )}
                     <label htmlFor="setting-7">
                       <span className="label-line">
                         차량당 생성 건수 <Info name="차량당 생성 건수" />
@@ -1279,6 +1346,29 @@ function App() {
                         </div>
                       ))}
                     </div>
+                    {run.result.transmission && (
+                      <p className="plan">
+                        전송 처리:{" "}
+                        {run.result.transmission.mode === "parallel"
+                          ? "Client별 동시 전송"
+                          : "순차 전송"}{" "}
+                        · 응답 대기 {run.result.transmission.in_flight}/
+                        {run.result.transmission.max_in_flight}건 · 최대 동시
+                        처리 {run.result.transmission.peak_in_flight}건
+                        {run.result.transmission.mode === "parallel" && (
+                          <>
+                            {" "}
+                            · 대기 {run.result.transmission.queued_messages}/
+                            {run.result.transmission.queue_capacity}건 · 최대
+                            대기 {run.result.transmission.peak_queued}건 ·
+                            대기열 가득 참{" "}
+                            {run.result.transmission.backpressure_count}회 ·
+                            종료 시 대기 취소{" "}
+                            {run.result.transmission.discarded_queued}건
+                          </>
+                        )}
+                      </p>
+                    )}
                     {run.result.performance && (
                       <>
                         <h3>
@@ -1948,6 +2038,12 @@ const explanations: Record<string, string> = {
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
   "이상 주행 빈도":
     "v6는 대상 차량당 운행 1시간의 평균 발생 기회입니다. 시점은 무작위이며 정차·부적합 상황·직전 사건 종료 후 30초 회복 중의 기회는 버립니다. 실제 발생 횟수를 보장하지 않습니다. v2~v5는 이전 구간별 추첨 방식입니다.",
+  "전송 처리 방식":
+    "실제 MQTT 전송에 적용합니다. 순차 전송은 전체에서 하나씩 응답을 기다립니다. Client별 동시 전송은 서로 다른 Client를 제한된 수만큼 함께 처리하며 같은 Client의 메시지는 순서를 지킵니다. 연결 수·배정은 바뀌지 않습니다.",
+  "동시 처리 Client 수":
+    "전체에서 동시에 발행 응답을 기다릴 Client의 상한입니다. Client당 진행 중 메시지는1건이며 설정은 실행 중 고정됩니다. 전체 발행 속도 상한도 유지합니다. 응답 미확인 발생 시 신규 발행을 멈추고 진행 중 결과를 집계한 뒤 종료합니다.",
+  "대기 메시지 상한":
+    "메모리에 보관할 생성됐지만 아직 발행하지 않은 메시지 수의 전체 상한입니다. 가득 차면 생성을 늦추며 임의로 버리거나 무한히 쌓지 않습니다. 중단/실패 시 대기 중 메시지는 발행하지 않고 대기 취소로 집계합니다. 이미 발행한 미확인 메시지는 별도 집계합니다.",
   "전송 성능":
     "생성·검사는 메시지 생성·검사·직렬화 시간입니다. 예정 시각 대비 지연은 일시중지를 제외하고 발행 직전까지 걸린 지연입니다. 접속과 PUBACK 대기는 실패·시간초과도 포함합니다. P95 상한은 1µs 단위 2배 간격 버킷으로 추정한 95백분위 상한입니다. 정확한 P95가 아니며 전체 메시지 시간을 저장하지 않습니다. CPU/RSS는 별도 측정 보고서의 Worker 프로세스 관측값입니다.",
   "이상 주행 강도":

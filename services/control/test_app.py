@@ -21,7 +21,7 @@ def client(tmp_path, monkeypatch):
 
 
 def request(mode="shared", clients=2, ty="4"):
-    return {"config": {"vehicle_count": 3, "mapping_mode": mode, "client_count": clients, "messages_per_vehicle": 2, "interval_ms": 2000, "connection_lifetime": "always"}, "message": copy.deepcopy(control.CATALOG["profiles"][ty]["example"]), "transport": "dry_run", "confirm_mqtt": False, "realtime": False}
+    return {"config": {"vehicle_count": 3, "mapping_mode": mode, "client_count": clients, "messages_per_vehicle": 2, "interval_ms": 2000, "connection_lifetime": "always", "publish_mode": "serial", "max_in_flight": 1, "queue_capacity": 100}, "message": copy.deepcopy(control.CATALOG["profiles"][ty]["example"]), "transport": "dry_run", "confirm_mqtt": False, "realtime": False}
 
 
 def test_schemas_and_examples():
@@ -274,7 +274,8 @@ def test_run_deadline_stops_and_saves_failure(client):
     assert saved["result"]["connection_cleanup_confirmed"] is True
 
 
-def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("publish_mode", ["serial", "parallel"])
+def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path, publish_mode):
     import os
     import subprocess
     import time
@@ -290,6 +291,7 @@ def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path):
         monkeypatch.setattr(control, "MQTT_PROFILE", profile_path)
         body = request()
         body.update(transport="mqtt", confirm_mqtt=True)
+        body["config"].update(publish_mode=publish_mode, max_in_flight=2 if publish_mode=="parallel" else 1, queue_capacity=2)
         response = client.post("/api/jobs", json=body)
         assert response.status_code == 202, response.text
         run_id = response.json()["id"]

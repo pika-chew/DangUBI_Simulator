@@ -13,6 +13,9 @@ import (
 )
 
 type Config struct {
+	PublishMode        string `json:"publish_mode,omitempty"`
+	MaxInFlight        int    `json:"max_in_flight,omitempty"`
+	QueueCapacity      int    `json:"queue_capacity,omitempty"`
 	VehicleCount       int    `json:"vehicle_count"`
 	MappingMode        string `json:"mapping_mode"`
 	ClientCount        int    `json:"client_count"`
@@ -49,39 +52,40 @@ type Sample struct {
 	VehicleState   string         `json:"vehicle_state,omitempty"`
 }
 type Result struct {
-	Performance       *PerformanceSummary `json:"performance,omitempty"`
-	RunID             string              `json:"run_id"`
-	Transport         string              `json:"transport"`
-	State             string              `json:"state"`
-	AllocatedClients  int                 `json:"allocated_clients"`
-	AssignmentCount   int                 `json:"assignment_count"`
-	Assignments       []Assignment        `json:"assignments"`
-	Planned           int                 `json:"planned_messages"`
-	Processed         int                 `json:"processed_messages"`
-	Bytes             int                 `json:"payload_bytes"`
-	Connected         int                 `json:"connected_clients"`
-	Published         int                 `json:"mqtt_published"`
-	Puback            int                 `json:"puback_count"`
-	Attempted         int                 `json:"publish_attempts"`
-	Unconfirmed       int                 `json:"unconfirmed_messages"`
-	Reconnects        int                 `json:"reconnect_count"`
-	ActiveClients     int                 `json:"active_clients"`
-	Errors            []string            `json:"errors"`
-	Samples           []Sample            `json:"samples"`
-	TripSummaries     []Sample            `json:"trip_summaries,omitempty"`
-	Trace             []TracePoint        `json:"trace,omitempty"`
-	ModelVersion      string              `json:"model_version,omitempty"`
-	MicrotripCount    int                 `json:"microtrip_count"`
-	TripCount         int                 `json:"trip_count"`
-	ElapsedMS         int64               `json:"elapsed_ms"`
-	Remaining         int                 `json:"remaining_messages"`
-	Unsent            int                 `json:"unsent_messages"`
-	ScheduleDelayMS   int64               `json:"schedule_delay_ms"`
-	PeakActiveClients int                 `json:"peak_active_clients"`
-	PausedMS          int64               `json:"paused_ms"`
-	ActiveElapsedMS   int64               `json:"active_elapsed_ms"`
-	SimulationTimeMS  int64               `json:"simulation_time_ms"`
-	Scenario          *ScenarioSummary    `json:"scenario,omitempty"`
+	Transmission      *TransmissionSummary `json:"transmission,omitempty"`
+	Performance       *PerformanceSummary  `json:"performance,omitempty"`
+	RunID             string               `json:"run_id"`
+	Transport         string               `json:"transport"`
+	State             string               `json:"state"`
+	AllocatedClients  int                  `json:"allocated_clients"`
+	AssignmentCount   int                  `json:"assignment_count"`
+	Assignments       []Assignment         `json:"assignments"`
+	Planned           int                  `json:"planned_messages"`
+	Processed         int                  `json:"processed_messages"`
+	Bytes             int                  `json:"payload_bytes"`
+	Connected         int                  `json:"connected_clients"`
+	Published         int                  `json:"mqtt_published"`
+	Puback            int                  `json:"puback_count"`
+	Attempted         int                  `json:"publish_attempts"`
+	Unconfirmed       int                  `json:"unconfirmed_messages"`
+	Reconnects        int                  `json:"reconnect_count"`
+	ActiveClients     int                  `json:"active_clients"`
+	Errors            []string             `json:"errors"`
+	Samples           []Sample             `json:"samples"`
+	TripSummaries     []Sample             `json:"trip_summaries,omitempty"`
+	Trace             []TracePoint         `json:"trace,omitempty"`
+	ModelVersion      string               `json:"model_version,omitempty"`
+	MicrotripCount    int                  `json:"microtrip_count"`
+	TripCount         int                  `json:"trip_count"`
+	ElapsedMS         int64                `json:"elapsed_ms"`
+	Remaining         int                  `json:"remaining_messages"`
+	Unsent            int                  `json:"unsent_messages"`
+	ScheduleDelayMS   int64                `json:"schedule_delay_ms"`
+	PeakActiveClients int                  `json:"peak_active_clients"`
+	PausedMS          int64                `json:"paused_ms"`
+	ActiveElapsedMS   int64                `json:"active_elapsed_ms"`
+	SimulationTimeMS  int64                `json:"simulation_time_ms"`
+	Scenario          *ScenarioSummary     `json:"scenario,omitempty"`
 	events            map[int]int
 	ExecutionState    string `json:"execution_state"`
 }
@@ -95,6 +99,9 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 		return Result{}, err
 	}
 	c := req.Config
+	if err := validateTransmission(c); err != nil {
+		return Result{}, err
+	}
 	if c.VehicleCount < 1 || c.VehicleCount > 10000 || c.MessagesPerVehicle < 1 || c.VehicleCount*c.MessagesPerVehicle > 10000 || c.IntervalMS < 1 || c.IntervalMS > 86400000 {
 		return Result{}, errors.New("차량 수·생성 건수·주기를 확인하세요. 한 실행은 최대 10,000건입니다.")
 	}

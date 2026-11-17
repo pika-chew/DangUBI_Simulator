@@ -21,7 +21,7 @@ class MeasurementConfigTest(unittest.TestCase):
         self.assertEqual(cases[2]["interval_ms"], cases[3]["interval_ms"])
 
     def test_remote_address_and_workload_limits(self):
-        for key, value in [("broker_url", "ssl://example.com:8883"), ("vehicles", 101), ("vehicles", True), ("clients", 101), ("duration_seconds", 61), ("interval_ms", 7), ("mode", "dynamic"), ("fault", "unknown")]:
+        for key, value in [("broker_url", "ssl://example.com:8883"), ("vehicles", 101), ("vehicles", True), ("clients", 101), ("duration_seconds", 61), ("interval_ms", 7), ("mode", "dynamic"), ("fault", "unknown"), ("publish_mode","bad"), ("max_in_flight",3), ("queue_capacity",1001)]:
             with self.subTest(key=key, value=value):
                 bad = copy.deepcopy(self.example)
                 bad["cases"][0][key] = value

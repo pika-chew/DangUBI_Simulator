@@ -1,0 +1,11 @@
+{
+  "repeats": 1,
+  "cases": [
+    {"name":"100대풀·순차", "vehicles":100,"clients":10,"mode":"shared","duration_seconds":20,"interval_ms":2000,"publish_mode":"serial"},
+    {"name":"100대풀·동시10", "vehicles":100,"clients":10,"mode":"shared","duration_seconds":20,"interval_ms":2000,"publish_mode":"parallel","max_in_flight":10,"queue_capacity":200},
+    {"name":"100대전체·순차", "vehicles":100,"clients":100,"mode":"dedicated","duration_seconds":20,"interval_ms":2000,"publish_mode":"serial"},
+    {"name":"100대전체·동시10", "vehicles":100,"clients":100,"mode":"dedicated","duration_seconds":20,"interval_ms":2000,"publish_mode":"parallel","max_in_flight":10,"queue_capacity":200},
+    {"name":"응답20ms·순차", "vehicles":10,"clients":10,"mode":"dedicated","duration_seconds":10,"interval_ms":1000,"fault":"delay_ack","publish_mode":"serial"},
+    {"name":"응답20ms·동시5", "vehicles":10,"clients":10,"mode":"dedicated","duration_seconds":10,"interval_ms":1000,"fault":"delay_ack","publish_mode":"parallel","max_in_flight":5,"queue_capacity":20}
+  ]
+}

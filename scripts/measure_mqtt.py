@@ -31,7 +31,7 @@ def validate_config(config):
     for case in cases:
         if not isinstance(case, dict):
             raise ValueError("각 측정 조건은 JSON 객체여야 합니다.")
-        if set(case) - {"name", "vehicles", "clients", "mode", "duration_seconds", "interval_ms", "lifetime", "fault"}:
+        if set(case) - {"name", "vehicles", "clients", "mode", "duration_seconds", "interval_ms", "lifetime", "fault", "publish_mode", "max_in_flight", "queue_capacity"}:
             raise ValueError("알 수 없는 조건 설정입니다.")
         if not isinstance(case.get("name"), str) or not 1 <= len(case["name"]) <= 60 or any(c in case["name"] for c in "|\r\n"):
             raise ValueError("조건 이름은1~60자입니다.")
@@ -46,6 +46,11 @@ def validate_config(config):
             raise ValueError("연결 배정 설정을 확인하세요.")
         if case.get("lifetime", "always") not in ("always", "while_driving") or case.get("fault", "none") not in ("none", "disconnect_once", "delay_ack", "no_ack", "stop_wait"):
             raise ValueError("연결 유지·장애 설정을 확인하세요.")
+        concurrency, capacity = case.get("max_in_flight", 1), case.get("queue_capacity", 100)
+        if type(concurrency) is not int or not 1 <= concurrency <= min(100, case["clients"]) or type(capacity) is not int or not 1 <= capacity <= 1000:
+            raise ValueError("동시 처리/대기열 상한을 확인하세요.")
+        if case.get("publish_mode", "serial") not in ("serial", "parallel") or (case.get("publish_mode", "serial") == "serial" and concurrency != 1):
+            raise ValueError("전송 처리 방식과 동시 처리 수를 확인하세요.")
         total += case["duration_seconds"] + case["clients"] / 100 + 5
     if total * repeats > 900:
         raise ValueError("측정 계획은 기본 예상15분 이내로 제한합니다.")
@@ -119,6 +124,7 @@ def measure(case, fixture, worker):
                 body = {"operation": "mqtt", "run_id": "measure-" + uuid.uuid4().hex,
                         "config": {"vehicle_count": case["vehicles"], "client_count": case["clients"], "mapping_mode": case["mode"], "messages_per_vehicle": 1, "interval_ms": case["interval_ms"], "connection_lifetime": case.get("lifetime", "always")},
                         "generation": {"model_version": "combustion-events-6", "engine_start": "warm", "weather": "dry", "anomaly_intensity": "medium", "profile": "mixed", "seed": 42, "start_time_ms": 1794783600000, "duration_seconds": case["duration_seconds"], "start_lat": 37.5, "start_lon": 127., "initial_odometer_m": 500000., "anomaly_vehicle_percent": 5, "anomaly_events_per_hour": 2}, "mqtt": profile}
+                body["config"].update(publish_mode=case.get("publish_mode", "serial"), max_in_flight=case.get("max_in_flight", 1), queue_capacity=case.get("queue_capacity", 100))
                 worker_env = os.environ.copy()
                 worker_env["DANGUBI_MANAGED"] = "1"
                 process = subprocess.Popen([str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=worker_log, env=worker_env)
@@ -162,7 +168,7 @@ def measure(case, fixture, worker):
                 if broker.returncode:
                     raise RuntimeError("측정 브로커 종료 실패")
                 observed = json.loads(Path(str(profile_path) + ".report").read_text(encoding="utf-8"))
-                keys = ("state", "planned_messages", "processed_messages", "publish_attempts", "mqtt_published", "puback_count", "unconfirmed_messages", "remaining_messages", "unsent_messages", "reconnect_count", "connected_clients", "peak_active_clients", "active_clients", "elapsed_ms", "schedule_delay_ms", "performance")
+                keys = ("state", "planned_messages", "processed_messages", "publish_attempts", "mqtt_published", "puback_count", "unconfirmed_messages", "remaining_messages", "unsent_messages", "reconnect_count", "connected_clients", "peak_active_clients", "active_clients", "elapsed_ms", "schedule_delay_ms", "performance", "transmission")
                 return {"case": case, "worker": {k: result.get(k) for k in keys}, "resources": resources.result(elapsed), "wall_seconds": elapsed, "local_broker": observed}
             finally:
                 if process is not None and process.poll() is None:
@@ -200,7 +206,7 @@ def main():
     env.update(GOCACHE=str(LOCAL / "go-cache"), GOMODCACHE=str(LOCAL / "go-mod"))
     subprocess.run(["go", "build", "-o", str(worker), "."], cwd=ROOT / "services/worker", env=env, check=True)
     subprocess.run(["go", "test", "-c", "-o", str(fixture)], cwd=ROOT / "services/worker", env=env, check=True)
-    report = {"schema_version": "mqtt-measure-1", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "environment": {"os": platform.platform(), "logical_cpus": os.cpu_count(), "resource_scope": "Worker 프로세스만, 제어 API/브로커 제외", "cpu_basis": "100%=코어1개", "memory_basis": "250ms 관측 RSS 최댓값"}, "limitations": ["루프백 일회성 mTLS 시험 브로커이며 AWS/운영 브로커 성능이 아님", "현재 Worker는 전체 연결에서 발행/PUBACK을 순차 처리", "전량 메시지·접속 정보·인증서는 결과에 저장하지 않음", "단일 회차는 처리 용량이나 장시간 안정성을 보증하지 않음"], "results": []}
+    report = {"schema_version": "mqtt-measure-2", "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "environment": {"os": platform.platform(), "logical_cpus": os.cpu_count(), "resource_scope": "Worker 프로세스만, 제어 API/브로커 제외", "cpu_basis": "100%=코어1개", "memory_basis": "250ms 관측 RSS 최댓값"}, "limitations": ["루프백 일회성 mTLS 시험 브로커이며 AWS/운영 브로커 성능이 아님", "같은 Client의 순서는 유지하며 Client 간 동시성은 조건별로 설정", "전량 메시지·접속 정보·인증서는 결과에 저장하지 않음", "단일 회차는 처리 용량이나 장시간 안정성을 보증하지 않음"], "results": []}
     directory = LOCAL / "measurements" / (time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
     directory.mkdir(parents=True)
     for repeat in range(repeats):

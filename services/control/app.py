@@ -46,9 +46,14 @@ class ConnectionConfig(BaseModel):
     messages_per_vehicle: int = Field(ge=1, le=10000)
     interval_ms: int = Field(ge=1, le=86400000)
     connection_lifetime: Literal["always", "while_driving"] = "always"
+    publish_mode: Literal["serial", "parallel"] = "serial"
+    max_in_flight: int = Field(default=1, ge=1, le=100)
+    queue_capacity: int = Field(default=100, ge=1, le=1000)
 
     @model_validator(mode="after")
     def bounded(self):
+        if self.max_in_flight > self.client_count or (self.publish_mode == "serial" and self.max_in_flight != 1):
+            raise ValueError("동시 처리 수는 Client 수 이하여야 하며 순차 방식은1입니다.")
         if self.mapping_mode == "dedicated" and self.client_count != self.vehicle_count:
             raise ValueError("차량별 전체 연결은 차량 수와 Client 수가 같아야 합니다.")
         if self.mapping_mode == "shared" and self.client_count > self.vehicle_count:

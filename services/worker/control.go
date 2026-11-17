@@ -42,6 +42,15 @@ func (c *executionControl) snapshot() (time.Duration, bool, <-chan struct{}) {
 	return total, c.paused, c.changed
 }
 
+func (c *executionControl) pauseRequested() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requested
+}
+
 // 데이터 생성·접속·발행 사이의 안전한 경계에서 정지 완료를 알린다.
 // 이미 발행한 메시지는 기존 제한시간 안에서 PUBACK를 기다린다.
 func (c *executionControl) gate(ctx context.Context, tick func(bool)) error {

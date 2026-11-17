@@ -32,6 +32,10 @@ type testBroker struct {
 	closed         bool
 	ackDelay       time.Duration
 	discardPayload bool
+	handling       int
+	peakHandling   int
+	receivedAt     []time.Time
+	receivedIDs    []string
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -98,6 +102,7 @@ func localBroker(t *testing.T, noAck, closeOnce bool) (*testBroker, *MQTTProfile
 }
 func (b *testBroker) handle(conn net.Conn) {
 	defer conn.Close()
+	clientID := ""
 	for {
 		packet, err := packets.ReadPacket(conn)
 		if err != nil {
@@ -105,6 +110,7 @@ func (b *testBroker) handle(conn net.Conn) {
 		}
 		switch p := packet.(type) {
 		case *packets.ConnectPacket:
+			clientID = p.ClientIdentifier
 			b.mu.Lock()
 			b.ids[p.ClientIdentifier] = true
 			b.mu.Unlock()
@@ -114,18 +120,28 @@ func (b *testBroker) handle(conn net.Conn) {
 		case *packets.PublishPacket:
 			b.mu.Lock()
 			b.published++
+			b.handling++
+			b.peakHandling = max(b.peakHandling, b.handling)
+			if !b.discardPayload {
+				b.receivedAt = append(b.receivedAt, time.Now())
+				b.receivedIDs = append(b.receivedIDs, clientID)
+			}
 			var message map[string]any
 			if !b.discardPayload && json.Unmarshal(p.Payload, &message) == nil {
 				b.messages = append(b.messages, message)
 			}
 			closeNow := b.closeOnce
 			ackDelay := b.ackDelay
+			noAck := b.noAck
 			b.closeOnce = false
 			b.mu.Unlock()
 			if ackDelay > 0 {
 				time.Sleep(ackDelay)
 			}
-			if !b.noAck {
+			b.mu.Lock()
+			b.handling--
+			b.mu.Unlock()
+			if !noAck {
 				ack := packets.NewControlPacket(packets.Puback).(*packets.PubackPacket)
 				ack.MessageID = p.MessageID
 				ack.Write(conn)

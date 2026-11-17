@@ -149,6 +149,12 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(profile.MaxDurationSeconds)*time.Second)
 	defer cancel()
 	out.Transport = "mqtt"
+	out.Transmission = &TransmissionSummary{Mode: "serial", MaxInFlight: 1}
+	if req.Config.PublishMode == "parallel" {
+		out.Transmission.Mode = "parallel"
+		out.Transmission.MaxInFlight = effectiveInFlight(req.Config)
+		out.Transmission.QueueCapacity = effectiveQueueCapacity(req.Config)
+	}
 	out.State = "mqtt_running"
 	if req.Generation != nil {
 		out.ModelVersion = modelVersion(req.Generation)
@@ -182,11 +188,20 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	timeout := time.Duration(profile.TimeoutMS) * time.Millisecond
 	connect := func(id string, client mqtt.Client) error {
 		for attempt := 0; attempt <= profile.ReconnectAttempts; attempt++ {
-			if err := control.gate(ctx, func(force bool) { report(&out, force) }); err != nil {
-				return err
+			if req.Config.PublishMode == "parallel" && out.Transmission.InFlight > 0 {
+				if control.pauseRequested() {
+					return errPausePending
+				}
+			} else {
+				if err := control.gate(ctx, func(force bool) { report(&out, force) }); err != nil {
+					return err
+				}
 			}
 			if err := connectPacer.wait(ctx); err != nil {
 				return err
+			}
+			if req.Config.PublishMode == "parallel" && out.Transmission.InFlight > 0 && control.pauseRequested() {
+				return errPausePending
 			}
 			if seen[id] {
 				out.Reconnects++
@@ -254,6 +269,9 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 		}
 	}
 	scheduledStart := time.Now().Add(-time.Duration(pauseMilliseconds(control)) * time.Millisecond)
+	if req.Config.PublishMode == "parallel" {
+		return runConcurrentMQTT(ctx, cancel, req, &out, &metrics, clients, remaining, scheduledStart, connect, report, fail, finish)
+	}
 	for seq := 0; seq < req.Config.MessagesPerVehicle; seq++ {
 		if err := waitSchedule(ctx, scheduledStart.Add(time.Duration(offsetMS(req, seq))*time.Millisecond), func(force bool) { report(&out, force) }); err != nil {
 			fail("시험 제한시간을 초과했습니다.")
@@ -291,10 +309,13 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 				return finish(), nil
 			}
 			out.Attempted++
+			out.Transmission.InFlight = 1
+			out.Transmission.PeakInFlight = 1
 			report(&out, true)
 			ackStarted := time.Now()
 			err := waitToken(ctx, client.Publish(topic, 1, false, encoded), timeout)
 			metrics.ack.add(time.Since(ackStarted))
+			out.Transmission.InFlight = 0
 			if err != nil {
 				out.Unconfirmed++
 				fail("발행 응답을 확인하지 못했습니다. 중복 가능성이 있어 자동 재발행하지 않습니다.")
