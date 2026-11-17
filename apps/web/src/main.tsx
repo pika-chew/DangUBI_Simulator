@@ -34,7 +34,10 @@ type Config = {
 };
 type Assignment = { vehicle_id: string; client_id: string };
 type Generation = {
-  profile: "urban" | "highway" | "congested";
+  profile: "urban" | "highway" | "congested" | "mixed";
+  model_version?: string;
+  anomaly_vehicle_percent?: number;
+  anomaly_events_per_hour?: number;
   seed: number;
   start_time_ms: number;
   duration_seconds: number;
@@ -48,6 +51,19 @@ type TracePoint = {
   speed_kmh: number;
   rpm: number;
   distance_m: number;
+  context?: {
+    road: string;
+    reason: string;
+    speed_limit_kmh: number;
+    grade_percent: number;
+    acceleration_mps2: number;
+    lateral_mps2: number;
+    heading_deg: number;
+    event?: string;
+    eligible: boolean;
+    driver_style: string;
+    weather: string;
+  };
 };
 type Sample = Assignment & {
   sequence: number;
@@ -75,6 +91,11 @@ type Result = {
   samples: Sample[];
   trip_summaries?: Sample[];
   trace?: TracePoint[];
+  scenario?: {
+    eligible_vehicles: number;
+    observed_vehicles: number;
+    events: number;
+  };
   model_version?: string;
   microtrip_count?: number;
   trip_count?: number;
@@ -155,7 +176,10 @@ function App() {
   const [pausePending, setPausePending] = useState(false);
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
-    profile: "urban",
+    profile: "mixed",
+    model_version: "combustion-scenario-2",
+    anomaly_vehicle_percent: 5,
+    anomaly_events_per_hour: 2,
     seed: 42,
     start_time_ms: 1794783600000,
     duration_seconds: 60,
@@ -693,9 +717,10 @@ function App() {
                       <em>02</em> 자동 주행 설정
                     </h2>
                     <p className="note">
-                      차량별 운행 한 회를 생성합니다. 웜업 → 가속 → 정속 → 감속
-                      → 정차 → 재출발 → 운행 종료 순서입니다. 실차 보정 전 근사
-                      모델이며 실제 도로를 따르지 않습니다.
+                      상황 기반 v2는 도로·가상 혼잡·운전자 성향에 따라 짧은
+                      가감속·정속·시동 유지 정차를 반복합니다. 커브·유턴과
+                      경사·노면도 근사합니다. 실제 도로망·차량 간 상호작용·실차
+                      보정은 포함하지 않습니다.
                     </p>
                     <fieldset disabled={locked}>
                       <label htmlFor="setting-9">
@@ -713,18 +738,89 @@ function App() {
                             })
                           }
                         >
-                          <option value="urban">
-                            도심 · 기준 최고속도 50km/h
+                          <option
+                            value="mixed"
+                            disabled={
+                              generation.model_version !==
+                              "combustion-scenario-2"
+                            }
+                          >
+                            도심·고속 혼합
                           </option>
-                          <option value="highway">
-                            고속 · 기준 최고속도 95km/h
-                          </option>
-                          <option value="congested">
-                            정체 · 기준 최고속도 20km/h
-                          </option>
+                          <option value="urban">도심 위주</option>
+                          <option value="highway">고속 도로 위주</option>
+                          <option value="congested">정체 위주</option>
                         </select>
                       </label>
                       <div className="fields">
+                        <label>
+                          운행 모델
+                          <select
+                            value={
+                              generation.model_version || "combustion-demo-1"
+                            }
+                            onChange={(e) =>
+                              setGeneration({
+                                ...generation,
+                                model_version: e.target.value,
+                                profile:
+                                  e.target.value === "combustion-demo-1" &&
+                                  generation.profile === "mixed"
+                                    ? "urban"
+                                    : generation.profile,
+                                anomaly_vehicle_percent: 0,
+                                anomaly_events_per_hour: 0,
+                              })
+                            }
+                          >
+                            <option value="combustion-scenario-2">
+                              상황 기반 모델 v2 · 근사
+                            </option>
+                            <option value="combustion-demo-1">
+                              이전 고정 비율 모델 v1
+                            </option>
+                          </select>
+                        </label>
+                        <label>
+                          이상 대상 차량 비율 (%)
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step="any"
+                            disabled={
+                              generation.model_version !==
+                              "combustion-scenario-2"
+                            }
+                            value={generation.anomaly_vehicle_percent || 0}
+                            onChange={(e) =>
+                              setGeneration({
+                                ...generation,
+                                anomaly_vehicle_percent: Number(e.target.value),
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          대상 차량 이벤트 빈도 (회/시간)
+                          <input
+                            type="number"
+                            min={0}
+                            max={60}
+                            step="any"
+                            disabled={
+                              generation.model_version !==
+                              "combustion-scenario-2"
+                            }
+                            value={generation.anomaly_events_per_hour || 0}
+                            onChange={(e) =>
+                              setGeneration({
+                                ...generation,
+                                anomaly_events_per_hour: Number(e.target.value),
+                              })
+                            }
+                          />
+                        </label>
                         {(
                           [
                             ["duration_seconds", "운행시간 (초)", 10, 3600],
@@ -771,6 +867,13 @@ function App() {
                       </div>
                     </fieldset>
                     <p className="note">
+                      이상 대상 수는 차량 수×비율을 반올림해 seed로 선정합니다.
+                      빈도는 대상 차량의 확률적 발생 설정이며 실제 발생
+                      비율/횟수 보장은 아닙니다. 짧은 운행이나 저속에서는 사건이
+                      없을 수 있습니다. 이벤트는 내부 관측 지표이며 미확정
+                      em/xyz를 자동 전송하지 않습니다.
+                    </p>
+                    <p className="note">
                       생성 주기는 운행시간을 나누어 떨어지게 하고 최소 10구간을
                       확보해야 합니다. 시작·종료 Microtrip과 종료 Trip을 포함해
                       건수를 계산합니다. 같은 seed·시각·조건에서 같은 데이터를
@@ -779,8 +882,9 @@ function App() {
                     </p>
                     <p className="note">
                       개발 기준: 속도 km/h, 거리 m, 연료 누적 L, 탄소 g, 시간
-                      필드 초. 일부 단위는 수신 계약 미확정입니다. 프로필은 같은
-                      상태 순서에서 기준 속도를 바꿉니다.
+                      필드 초. 일부 단위는 수신 계약 미확정입니다. v2 프로필은
+                      도로 구성과 혼잡·정차 비중을 바꾸며, v1은 이전 고정 비율
+                      모델입니다.
                     </p>
                   </>
                 ) : (
@@ -1052,7 +1156,19 @@ function App() {
                       ))}
                     </div>
                     {!!run.result.trace?.length && (
-                      <DrivingResult result={run.result} catalog={catalog} />
+                      <DrivingResult
+                        key={run.id}
+                        result={run.result}
+                        catalog={catalog}
+                      />
+                    )}
+                    {run.result.scenario && (
+                      <p className="plan">
+                        이상 대상 {run.result.scenario.eligible_vehicles}대 ·
+                        실제 발생 {run.result.scenario.observed_vehicles}대 ·
+                        내부 이벤트 구간 {run.result.scenario.events}개 (생성된
+                        구간 기준)
+                      </p>
                     )}
                     <h3>고정된 차량 → Client 배정</h3>
                     <p className="note">
@@ -1230,27 +1346,98 @@ function DrivingResult({
   result: Result;
   catalog: Catalog;
 }) {
-  const trace = result.trace!;
-  const duration = trace[trace.length - 1].elapsed_seconds || 1;
+  const [vehicle, setVehicle] = useState(1);
+  const [shownVehicle, setShownVehicle] = useState(1);
+  const [customTrace, setCustomTrace] = useState<TracePoint[] | null>(null);
+  const [start, setStart] = useState(0),
+    [end, setEnd] = useState("");
+  const [queryBusy, setQueryBusy] = useState(false),
+    [queryError, setQueryError] = useState("");
+  async function query() {
+    setQueryBusy(true);
+    setQueryError("");
+    try {
+      const suffix =
+        "?start_seconds=" + start + (end !== "" ? "&end_seconds=" + end : "");
+      const data = await api<{ trace: TracePoint[] }>(
+        "/api/runs/" + result.run_id + "/trace/" + vehicle + suffix,
+      );
+      setCustomTrace(data.trace);
+      setShownVehicle(vehicle);
+    } catch (e) {
+      setQueryError(e instanceof Error ? e.message : "조회 실패");
+    } finally {
+      setQueryBusy(false);
+    }
+  }
+  const trace = customTrace ?? result.trace ?? [];
+  const firstTime = trace[0]?.elapsed_seconds || 0;
+  const duration = Math.max(
+    1,
+    (trace[trace.length - 1]?.elapsed_seconds || 0) - firstTime,
+  );
   const maxSpeed = Math.max(10, ...trace.map((p) => p.speed_kmh));
   const points = trace
     .map(
       (p) =>
-        `${48 + (p.elapsed_seconds / duration) * 510},${170 - (p.speed_kmh / maxSpeed) * 130}`,
+        `${48 + ((p.elapsed_seconds - firstTime) / duration) * 510},${170 - (p.speed_kmh / maxSpeed) * 130}`,
     )
     .join(" ");
   return (
     <>
-      <h3>첫 차량의 속도·상태 변화</h3>
+      <h3>차량별 속도·상태 변화</h3>
+      <div className="fields">
+        <label>
+          조회 차량 번호
+          <input
+            type="number"
+            min={1}
+            max={result.assignment_count}
+            value={vehicle}
+            onChange={(e) => setVehicle(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          시작 구간 (초)
+          <input
+            type="number"
+            min={0}
+            value={start}
+            onChange={(e) => setStart(Number(e.target.value))}
+          />
+        </label>
+        <label>
+          종료 구간 (초·빈 값은 생성 구간 끝)
+          <input
+            type="number"
+            min={0}
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+          />
+        </label>
+      </div>
+      <button disabled={queryBusy} onClick={query}>
+        선택 차량 조회
+      </button>
+      {queryError && (
+        <p role="alert" className="error">
+          {queryError}
+        </p>
+      )}
+      {!trace.length && (
+        <p className="note">조회 범위에 생성 메시지가 없습니다.</p>
+      )}
       <p className="note">
-        v000001 · 생성 모델 {result.model_version} · 생성된 구간 기준이며 전송
-        성공 건수와 별개입니다.
+        v{String(shownVehicle).padStart(6, "0")} · 생성 모델{" "}
+        {result.model_version} · 최대 120점 요약입니다. 선택 조회는 저장
+        설정·seed·모델 버전으로 재생성하며 전송 수신 기록이 아닙니다. 짧은
+        이벤트는 생략될 수 있어 구간을 좁혀 확인하세요.
       </p>
       <svg
         className="drive-chart"
         viewBox="0 0 600 210"
         role="img"
-        aria-label="첫 차량 속도 변화 그래프"
+        aria-label={"차량 " + shownVehicle + " 속도 변화 그래프"}
       >
         <path d="M48 30 V170 H560" fill="none" stroke="#9bb1bf" />
         <path
@@ -1275,14 +1462,14 @@ function DrivingResult({
           0
         </text>
         <text x="45" y="197">
-          0초
+          {firstTime}초
         </text>
         <text x="515" y="197">
-          {duration}초
+          {firstTime + duration}초
         </text>
       </svg>
       <div className="table-scroll">
-        <table>
+        <table className="drive-trace">
           <thead>
             <tr>
               <th>경과 (초)</th>
@@ -1290,6 +1477,10 @@ function DrivingResult({
               <th>속도 (km/h)</th>
               <th>RPM</th>
               <th>누적거리 (m)</th>
+              <th>도로·상황</th>
+              <th>운전자·노면</th>
+              <th>가속/횡가속 (m/s²)</th>
+              <th>내부 이벤트</th>
             </tr>
           </thead>
           <tbody>
@@ -1300,6 +1491,29 @@ function DrivingResult({
                 <td>{p.speed_kmh.toFixed(1)}</td>
                 <td>{p.rpm}</td>
                 <td>{p.distance_m.toFixed(1)}</td>
+                <td>
+                  {p.context
+                    ? p.context.road +
+                      " · " +
+                      p.context.reason +
+                      " · 경사 " +
+                      p.context.grade_percent.toFixed(1) +
+                      "%"
+                    : "이전 모델"}
+                </td>
+                <td>
+                  {p.context
+                    ? p.context.driver_style + " · " + p.context.weather
+                    : "—"}
+                </td>
+                <td>
+                  {p.context
+                    ? p.context.acceleration_mps2.toFixed(2) +
+                      " / " +
+                      p.context.lateral_mps2.toFixed(2)
+                    : "—"}
+                </td>
+                <td>{p.context?.event || "없음"}</td>
               </tr>
             ))}
           </tbody>
@@ -1359,7 +1573,7 @@ const explanations: Record<string, string> = {
   "생성 주기 (밀리초)":
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
   "운행 프로필":
-    "현재 개발 모델은 같은 상태 순서에서 도심·고속·정체의 기준 속도만 바꿉니다. 실제 도로·교통 상황을 재현하는 모델은 아직 아닙니다.",
+    "상황 기반 v2는 도로 구성과 정차·혼잡의 비중을 바꾸며 차량별 seed·운전자 성향·노면 편차를 적용합니다. 실제 도로망·실차 보정은 없습니다. v1은 이전 고정 비율 모델입니다.",
   "생성 확인":
     "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
   미생성:

@@ -8,13 +8,16 @@
     "connection_lifetime": "while_driving"
   },
   "generation": {
-    "profile": "urban",
+    "profile": "mixed",
     "seed": 42,
     "start_time_ms": 1794783600000,
     "duration_seconds": 60,
     "start_lat": 37.5,
     "start_lon": 127.0,
-    "initial_odometer_m": 500000.0
+    "initial_odometer_m": 500000.0,
+    "model_version": "combustion-scenario-2",
+    "anomaly_vehicle_percent": 5,
+    "anomaly_events_per_hour": 2
   },
   "transport": "dry_run",
   "confirm_mqtt": false

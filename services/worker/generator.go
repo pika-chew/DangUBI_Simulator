@@ -11,6 +11,11 @@ const generatorVersion = "combustion-demo-1"
 
 // 실차 보정 전의 재현 가능한 개발 모델. 단위는 제품 사용 안내에 명시한다.
 type Generation struct {
+	ModelVersion          string  `json:"model_version,omitempty"`
+	AnomalyVehiclePercent float64 `json:"anomaly_vehicle_percent"`
+	AnomalyEventsPerHour  float64 `json:"anomaly_events_per_hour"`
+	cache                 *scenarioCache
+
 	Profile          string  `json:"profile"`
 	Seed             int64   `json:"seed"`
 	StartTimeMS      int64   `json:"start_time_ms"`
@@ -21,11 +26,12 @@ type Generation struct {
 }
 
 type TracePoint struct {
-	ElapsedSeconds float64 `json:"elapsed_seconds"`
-	State          string  `json:"state"`
-	Speed          float64 `json:"speed_kmh"`
-	RPM            float64 `json:"rpm"`
-	Distance       float64 `json:"distance_m"`
+	ElapsedSeconds float64        `json:"elapsed_seconds"`
+	State          string         `json:"state"`
+	Speed          float64        `json:"speed_kmh"`
+	RPM            float64        `json:"rpm"`
+	Distance       float64        `json:"distance_m"`
+	Context        *MotionContext `json:"context,omitempty"`
 }
 
 func normalize(req Request) (Request, error) {
@@ -36,8 +42,18 @@ func normalize(req Request) (Request, error) {
 	if len(req.Message) > 0 {
 		return req, errors.New("자동 생성 설정과 수동 메시지는 동시에 사용할 수 없습니다.")
 	}
+	if g.ModelVersion != "" && g.ModelVersion != generatorVersion && g.ModelVersion != scenarioVersion {
+		return req, errors.New("생성 모델 버전을 확인하세요.")
+	}
+	if math.IsNaN(g.AnomalyVehiclePercent) || math.IsNaN(g.AnomalyEventsPerHour) || g.AnomalyVehiclePercent < 0 || g.AnomalyVehiclePercent > 100 || g.AnomalyEventsPerHour < 0 || g.AnomalyEventsPerHour > 60 {
+		return req, errors.New("이상 대상 비율·발생 빈도를 확인하세요.")
+	}
+	clone := *g
+	clone.cache = &scenarioCache{plans: map[int]*scenarioPlan{}}
+	req.Generation = &clone
+	g = req.Generation
 	duration := int64(g.DurationSeconds) * 1000
-	if (g.Profile != "urban" && g.Profile != "highway" && g.Profile != "congested") || g.Seed < -2147483648 || g.Seed > 2147483647 || g.StartTimeMS < 0 || g.StartTimeMS > 4102444800000 || g.DurationSeconds < 10 || g.DurationSeconds > 3600 || req.Config.IntervalMS < 100 || req.Config.IntervalMS > duration/10 || duration%req.Config.IntervalMS != 0 || math.IsNaN(g.StartLat) || math.IsNaN(g.StartLon) || math.IsNaN(g.InitialOdometerM) || math.Abs(g.StartLat) > 85 || math.Abs(g.StartLon) > 180 || g.InitialOdometerM < 0 || g.InitialOdometerM > 1e9 {
+	if (g.Profile != "urban" && g.Profile != "highway" && g.Profile != "congested" && (g.Profile != "mixed" || g.ModelVersion != scenarioVersion)) || g.Seed < -2147483648 || g.Seed > 2147483647 || g.StartTimeMS < 0 || g.StartTimeMS > 4102444800000 || g.DurationSeconds < 10 || g.DurationSeconds > 3600 || req.Config.IntervalMS < 100 || req.Config.IntervalMS > duration/10 || duration%req.Config.IntervalMS != 0 || math.IsNaN(g.StartLat) || math.IsNaN(g.StartLon) || math.IsNaN(g.InitialOdometerM) || math.Abs(g.StartLat) > 85 || math.Abs(g.StartLon) > 180 || g.InitialOdometerM < 0 || g.InitialOdometerM > 1e9 {
 		return req, errors.New("자동 생성의 프로필·시각·좌표·운행시간·주기를 확인하세요. 주기는 운행시간을 나누어 떨어지게 하고 최소 10구간을 확보해야 합니다.")
 	}
 	req.Config.MessagesPerVehicle = int(duration/req.Config.IntervalMS) + 2 // t=0, 종료 Microtrip, Trip 포함
@@ -59,6 +75,11 @@ func sampleAt(req Request, index, seq int, a Assignment, prefix string) Sample {
 	s := Sample{VehicleID: a.VehicleID, ClientID: a.ClientID, Topic: prefix + "/" + req.RunID + "/" + a.VehicleID + "/obd", Sequence: seq + 1}
 	if req.Generation != nil {
 		s.Message, s.VehicleState = automaticMessage(req, index, seq)
+		if req.Generation.ModelVersion == scenarioVersion {
+			_, _, c, events := scenarioAt(req, index, float64(offsetMS(req, seq))/1000)
+			s.Context = &c
+			s.EventsObserved = events
+		}
 		return s
 	}
 	raw, _ := json.Marshal(req.Message)
@@ -137,6 +158,9 @@ func position(lat, lon, distance float64) (float64, float64) {
 }
 
 func automaticMessage(req Request, index, seq int) (map[string]any, string) {
+	if req.Generation.ModelVersion == scenarioVersion {
+		return scenarioMessage(req, index, seq)
+	}
 	g := req.Generation
 	duration := float64(g.DurationSeconds)
 	t := float64(offsetMS(req, seq)) / 1000

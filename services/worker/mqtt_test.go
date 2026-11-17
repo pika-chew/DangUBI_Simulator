@@ -168,6 +168,7 @@ func TestAutomaticMQTTIncludesFinalTrip(t *testing.T) {
 	profile.MaxMessages = 100
 	profile.MaxDurationSeconds = 15
 	req := automaticRequest()
+	req.Generation.ModelVersion = scenarioVersion
 	req.Operation = "mqtt"
 	req.MQTT = profile
 	req.Config.VehicleCount = 2

@@ -58,7 +58,10 @@ class ConnectionConfig(BaseModel):
 
 class Generation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
-    profile: Literal["urban", "highway", "congested"]
+    profile: Literal["urban", "highway", "congested", "mixed"]
+    model_version: Literal["combustion-demo-1", "combustion-scenario-2"] = "combustion-demo-1"
+    anomaly_vehicle_percent: float = Field(default=0, ge=0, le=100)
+    anomaly_events_per_hour: float = Field(default=0, ge=0, le=60)
     seed: int = Field(ge=-2147483648, le=2147483647)
     start_time_ms: int = Field(ge=0, le=4102444800000)
     duration_seconds: int = Field(ge=10, le=3600)
@@ -296,6 +299,32 @@ def get_run(run_id: str):
     if not row:
         raise HTTPException(404, detail="실행 기록이 없습니다.")
     return {"id": run_id, "created_at": row[0], "request": json.loads(row[1]), "result": json.loads(row[2])}
+
+
+@app.get("/api/runs/{run_id}/trace/{vehicle_number}")
+def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, end_seconds: float | None = None):
+    import math
+    run = get_run(run_id)
+    body = RunRequest.model_validate(run["request"])
+    if not body.generation or not 1 <= vehicle_number <= body.config.vehicle_count:
+        raise HTTPException(422, detail="자동 생성 실행의 차량 번호를 확인하세요.")
+    last_sequence = (run["result"]["processed_messages"] - vehicle_number) // body.config.vehicle_count
+    if last_sequence < 0:
+        return {"vehicle_id": f"v{vehicle_number:06d}", "trace": [], "source": "아직 생성된 구간이 없습니다."}
+    available_ms = min(last_sequence * body.config.interval_ms, body.generation.duration_seconds * 1000)
+    end = available_ms / 1000 if end_seconds is None else end_seconds
+    if not math.isfinite(start_seconds) or not math.isfinite(end) or start_seconds < 0 or end < start_seconds or end > available_ms / 1000:
+        raise HTTPException(422, detail="조회 범위는 해당 차량이 생성한 구간 안으로 지정하세요.")
+    data, timeout = prepare_worker(body, "trace", run_id)
+    data.update(trace_vehicle=vehicle_number, trace_start_ms=round(start_seconds * 1000), trace_until_ms=round(end * 1000))
+    try:
+        process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        result = json.loads(process.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise HTTPException(502, detail="차량별 조회 결과를 확인하지 못했습니다.")
+    if process.returncode or "error" in result:
+        raise HTTPException(422, detail=result.get("error", "차량별 조회에 실패했습니다."))
+    return {"vehicle_id": f"v{vehicle_number:06d}", "trace": result.get("trace", []), "model_version": result["model_version"], "source": "저장 설정·seed·모델 버전으로 재생성한 구간입니다. 전송 수신 기록이 아닙니다."}
 
 
 class DeleteRuns(BaseModel):

@@ -391,3 +391,33 @@ def test_delete_cannot_remove_active_or_paused_job(client):
     client.post("/api/jobs/"+run_id+"/stop")
     wait_job(client,run_id,lambda r:r["job_state"]=="stopped")
     assert client.post("/api/runs/delete",json={"ids":[run_id],"confirm":True}).status_code==200
+
+
+def test_scenario_model_schema_and_vehicle_query(client):
+    body=automatic_request()
+    body["generation"].update(model_version="combustion-scenario-2",profile="mixed",duration_seconds=600,anomaly_vehicle_percent=50.0,anomaly_events_per_hour=10.0)
+    response=client.post("/api/runs",json=body)
+    assert response.status_code==201,response.text
+    run=response.json()
+    assert run["result"]["model_version"]=="combustion-scenario-2"
+    for sample in run["result"]["samples"]+run["result"]["trip_summaries"]:
+        control.validate_message(sample["message"])
+    trace=client.get("/api/runs/"+run["id"]+"/trace/2?start_seconds=100&end_seconds=200")
+    assert trace.status_code==200,trace.text
+    points=trace.json()["trace"]
+    assert points[0]["elapsed_seconds"]>=100 and points[-1]["elapsed_seconds"]<=200
+    assert len(points)<=120 and points[0]["context"]["road"]
+    assert client.get("/api/runs/"+run["id"]+"/trace/0").status_code==422
+    assert client.get("/api/runs/"+run["id"]+"/trace/4").status_code==422
+    assert client.get("/api/runs/"+run["id"]+"/trace/2?end_seconds=601").status_code==422
+    assert client.get("/api/runs/"+run["id"]).json()==run
+
+
+def test_trace_does_not_show_future_for_partial_job(client):
+    body=automatic_request();body["realtime"]=True
+    body["generation"].update(model_version="combustion-scenario-2")
+    run_id=client.post("/api/jobs",json=body).json()["id"]
+    wait_job(client,run_id,lambda r:r["processed_messages"]>0)
+    assert client.get("/api/runs/"+run_id+"/trace/2?end_seconds=60").status_code==422
+    client.post("/api/jobs/"+run_id+"/stop")
+    wait_job(client,run_id,lambda r:r["job_state"]=="stopped")

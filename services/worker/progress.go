@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 )
 
@@ -32,6 +33,20 @@ func recordSample(out *Result, req Request, sample Sample, index, seq int) error
 	if len(data) > 131072 {
 		return errors.New("메시지 크기가 128KiB를 초과합니다.")
 	}
+	if sample.Context != nil {
+		if out.Scenario == nil {
+			out.Scenario = &ScenarioSummary{EligibleVehicles: int(math.Round(float64(req.Config.VehicleCount) * req.Generation.AnomalyVehiclePercent / 100))}
+			out.events = map[int]int{}
+		}
+		before := out.events[index]
+		if sample.EventsObserved > before {
+			out.Scenario.Events += sample.EventsObserved - before
+			if before == 0 {
+				out.Scenario.ObservedVehicles++
+			}
+			out.events[index] = sample.EventsObserved
+		}
+	}
 	out.SimulationTimeMS = offsetMS(req, seq)
 	out.Processed++
 	out.Bytes += len(data)
@@ -48,7 +63,7 @@ func recordSample(out *Result, req Request, sample Sample, index, seq int) error
 	}
 	if req.Generation != nil && index == 0 && seq < req.Config.MessagesPerVehicle-1 && (seq%max(1, (req.Config.MessagesPerVehicle-2+118)/119) == 0 || seq == req.Config.MessagesPerVehicle-2) {
 		p := sample.Message["pld"].(map[string]any)
-		out.Trace = append(out.Trace, TracePoint{float64(offsetMS(req, seq)) / 1000, sample.VehicleState, p["sp"].(float64), p["rpm"].(float64), p["cdit"].(float64)})
+		out.Trace = append(out.Trace, TracePoint{ElapsedSeconds: float64(offsetMS(req, seq)) / 1000, State: sample.VehicleState, Speed: p["sp"].(float64), RPM: p["rpm"].(float64), Distance: p["cdit"].(float64), Context: sample.Context})
 	}
 	return nil
 }

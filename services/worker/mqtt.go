@@ -143,7 +143,7 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	out.Transport = "mqtt"
 	out.State = "mqtt_running"
 	if req.Generation != nil {
-		out.ModelVersion = generatorVersion
+		out.ModelVersion = modelVersion(req.Generation)
 	}
 	started := time.Now()
 	control := controlFrom(ctx)

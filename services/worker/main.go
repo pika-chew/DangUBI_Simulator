@@ -21,59 +21,66 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
-	Operation  string         `json:"operation"`
-	RunID      string         `json:"run_id"`
-	Config     Config         `json:"config"`
-	Message    map[string]any `json:"message"`
-	MQTT       *MQTTProfile   `json:"mqtt,omitempty"`
-	Generation *Generation    `json:"generation,omitempty"`
-	Realtime   bool           `json:"realtime,omitempty"`
+	Operation    string         `json:"operation"`
+	RunID        string         `json:"run_id"`
+	Config       Config         `json:"config"`
+	Message      map[string]any `json:"message"`
+	MQTT         *MQTTProfile   `json:"mqtt,omitempty"`
+	Generation   *Generation    `json:"generation,omitempty"`
+	TraceVehicle int            `json:"trace_vehicle,omitempty"`
+	TraceStartMS int64          `json:"trace_start_ms,omitempty"`
+	TraceUntilMS int64          `json:"trace_until_ms,omitempty"`
+	Realtime     bool           `json:"realtime,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
 	ClientID  string `json:"client_id"`
 }
 type Sample struct {
-	VehicleID    string         `json:"vehicle_id"`
-	ClientID     string         `json:"client_id"`
-	Topic        string         `json:"topic"`
-	Sequence     int            `json:"sequence"`
-	Message      map[string]any `json:"message"`
-	VehicleState string         `json:"vehicle_state,omitempty"`
+	VehicleID      string         `json:"vehicle_id"`
+	ClientID       string         `json:"client_id"`
+	Topic          string         `json:"topic"`
+	Sequence       int            `json:"sequence"`
+	Message        map[string]any `json:"message"`
+	Context        *MotionContext `json:"context,omitempty"`
+	EventsObserved int            `json:"events_observed,omitempty"`
+	VehicleState   string         `json:"vehicle_state,omitempty"`
 }
 type Result struct {
-	RunID             string       `json:"run_id"`
-	Transport         string       `json:"transport"`
-	State             string       `json:"state"`
-	AllocatedClients  int          `json:"allocated_clients"`
-	AssignmentCount   int          `json:"assignment_count"`
-	Assignments       []Assignment `json:"assignments"`
-	Planned           int          `json:"planned_messages"`
-	Processed         int          `json:"processed_messages"`
-	Bytes             int          `json:"payload_bytes"`
-	Connected         int          `json:"connected_clients"`
-	Published         int          `json:"mqtt_published"`
-	Puback            int          `json:"puback_count"`
-	Attempted         int          `json:"publish_attempts"`
-	Unconfirmed       int          `json:"unconfirmed_messages"`
-	Reconnects        int          `json:"reconnect_count"`
-	ActiveClients     int          `json:"active_clients"`
-	Errors            []string     `json:"errors"`
-	Samples           []Sample     `json:"samples"`
-	TripSummaries     []Sample     `json:"trip_summaries,omitempty"`
-	Trace             []TracePoint `json:"trace,omitempty"`
-	ModelVersion      string       `json:"model_version,omitempty"`
-	MicrotripCount    int          `json:"microtrip_count"`
-	TripCount         int          `json:"trip_count"`
-	ElapsedMS         int64        `json:"elapsed_ms"`
-	Remaining         int          `json:"remaining_messages"`
-	Unsent            int          `json:"unsent_messages"`
-	ScheduleDelayMS   int64        `json:"schedule_delay_ms"`
-	PeakActiveClients int          `json:"peak_active_clients"`
-	PausedMS          int64        `json:"paused_ms"`
-	ActiveElapsedMS   int64        `json:"active_elapsed_ms"`
-	SimulationTimeMS  int64        `json:"simulation_time_ms"`
-	ExecutionState    string       `json:"execution_state"`
+	RunID             string           `json:"run_id"`
+	Transport         string           `json:"transport"`
+	State             string           `json:"state"`
+	AllocatedClients  int              `json:"allocated_clients"`
+	AssignmentCount   int              `json:"assignment_count"`
+	Assignments       []Assignment     `json:"assignments"`
+	Planned           int              `json:"planned_messages"`
+	Processed         int              `json:"processed_messages"`
+	Bytes             int              `json:"payload_bytes"`
+	Connected         int              `json:"connected_clients"`
+	Published         int              `json:"mqtt_published"`
+	Puback            int              `json:"puback_count"`
+	Attempted         int              `json:"publish_attempts"`
+	Unconfirmed       int              `json:"unconfirmed_messages"`
+	Reconnects        int              `json:"reconnect_count"`
+	ActiveClients     int              `json:"active_clients"`
+	Errors            []string         `json:"errors"`
+	Samples           []Sample         `json:"samples"`
+	TripSummaries     []Sample         `json:"trip_summaries,omitempty"`
+	Trace             []TracePoint     `json:"trace,omitempty"`
+	ModelVersion      string           `json:"model_version,omitempty"`
+	MicrotripCount    int              `json:"microtrip_count"`
+	TripCount         int              `json:"trip_count"`
+	ElapsedMS         int64            `json:"elapsed_ms"`
+	Remaining         int              `json:"remaining_messages"`
+	Unsent            int              `json:"unsent_messages"`
+	ScheduleDelayMS   int64            `json:"schedule_delay_ms"`
+	PeakActiveClients int              `json:"peak_active_clients"`
+	PausedMS          int64            `json:"paused_ms"`
+	ActiveElapsedMS   int64            `json:"active_elapsed_ms"`
+	SimulationTimeMS  int64            `json:"simulation_time_ms"`
+	Scenario          *ScenarioSummary `json:"scenario,omitempty"`
+	events            map[int]int
+	ExecutionState    string `json:"execution_state"`
 }
 
 func process(req Request) (Result, error) { return processContext(context.Background(), req, nil) }
@@ -88,7 +95,7 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 	if c.VehicleCount < 1 || c.VehicleCount > 10000 || c.MessagesPerVehicle < 1 || c.VehicleCount*c.MessagesPerVehicle > 10000 || c.IntervalMS < 1 || c.IntervalMS > 86400000 {
 		return Result{}, errors.New("차량 수·생성 건수·주기를 확인하세요. 한 실행은 최대 10,000건입니다.")
 	}
-	if req.Operation != "preview" && req.Operation != "dry_run" && req.Operation != "plan" {
+	if req.Operation != "preview" && req.Operation != "dry_run" && req.Operation != "plan" && req.Operation != "trace" {
 		return Result{}, errors.New("송신 없는 확인만 지원합니다.")
 	}
 	if c.Lifetime != "always" && c.Lifetime != "while_driving" {
@@ -147,11 +154,30 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 		limit = 100
 	}
 	out := Result{RunID: req.RunID, Transport: "dry_run", State: "preview", AllocatedClients: clients, AssignmentCount: c.VehicleCount, Assignments: allocations[:limit], Planned: c.VehicleCount * c.MessagesPerVehicle, Samples: []Sample{}}
+	if req.Operation == "trace" {
+		if req.Generation == nil || req.TraceVehicle < 1 || req.TraceVehicle > c.VehicleCount || req.TraceStartMS < 0 || req.TraceStartMS > req.TraceUntilMS || req.TraceUntilMS < 0 || req.TraceUntilMS > int64(req.Generation.DurationSeconds)*1000 {
+			return Result{}, errors.New("차량·조회 구간을 확인하세요.")
+		}
+		out.ModelVersion = modelVersion(req.Generation)
+		count := min(c.MessagesPerVehicle-2, int(req.TraceUntilMS/c.IntervalMS))
+		first := int((req.TraceStartMS + c.IntervalMS - 1) / c.IntervalMS)
+		stride := max(1, (count-first+118)/119)
+		index := req.TraceVehicle - 1
+		for seq := first; seq <= count; seq++ {
+			if (seq-first)%stride != 0 && seq != count {
+				continue
+			}
+			sample := sampleAt(req, index, seq, allocations[index], "sim")
+			p := sample.Message["pld"].(map[string]any)
+			out.Trace = append(out.Trace, TracePoint{ElapsedSeconds: float64(offsetMS(req, seq)) / 1000, State: sample.VehicleState, Speed: p["sp"].(float64), RPM: p["rpm"].(float64), Distance: p["cdit"].(float64), Context: sample.Context})
+		}
+		return out, nil
+	}
 	if req.Operation == "plan" || req.Operation == "preview" && req.Generation == nil {
 		return out, nil
 	}
 	if req.Generation != nil {
-		out.ModelVersion = generatorVersion
+		out.ModelVersion = modelVersion(req.Generation)
 	}
 	started := time.Now()
 	control := controlFrom(ctx)
