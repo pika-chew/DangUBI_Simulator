@@ -187,7 +187,7 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	publishPacer := pacer{step: time.Second / time.Duration(profile.PublishPerSecond)}
 	timeout := time.Duration(profile.TimeoutMS) * time.Millisecond
 	connect := func(id string, client mqtt.Client) error {
-		for attempt := 0; attempt <= profile.ReconnectAttempts; attempt++ {
+		before := func() error {
 			if req.Config.PublishMode == "parallel" && out.Transmission.InFlight > 0 {
 				if control.pauseRequested() {
 					return errPausePending
@@ -206,39 +206,31 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 			if seen[id] {
 				out.Reconnects++
 			}
-			connectStarted := time.Now()
-			err := waitToken(ctx, client.Connect(), timeout)
-			metrics.connect.add(time.Since(connectStarted))
-			if err == nil {
-				if !seen[id] {
-					out.Connected++
-					seen[id] = true
-				}
-				out.ActiveClients = 0
-				for _, c := range clients {
-					if c.IsConnectionOpen() {
-						out.ActiveClients++
-					}
-				}
-				out.PeakActiveClients = max(out.PeakActiveClients, out.ActiveClients)
-				report(&out, true)
-				return nil
-			}
-			client.Disconnect(0)
-			if attempt < profile.ReconnectAttempts {
-				if err := sleepUntil(ctx, time.Now().Add(time.Duration(1<<attempt)*100*time.Millisecond)); err != nil {
-					return err
-				}
+			return nil
+		}
+		if err := connectMQTT(ctx, client, profile, before, metrics.connect.add); err != nil {
+			return err
+		}
+		if !seen[id] {
+			out.Connected++
+			seen[id] = true
+		}
+		out.ActiveClients = 0
+		for _, c := range clients {
+			if c.IsConnectionOpen() {
+				out.ActiveClients++
 			}
 		}
-		return errors.New("MQTT 접속 실패")
+		out.PeakActiveClients = max(out.PeakActiveClients, out.ActiveClients)
+		report(&out, true)
+		return nil
 	}
+
 	for _, a := range out.Assignments {
 		if _, ok := clients[a.ClientID]; ok {
 			continue
 		}
-		options := mqtt.NewClientOptions().AddBroker(profile.BrokerURL).SetClientID(a.ClientID).SetTLSConfig(tlsConfig.Clone()).SetProtocolVersion(4).SetCleanSession(true).SetAutoReconnect(false).SetConnectRetry(false).SetConnectTimeout(timeout).SetWriteTimeout(timeout).SetKeepAlive(30 * time.Second).SetPingTimeout(timeout)
-		clients[a.ClientID] = mqtt.NewClient(options)
+		clients[a.ClientID] = newMQTTClient(profile, a.ClientID, tlsConfig)
 	}
 	fail := func(message string) {
 		if errors.Is(ctx.Err(), context.Canceled) {

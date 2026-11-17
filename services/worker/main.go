@@ -24,6 +24,7 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
+	Assignments  []Assignment    `json:"assignments,omitempty"`
 	Scheduled    *ScheduledInput `json:"scheduled,omitempty"`
 	Operation    string          `json:"operation"`
 	RunID        string          `json:"run_id"`
@@ -254,6 +255,10 @@ func main() {
 	var req Request
 	if err := dec.Decode(&req); err != nil {
 		fail("요청 JSON을 읽을 수 없습니다.")
+		return
+	}
+	if req.Operation == "mqtt_stream" {
+		serveMQTTStream(req, dec, os.Stdout)
 		return
 	}
 	managed := os.Getenv("DANGUBI_MANAGED") == "1"

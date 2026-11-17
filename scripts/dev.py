@@ -76,7 +76,7 @@ def main():
         env["GOCACHE"] = str(LOCAL / "go-cache")
         env["GOMODCACHE"] = str(LOCAL / "go-mod")
         run(["go", "test", "./..."], cwd=ROOT / "services/worker", env=env)
-        run([PYTHON, "-m", "pytest", "services/control/test_app.py", "-q"])
+        run([PYTHON, "-m", "pytest", "services/control", "-q"])
         run([PYTHON, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_measure_mqtt.py"])
     else:
         if not WORKER.is_file() or not (ROOT / "apps/web/dist/index.html").is_file():

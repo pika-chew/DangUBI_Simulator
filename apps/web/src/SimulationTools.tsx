@@ -112,6 +112,8 @@ export type Result = {
   publish_attempts?: number;
   unconfirmed_messages?: number;
   reconnect_count?: number;
+  connection_count?:number;
+  disconnect_count?:number;
   active_clients?: number;
   state: string;
   allocated_clients: number;

@@ -502,6 +502,9 @@ class ScheduleExecutionRequest(BaseModel):
     mapping_mode: Literal["shared", "dedicated"] = "shared"
     client_count: int = Field(default=1, ge=1, le=100)
     force_end_trip: bool = False
+    transport: Literal["dry_run", "mqtt"] = "dry_run"
+    confirm_mqtt: bool = False
+    connection_lifetime: Literal["always", "while_driving"] = "always"
 
 
 @app.post("/api/workspace/execute", status_code=202)
@@ -539,17 +542,30 @@ def workspace_execute(body: ScheduleExecutionRequest):
             planned+=count
     if planned>10000:
         raise HTTPException(422,detail="시험용 Trip을 포함한 실행은10,000메시지 이하여야 합니다.")
+    profile=None
+    if body.transport=="mqtt":
+        if not body.confirm_mqtt:
+            raise HTTPException(409,detail="실제 MQTT 송신 확인을 선택하세요.")
+        if not body.realtime or body.force_end_trip:
+            raise HTTPException(422,detail="일정 MQTT는 실제 시간·정상 Trip만 지원합니다. 가상시간 또는 시험용 Trip을 해제하세요.")
+        profile=mqtt_profile()
+        if clients>profile["max_clients"] or planned>profile["max_messages"] or end-start>=profile["max_duration_seconds"]*1000:
+            raise HTTPException(422,detail="서버 MQTT 연결·메시지·시간 상한을 초과했습니다. 접속·응답 여유를 포함해 일정을 줄이세요.")
+        if not WORKER.is_file():
+            raise HTTPException(503,detail="Worker가 준비되지 않았습니다.")
     run_id=uuid4().hex
     assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}"} for i,v in enumerate(vehicle_ids)]
-    config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":"always"}
-    request={"config":config,"transport":"dry_run","realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
+    config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
+    request={"config":config,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
     checkpoint_epoch=CHECKPOINTS.stats()["epoch"]
     def generate(vehicle,key,offset):
         if source.fleet:
             return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
         return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
-    data={"operation":"dry_run","config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"trips_by_vehicle":trips,"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime}
-    return JOBS.start(run_id,request,data,WORKER,(end-start)/1000+30 if body.realtime else 120,runner=partial(execute,JOBS))
+    data={"operation":body.transport,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"trips_by_vehicle":trips,"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
+    if profile:data["mqtt"]=profile
+    timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+30 if body.realtime else 120
+    return JOBS.start(run_id,request,data,WORKER,timeout,runner=partial(execute,JOBS))
 
 
 class DeleteWorkspaceRecords(BaseModel):
