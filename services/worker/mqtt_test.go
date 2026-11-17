@@ -194,6 +194,17 @@ func testAutomaticMQTTIncludesFinalTrip(t *testing.T, version string) {
 	if len(broker.messages) != 24 {
 		t.Fatal("실제 발행 건수 불일치")
 	}
+	for _, m := range broker.messages {
+		if len(m) != 3 || m["ty"] == nil || m["ts"] == nil || m["pld"] == nil {
+			t.Fatal("OBD 밖 정보가 MQTT에 포함됨", m)
+		}
+		for _, key := range []string{"context", "road", "reason", "driver_style", "weather", "event"} {
+			if m["pld"].(map[string]any)[key] != nil {
+				t.Fatal("내부 상황이 payload에 포함됨", key)
+			}
+		}
+	}
+
 	for i := 22; i < 24; i++ {
 		m := broker.messages[i]
 		if m["ty"] != float64(3) || m["ts"] != float64(req.Generation.StartTimeMS+10000) {

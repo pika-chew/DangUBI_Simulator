@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 
@@ -717,11 +717,10 @@ function App() {
                       <em>02</em> 자동 주행 설정
                     </h2>
                     <p className="note">
-                      경로 기반 v3는 도로 연결 순서와 구간 유지를 반영하며,
-                      가상 혼잡·운전자 성향에 따라 짧은
-                      가감속·정속·시동 유지 정차를 반복합니다. 커브·유턴과
-                      경사·노면도 근사합니다. 실제 도로망·차량 간 상호작용·실차
-                      보정은 포함하지 않습니다.
+                      경로 기반 v3는 도로 연결 순서와 구간 유지를 반영하며, 가상
+                      혼잡·운전자 성향에 따라 짧은 가감속·정속·시동 유지 정차를
+                      반복합니다. 커브·유턴과 경사·노면도 근사합니다. 실제
+                      도로망·차량 간 상호작용·실차 보정은 포함하지 않습니다.
                     </p>
                     <fieldset disabled={locked}>
                       <label htmlFor="setting-9">
@@ -1354,23 +1353,79 @@ function DrivingResult({
     [end, setEnd] = useState("");
   const [queryBusy, setQueryBusy] = useState(false),
     [queryError, setQueryError] = useState("");
-  async function query() {
+  const [intervalSamples, setIntervalSamples] = useState<Sample[]>([]);
+  const [messageTotal, setMessageTotal] = useState(0);
+  const [messageOffset, setMessageOffset] = useState(0);
+  const [loadedRange, setLoadedRange] = useState({
+    start: 0,
+    end: "",
+    vehicle: 1,
+  });
+  const [hasQuery, setHasQuery] = useState(false);
+  const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
+  const dragStart = useRef<number | null>(null);
+  const requestID = useRef(0);
+  async function query(
+    rangeStart = start,
+    rangeEnd = end,
+    selectedVehicle = vehicle,
+    offset = 0,
+  ) {
+    const id = ++requestID.current;
     setQueryBusy(true);
     setQueryError("");
     try {
       const suffix =
-        "?start_seconds=" + start + (end !== "" ? "&end_seconds=" + end : "");
-      const data = await api<{ trace: TracePoint[] }>(
-        "/api/runs/" + result.run_id + "/trace/" + vehicle + suffix,
-      );
+        "?start_seconds=" +
+        rangeStart +
+        (rangeEnd !== "" ? "&end_seconds=" + rangeEnd : "") +
+        "&message_offset=" +
+        offset;
+      const data = await api<{
+        trace: TracePoint[];
+        samples: Sample[];
+        message_total: number;
+        message_offset: number;
+        range_end_seconds: number;
+      }>("/api/runs/" + result.run_id + "/trace/" + selectedVehicle + suffix);
+      if (id !== requestID.current) return;
       setCustomTrace(data.trace);
-      setShownVehicle(vehicle);
+      setShownVehicle(selectedVehicle);
+      setIntervalSamples(data.samples);
+      setMessageTotal(data.message_total);
+      setMessageOffset(data.message_offset);
+      setLoadedRange({
+        start: rangeStart,
+        end: String(data.range_end_seconds),
+        vehicle: selectedVehicle,
+      });
+      setHasQuery(true);
+      setStart(rangeStart);
+      setEnd(rangeEnd);
+      setVehicle(selectedVehicle);
     } catch (e) {
-      setQueryError(e instanceof Error ? e.message : "조회 실패");
+      if (id === requestID.current)
+        setQueryError(e instanceof Error ? e.message : "조회 실패");
     } finally {
-      setQueryBusy(false);
+      if (id === requestID.current) setQueryBusy(false);
     }
   }
+  useEffect(() => {
+    if (
+      ![
+        "starting",
+        "running",
+        "pausing",
+        "paused",
+        "resuming",
+        "stopping",
+      ].includes(result.job_state || "")
+    )
+      void query(0, "", 1);
+    return () => {
+      requestID.current++;
+    };
+  }, [result.run_id]);
   const trace = customTrace ?? result.trace ?? [];
   const firstTime = trace[0]?.elapsed_seconds || 0;
   const duration = Math.max(
@@ -1417,9 +1472,24 @@ function DrivingResult({
           />
         </label>
       </div>
-      <button disabled={queryBusy} onClick={query}>
+      <button disabled={queryBusy} onClick={() => void query()}>
         선택 차량 조회
       </button>
+      <button
+        disabled={queryBusy}
+        onClick={() => void query(0, "", shownVehicle)}
+      >
+        전체 생성 구간 보기
+      </button>
+      <p className="note">
+        그래프의 원하는 구간을 좌우로 드래그하면 그래프·상황표·Microtrip 조회가
+        함께 바뀝니다. 시작·종료 입력으로도 조회할 수 있습니다.
+      </p>
+      {queryBusy && (
+        <p className="note" role="status">
+          선택 구간을 조회하고 있습니다.
+        </p>
+      )}
       {queryError && (
         <p role="alert" className="error">
           {queryError}
@@ -1438,7 +1508,62 @@ function DrivingResult({
         className="drive-chart"
         viewBox="0 0 600 210"
         role="img"
-        aria-label={"차량 " + shownVehicle + " 속도 변화 그래프"}
+        preserveAspectRatio="none"
+        aria-label={
+          "차량 " + shownVehicle + " 속도 변화 그래프 · 드래그로 구간 선택"
+        }
+        onPointerDown={(e) => {
+          if (queryBusy || trace.length < 2 || e.button !== 0) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const x = ((e.clientX - rect.left) / rect.width) * 600;
+          const y = ((e.clientY - rect.top) / rect.height) * 210;
+          if (x < 48 || x > 558 || y < 30 || y > 170) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          dragStart.current = x;
+          setDrag({ from: x, to: x });
+        }}
+        onPointerMove={(e) => {
+          if (dragStart.current === null) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          setDrag({
+            from: dragStart.current,
+            to: Math.max(
+              48,
+              Math.min(558, ((e.clientX - rect.left) / rect.width) * 600),
+            ),
+          });
+        }}
+        onPointerCancel={() => {
+          dragStart.current = null;
+          setDrag(null);
+        }}
+        onLostPointerCapture={() => {
+          dragStart.current = null;
+          setDrag(null);
+        }}
+        onPointerUp={(e) => {
+          const from = dragStart.current;
+          dragStart.current = null;
+          setDrag(null);
+          if (e.currentTarget.hasPointerCapture(e.pointerId))
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          if (from === null) return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const to = Math.max(
+            48,
+            Math.min(558, ((e.clientX - rect.left) / rect.width) * 600),
+          );
+          if (Math.abs(to - from) < 4) return;
+          const begin =
+            Math.round(
+              (firstTime + ((Math.min(from, to) - 48) / 510) * duration) * 1000,
+            ) / 1000;
+          const finish =
+            Math.round(
+              (firstTime + ((Math.max(from, to) - 48) / 510) * duration) * 1000,
+            ) / 1000;
+          void query(begin, String(finish), shownVehicle);
+        }}
       >
         <path d="M48 30 V170 H560" fill="none" stroke="#9bb1bf" />
         <path
@@ -1453,6 +1578,18 @@ function DrivingResult({
           stroke="#087c70"
           strokeWidth="3"
         />
+        {drag && (
+          <rect
+            x={Math.min(drag.from, drag.to)}
+            y={30}
+            width={Math.abs(drag.to - drag.from)}
+            height={140}
+            fill="#087c70"
+            fillOpacity={0.18}
+            stroke="#087c70"
+            pointerEvents="none"
+          />
+        )}
         <text x="6" y="20">
           km/h
         </text>
@@ -1519,6 +1656,53 @@ function DrivingResult({
             ))}
           </tbody>
         </table>
+      </div>
+      <h3>선택 구간 Microtrip</h3>
+      <p className="note">
+        조회 차량·시작·종료 구간에 해당하는 원래 생성 주기의 Microtrip을
+        페이지당 최대 100건씩 재생성합니다. 그래프의 120점과 별개이며 DB에 추가
+        저장하지 않습니다. 당시 전송 원문·MQTT 수신 기록이 아닙니다. 종료 Trip은
+        아래 전체 운행 요약을 유지합니다.
+      </p>
+      {hasQuery && (
+        <p aria-live="polite">
+          선택 차량 v{String(shownVehicle).padStart(6, "0")} · 총 {messageTotal}
+          건 · 현재 {intervalSamples.length ? messageOffset + 1 : 0}~
+          {messageOffset + intervalSamples.length}건
+        </p>
+      )}
+      <div className="view-switch">
+        <button
+          disabled={queryBusy || messageOffset === 0}
+          onClick={() =>
+            void query(
+              loadedRange.start,
+              loadedRange.end,
+              loadedRange.vehicle,
+              Math.max(0, messageOffset - 100),
+            )
+          }
+        >
+          이전 100건
+        </button>
+        <button
+          disabled={
+            queryBusy || messageOffset + intervalSamples.length >= messageTotal
+          }
+          onClick={() =>
+            void query(
+              loadedRange.start,
+              loadedRange.end,
+              loadedRange.vehicle,
+              messageOffset + 100,
+            )
+          }
+        >
+          다음 100건
+        </button>
+      </div>
+      <div className="interval-messages">
+        <MessageViewer samples={intervalSamples} catalog={catalog} />
       </div>
       <h3>종료 Trip 요약</h3>
       <div className="table-scroll">
@@ -1663,7 +1847,13 @@ function MessageViewer({
       {!samples.length ? (
         <p className="note">아직 생성·보관된 메시지가 없습니다.</p>
       ) : !table ? (
-        <pre>{JSON.stringify(samples, null, 2)}</pre>
+        <pre>
+          {JSON.stringify(
+            samples.map((sample) => sample.message),
+            null,
+            2,
+          )}
+        </pre>
       ) : (
         samples.map((sample) => {
           const profile = catalog.profiles[String(sample.message.ty)];
@@ -1719,6 +1909,23 @@ function MessageViewer({
             </section>
           );
         })
+      )}
+      {!!samples.length && (
+        <details>
+          <summary>로컬 부가 정보 보기 · MQTT 전송 제외</summary>
+          <p className="note">
+            차량·Client·참고 토픽·순번·상황 등 로컬 확인용 정보입니다. 재생성
+            조회의 토픽은 당시 사용한 전송 토픽을 보장하지 않습니다. MQTT에는 각
+            항목의 message 내용만 전송합니다.
+          </p>
+          <pre>
+            {JSON.stringify(
+              samples.map(({ message: _message, ...metadata }) => metadata),
+              null,
+              2,
+            )}
+          </pre>
+        </details>
       )}
       <p className="note">
         표는 한국어 항목명과 소수 최대 6자리로 표시합니다. 미확정 단위 표시는

@@ -30,6 +30,8 @@ type Request struct {
 	TraceVehicle int            `json:"trace_vehicle,omitempty"`
 	TraceStartMS int64          `json:"trace_start_ms,omitempty"`
 	TraceUntilMS int64          `json:"trace_until_ms,omitempty"`
+	TraceOffset  int            `json:"trace_offset,omitempty"`
+	TraceLimit   int            `json:"trace_limit,omitempty"`
 	Realtime     bool           `json:"realtime,omitempty"`
 }
 type Assignment struct {
@@ -158,11 +160,18 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 		if req.Generation == nil || req.TraceVehicle < 1 || req.TraceVehicle > c.VehicleCount || req.TraceStartMS < 0 || req.TraceStartMS > req.TraceUntilMS || req.TraceUntilMS < 0 || req.TraceUntilMS > int64(req.Generation.DurationSeconds)*1000 {
 			return Result{}, errors.New("차량·조회 구간을 확인하세요.")
 		}
+		if req.TraceOffset < 0 || req.TraceOffset > 10000 || req.TraceLimit < 0 || req.TraceLimit > 100 {
+			return Result{}, errors.New("조회 페이지 크기와 위치를 확인하세요.")
+		}
 		out.ModelVersion = modelVersion(req.Generation)
 		count := min(c.MessagesPerVehicle-2, int(req.TraceUntilMS/c.IntervalMS))
 		first := int((req.TraceStartMS + c.IntervalMS - 1) / c.IntervalMS)
 		stride := max(1, (count-first+118)/119)
 		index := req.TraceVehicle - 1
+		out.Planned = max(0, count-first+1)
+		for seq := first + req.TraceOffset; seq <= count && len(out.Samples) < req.TraceLimit; seq++ {
+			out.Samples = append(out.Samples, sampleAt(req, index, seq, allocations[index], "sim"))
+		}
 		for seq := first; seq <= count; seq++ {
 			if (seq-first)%stride != 0 && seq != count {
 				continue

@@ -540,3 +540,13 @@ footer {
 .drive-trace {
   min-width: 1000px;
 }
+
+.drive-chart {
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.interval-messages {
+  max-height: 520px;
+  overflow: auto;
+}

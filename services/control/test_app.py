@@ -436,3 +436,35 @@ def test_route_model_and_replay(client):
     assert all(p["context"]["road"]=="고속 도로" for p in trace.json()["trace"])
     for sample in run["result"]["samples"]+run["result"]["trip_summaries"]:
         control.validate_message(sample["message"])
+
+
+@pytest.mark.parametrize("version", ["combustion-demo-1", "combustion-scenario-2", "combustion-route-3"])
+def test_interval_microtrip_pagination_and_wire_separation(client,version):
+    body=automatic_request()
+    body["generation"].update(model_version=version,profile="urban",duration_seconds=600)
+    run=client.post("/api/runs",json=body).json()
+    path="/api/runs/"+run["id"]+"/trace/2"
+    pages=[client.get(path+"?start_seconds=10&end_seconds=420&message_offset="+str(n)).json() for n in (0,100,200,300)]
+    assert [len(p["samples"]) for p in pages]==[100,100,6,0]
+    assert all(p["message_total"]==206 for p in pages)
+    samples=[s for page in pages for s in page["samples"]]
+    assert len(set(s["sequence"] for s in samples))==206
+    assert samples[0]["message"]["ts"]==body["generation"]["start_time_ms"]+10000
+    assert samples[-1]["message"]["ts"]==body["generation"]["start_time_ms"]+420000
+    for sample in samples:
+        assert sample["vehicle_id"]=="v000002"
+        assert set(sample["message"])=={"ty","ts","pld"}
+        assert sample["message"]["ty"]==4
+        control.validate_message(sample["message"])
+        assert not ({"context","road","reason","driver_style","weather"} & sample["message"]["pld"].keys())
+    repeat=client.get(path+"?start_seconds=10&end_seconds=420").json()
+    assert repeat["samples"]==pages[0]["samples"]
+    assert len(repeat["trace"])<=120
+    ending=client.get(path+"?start_seconds=598&end_seconds=600").json()["samples"]
+    assert len(ending)==2 and all(s["message"]["ty"]==4 for s in ending)
+    assert client.get(path+"?start_seconds=1&end_seconds=1.5").json()["samples"]==[]
+    tiny=client.get(path+"?start_seconds=10.0001&end_seconds=10.0002")
+    assert tiny.status_code==200 and tiny.json()["message_total"]==0
+    assert client.get(path+"?message_offset=-1").status_code==422
+    assert client.get(path+"?message_offset=10001").status_code==422
+    assert client.get("/api/runs/"+run["id"]).json()==run

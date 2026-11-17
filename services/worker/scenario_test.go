@@ -129,3 +129,31 @@ func TestScenarioVehicleTraceAndLegacy(t *testing.T) {
 		t.Fatal("이전 모델 호환 실패")
 	}
 }
+
+func TestTraceMessagePageAndBounds(t *testing.T) {
+	r := routeRequest(600)
+	r.Operation = "trace"
+	r.TraceVehicle = 2
+	r.TraceStartMS = 10000
+	r.TraceUntilMS = 420000
+	r.TraceOffset = 100
+	r.TraceLimit = 100
+	out, err := process(r)
+	if err != nil || len(out.Samples) != 100 || out.Planned != 206 {
+		t.Fatal("구간 페이지", out, err)
+	}
+	normalized, _ := normalize(r)
+	expected := sampleAt(normalized, 1, 105, Assignment{"v000002", "sim-" + r.RunID + "-c000002"}, "sim")
+	if !reflect.DeepEqual(out.Samples[0].Message, expected.Message) || out.Samples[0].Sequence != 106 {
+		t.Fatal("원래 생성 주기 불일치")
+	}
+	r.TraceOffset = 10001
+	if _, err := process(r); err == nil {
+		t.Fatal("페이지 위치 상한 누락")
+	}
+	r.TraceOffset = 0
+	r.TraceLimit = 101
+	if _, err := process(r); err == nil {
+		t.Fatal("페이지 크기 상한 누락")
+	}
+}

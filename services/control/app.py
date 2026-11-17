@@ -302,21 +302,24 @@ def get_run(run_id: str):
 
 
 @app.get("/api/runs/{run_id}/trace/{vehicle_number}")
-def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, end_seconds: float | None = None):
+def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, end_seconds: float | None = None, message_offset: int = 0):
     import math
     run = get_run(run_id)
     body = RunRequest.model_validate(run["request"])
-    if not body.generation or not 1 <= vehicle_number <= body.config.vehicle_count:
+    if not body.generation or not 1 <= vehicle_number <= body.config.vehicle_count or message_offset < 0 or message_offset > 10000:
         raise HTTPException(422, detail="자동 생성 실행의 차량 번호를 확인하세요.")
     last_sequence = (run["result"]["processed_messages"] - vehicle_number) // body.config.vehicle_count
     if last_sequence < 0:
-        return {"vehicle_id": f"v{vehicle_number:06d}", "trace": [], "source": "아직 생성된 구간이 없습니다."}
+        return {"vehicle_id": f"v{vehicle_number:06d}", "trace": [], "samples": [], "message_total": 0, "message_offset": message_offset, "range_end_seconds": 0, "source": "아직 생성된 구간이 없습니다."}
     available_ms = min(last_sequence * body.config.interval_ms, body.generation.duration_seconds * 1000)
     end = available_ms / 1000 if end_seconds is None else end_seconds
     if not math.isfinite(start_seconds) or not math.isfinite(end) or start_seconds < 0 or end < start_seconds or end > available_ms / 1000:
         raise HTTPException(422, detail="조회 범위는 해당 차량이 생성한 구간 안으로 지정하세요.")
+    start_ms, end_ms = math.ceil(start_seconds * 1000), math.floor(end * 1000)
+    if start_ms > end_ms:
+        return {"vehicle_id": f"v{vehicle_number:06d}", "trace": [], "samples": [], "message_total": 0, "message_offset": message_offset, "range_end_seconds": end, "model_version": body.generation.model_version, "source": "조회 범위에 생성 시점이 없습니다. 전송 수신 기록이 아닙니다."}
     data, timeout = prepare_worker(body, "trace", run_id)
-    data.update(trace_vehicle=vehicle_number, trace_start_ms=round(start_seconds * 1000), trace_until_ms=round(end * 1000))
+    data.update(trace_vehicle=vehicle_number, trace_start_ms=start_ms, trace_until_ms=end_ms, trace_offset=message_offset, trace_limit=100)
     try:
         process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         result = json.loads(process.stdout)
@@ -324,7 +327,9 @@ def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, en
         raise HTTPException(502, detail="차량별 조회 결과를 확인하지 못했습니다.")
     if process.returncode or "error" in result:
         raise HTTPException(422, detail=result.get("error", "차량별 조회에 실패했습니다."))
-    return {"vehicle_id": f"v{vehicle_number:06d}", "trace": result.get("trace", []), "model_version": result["model_version"], "source": "저장 설정·seed·모델 버전으로 재생성한 구간입니다. 전송 수신 기록이 아닙니다."}
+    samples = result.get("samples", [])
+    # 재생성은 OBD 값 확인용이다. 당시 발행 토픽이나 송수신 결과로 해석하지 않는다.
+    return {"vehicle_id": f"v{vehicle_number:06d}", "trace": result.get("trace", []), "samples": samples, "message_total": result["planned_messages"], "message_offset": message_offset, "range_end_seconds": end, "model_version": result["model_version"], "source": "저장 설정·seed·모델 버전으로 재생성한 구간입니다. 당시 전송 원문·토픽·수신 기록이 아닙니다."}
 
 
 class DeleteRuns(BaseModel):
