@@ -117,3 +117,11 @@ AWS 실제 연동은 endpoint·토픽·인증서·정책 확인 후 시행해야
 공식 자료: [AWS 통신·인증](https://docs.aws.amazon.com/iot/latest/developerguide/protocols.html), [AWS MQTT](https://docs.aws.amazon.com/iot/latest/developerguide/mqtt.html), [Eclipse Paho Go](https://github.com/eclipse-paho/paho.mqtt.golang).
 
 자동 생성 규격 근거: [Smart Fleet 메시지 7.2.2 OBD](https://smart-fleet-docs.readthedocs.io/ko/latest/message/#obd). 원문은 필드 의미의 근거이며 생성 모델 상수의 근거는 아닙니다.
+
+## 실행 기록 정리와 결과 읽기
+
+최근 실행의 체크박스로 종료 기록을 선택하고 선택 기록 삭제를 누릅니다. 확인 화면에 표시된 실행 ID와 개수를 검토한 뒤 영구 삭제 확인을 누르면 해당 SQLite 기록의 설정·집계·샘플·Trip·그래프를 함께 삭제합니다. 실행 중/일시중지 기록은 삭제할 수 없으며 먼저 중단해야 합니다. 표시된 종료 기록 선택은 현재 표시된 최대 30개 중 종료 기록만 선택합니다. 삭제 후 새로 목록을 조회해 이전 기록을 추가 정리할 수 있습니다. 자동 삭제나 AWS 데이터 삭제는 하지 않습니다. SQLite 파일 크기는 즉시 줄지 않을 수 있으며 비워진 공간을 이후 기록에 재사용합니다.
+
+연결·생성 설정과 처리 결과 옆의 동그란 i 버튼은 마우스를 올리거나 키보드로 초점을 주면 설명을 표시합니다. MQTT 발행은 현재 구현에서 PUBACK까지 확인한 건수이므로 PUBACK 수와 같은 기준입니다. 후속 저장 완료를 의미하지 않습니다.
+
+생성 메시지 보기와 Trip JSON 보기 안에서 표로 보기/JSON으로 보기를 전환합니다. 표에는 개발 JSON Schema의 한국어 항목명·원문 필드·값을 표시하고 시각은 서울 시간과 원래 UTC 밀리초를 함께 표시합니다. 숫자는 소수 최대 6자리로 표시하며 원본 JSON은 보존합니다. 정의되지 않은 단위나 필드를 확정된 값처럼 바꾸지 않습니다. 이 전환은 표시 방식만 변경하며 전송 JSON을 수정하지 않습니다.

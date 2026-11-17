@@ -367,3 +367,27 @@ def test_stop_and_shutdown_while_paused(tmp_path, monkeypatch):
     assert result["job_state"] == "stopped"
     assert not result["forced_termination"]
     assert result["connection_cleanup_confirmed"]
+
+
+def test_delete_finished_records_confirmation_and_atomicity(client):
+    first=client.post("/api/runs",json=request()).json()["id"]
+    second=client.post("/api/runs",json=request()).json()["id"]
+    assert client.post("/api/runs/delete",json={"ids":[first]}).status_code==409
+    assert client.post("/api/runs/delete",json={"ids":[first,"missing"],"confirm":True}).status_code==404
+    assert client.get("/api/runs/"+first).status_code==200
+    deleted=client.post("/api/runs/delete",json={"ids":[first,second,first],"confirm":True})
+    assert deleted.status_code==200 and deleted.json()["deleted_count"]==2
+    assert client.get("/api/runs/"+first).status_code==404
+    assert client.get("/api/runs").json()==[]
+
+
+def test_delete_cannot_remove_active_or_paused_job(client):
+    body=automatic_request();body["realtime"]=True
+    run_id=client.post("/api/jobs",json=body).json()["id"]
+    assert client.post("/api/runs/delete",json={"ids":[run_id],"confirm":True}).status_code==409
+    client.post("/api/jobs/"+run_id+"/pause")
+    wait_job(client,run_id,lambda r:r["job_state"]=="paused")
+    assert client.post("/api/runs/delete",json={"ids":[run_id],"confirm":True}).status_code==409
+    client.post("/api/jobs/"+run_id+"/stop")
+    wait_job(client,run_id,lambda r:r["job_state"]=="stopped")
+    assert client.post("/api/runs/delete",json={"ids":[run_id],"confirm":True}).status_code==200

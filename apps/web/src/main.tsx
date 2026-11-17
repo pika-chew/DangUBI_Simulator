@@ -147,6 +147,8 @@ function stateLabel(result: Result): string {
   );
 }
 function App() {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [deleteReview, setDeleteReview] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [realtime, setRealtime] = useState(true);
   const [stopPending, setStopPending] = useState(false);
@@ -257,6 +259,24 @@ function App() {
         e instanceof Error ? e.message : "중단 요청을 전달하지 못했습니다.",
       );
       setStopPending(false);
+    }
+  }
+  async function removeSelected() {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/runs/delete", { ids: selected, confirm: true });
+      if (run && selected.includes(run.id)) {
+        setRun(null);
+        setPlan(null);
+      }
+      setSelected([]);
+      setDeleteReview(false);
+      setHistory(await api<SavedRun[]>("/api/runs"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "삭제를 완료하지 못했습니다.");
+    } finally {
+      setBusy(false);
     }
   }
   async function pauseResume() {
@@ -469,9 +489,13 @@ function App() {
                 </p>
                 <fieldset disabled={locked}>
                   <div className="fields">
-                    <label>
-                      데이터 생성 방식
+                    <label htmlFor="setting-0">
+                      <span className="label-line">
+                        데이터 생성 방식 <Info name="데이터 생성 방식" />
+                      </span>
                       <select
+                        id="setting-0"
+                        aria-label="데이터 생성 방식"
                         value={mode}
                         onChange={(e) =>
                           setMode(e.target.value as "manual" | "automatic")
@@ -481,9 +505,13 @@ function App() {
                         <option value="automatic">자동 주행 생성</option>
                       </select>
                     </label>
-                    <label>
-                      실행 시간
+                    <label htmlFor="setting-1">
+                      <span className="label-line">
+                        실행 시간 <Info name="실행 시간" />
+                      </span>
                       <select
+                        id="setting-1"
+                        aria-label="실행 시간"
                         value={
                           transport === "mqtt"
                             ? "realtime"
@@ -504,9 +532,13 @@ function App() {
                         </option>
                       </select>
                     </label>
-                    <label>
-                      전송 방식
+                    <label htmlFor="setting-2">
+                      <span className="label-line">
+                        전송 방식 <Info name="전송 방식" />
+                      </span>
                       <select
+                        id="setting-2"
+                        aria-label="전송 방식"
                         value={transport}
                         onChange={(e) => {
                           setTransport(e.target.value as "dry_run" | "mqtt");
@@ -530,9 +562,13 @@ function App() {
                       </label>
                     )}
 
-                    <label>
-                      차량 수
+                    <label htmlFor="setting-3">
+                      <span className="label-line">
+                        차량 수 <Info name="차량 수" />
+                      </span>
                       <input
+                        id="setting-3"
+                        aria-label="차량 수"
                         type="number"
                         min="1"
                         max="10000"
@@ -542,9 +578,13 @@ function App() {
                         }
                       />
                     </label>
-                    <label>
-                      연결 방식
+                    <label htmlFor="setting-4">
+                      <span className="label-line">
+                        연결 방식 <Info name="연결 방식" />
+                      </span>
                       <select
+                        id="setting-4"
+                        aria-label="연결 방식"
                         value={config.mapping_mode}
                         onChange={(e) =>
                           changeConfig("mapping_mode", e.target.value)
@@ -554,9 +594,13 @@ function App() {
                         <option value="dedicated">차량별 전체 연결</option>
                       </select>
                     </label>
-                    <label>
-                      Client 수
+                    <label htmlFor="setting-5">
+                      <span className="label-line">
+                        Client 수 <Info name="Client 수" />
+                      </span>
                       <input
+                        id="setting-5"
+                        aria-label="Client 수"
                         type="number"
                         min="1"
                         max={config.vehicle_count}
@@ -567,9 +611,13 @@ function App() {
                         }
                       />
                     </label>
-                    <label>
-                      연결 유지 정책
+                    <label htmlFor="setting-6">
+                      <span className="label-line">
+                        연결 유지 정책 <Info name="연결 유지 정책" />
+                      </span>
                       <select
+                        id="setting-6"
+                        aria-label="연결 유지 정책"
                         value={config.connection_lifetime}
                         onChange={(e) =>
                           changeConfig("connection_lifetime", e.target.value)
@@ -579,9 +627,13 @@ function App() {
                         <option value="while_driving">운행 중 유지</option>
                       </select>
                     </label>
-                    <label>
-                      차량당 생성 건수
+                    <label htmlFor="setting-7">
+                      <span className="label-line">
+                        차량당 생성 건수 <Info name="차량당 생성 건수" />
+                      </span>
                       <input
+                        id="setting-7"
+                        aria-label="차량당 생성 건수"
                         type="number"
                         min="1"
                         disabled={mode === "automatic"}
@@ -598,9 +650,13 @@ function App() {
                         }
                       />
                     </label>
-                    <label>
-                      생성 주기 (밀리초)
+                    <label htmlFor="setting-8">
+                      <span className="label-line">
+                        생성 주기 (밀리초) <Info name="생성 주기 (밀리초)" />
+                      </span>
                       <input
+                        id="setting-8"
+                        aria-label="생성 주기 (밀리초)"
                         type="number"
                         min="1"
                         value={config.interval_ms}
@@ -642,9 +698,13 @@ function App() {
                       모델이며 실제 도로를 따르지 않습니다.
                     </p>
                     <fieldset disabled={locked}>
-                      <label>
-                        운행 프로필
+                      <label htmlFor="setting-9">
+                        <span className="label-line">
+                          운행 프로필 <Info name="운행 프로필" />
+                        </span>
                         <select
+                          id="setting-9"
+                          aria-label="운행 프로필"
                           value={generation.profile}
                           onChange={(e) =>
                             setGeneration({
@@ -984,13 +1044,15 @@ function App() {
                         ],
                       ].map(([title, value]) => (
                         <div key={title}>
-                          <span>{title}</span>
+                          <span>
+                            {title} <Info name={title} />
+                          </span>
                           <b>{value}</b>
                         </div>
                       ))}
                     </div>
                     {!!run.result.trace?.length && (
-                      <DrivingResult result={run.result} />
+                      <DrivingResult result={run.result} catalog={catalog} />
                     )}
                     <h3>고정된 차량 → Client 배정</h3>
                     <p className="note">
@@ -1020,7 +1082,10 @@ function App() {
                     </div>
                     <details>
                       <summary>생성 메시지 보기 · 최대 10건</summary>
-                      <pre>{JSON.stringify(run.result.samples, null, 2)}</pre>
+                      <MessageViewer
+                        samples={run.result.samples}
+                        catalog={catalog}
+                      />
                     </details>
                     <details>
                       <summary>실행 당시 설정</summary>
@@ -1037,27 +1102,112 @@ function App() {
                   10건·배정 100대·자동 Trip 요약 100대·첫 차량 변화 최대 120점을
                   보관합니다. GitHub에는 올리지 않습니다.
                 </p>
+                <div className="actions">
+                  <button
+                    disabled={
+                      locked ||
+                      !history.some(
+                        (h) => !activeStates.has(h.result.job_state || ""),
+                      )
+                    }
+                    onClick={() => {
+                      setSelected(
+                        history
+                          .filter(
+                            (h) => !activeStates.has(h.result.job_state || ""),
+                          )
+                          .map((h) => h.id),
+                      );
+                      setDeleteReview(false);
+                    }}
+                  >
+                    표시된 종료 기록 선택
+                  </button>
+                  <button
+                    className="stop"
+                    disabled={locked || !selected.length}
+                    onClick={() => setDeleteReview(true)}
+                  >
+                    선택 기록 삭제 ({selected.length})
+                  </button>
+                </div>
+                {deleteReview && (
+                  <div
+                    role="dialog"
+                    aria-label="실행 기록 삭제 확인"
+                    className="delete-review"
+                  >
+                    <b>
+                      선택한 {selected.length}개 로컬 실행 기록을 영구
+                      삭제할까요?
+                    </b>
+                    <p>
+                      설정·집계·샘플·Trip·그래프 기록을 함께 삭제합니다. 복원할
+                      수 없습니다. 현재 목록은 최대 30개이며 전체 저장 기록을
+                      뜻하지 않습니다.
+                    </p>
+                    <ul>
+                      {selected.map((id) => (
+                        <li key={id}>
+                          <code>{id}</code>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="actions">
+                      <button
+                        disabled={busy}
+                        onClick={() => setDeleteReview(false)}
+                      >
+                        취소
+                      </button>
+                      <button
+                        className="stop"
+                        disabled={locked}
+                        onClick={removeSelected}
+                      >
+                        영구 삭제 확인
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {history.length === 0 ? (
                   <p>아직 실행 기록이 없습니다.</p>
                 ) : (
                   history.map((h) => (
-                    <button
-                      className="history"
-                      key={h.id}
-                      disabled={locked}
-                      onClick={() => load(h.id)}
-                    >
-                      <span>
-                        {new Date(h.created_at).toLocaleString("ko-KR")}
-                        <br />
-                        <code>{h.id.slice(0, 12)}</code>
-                      </span>
-                      <b>
-                        {h.result.assignment_count}대 / Client{" "}
-                        {h.result.allocated_clients}개 /{" "}
-                        {h.result.processed_messages}건
-                      </b>
-                    </button>
+                    <div className="history-row" key={h.id}>
+                      <input
+                        type="checkbox"
+                        aria-label={"실행 기록 선택 " + h.id}
+                        disabled={
+                          locked || activeStates.has(h.result.job_state || "")
+                        }
+                        checked={selected.includes(h.id)}
+                        onChange={(e) => {
+                          setDeleteReview(false);
+                          setSelected(
+                            e.target.checked
+                              ? [...selected, h.id]
+                              : selected.filter((id) => id !== h.id),
+                          );
+                        }}
+                      />
+                      <button
+                        className="history"
+                        disabled={locked}
+                        onClick={() => load(h.id)}
+                      >
+                        <span>
+                          {new Date(h.created_at).toLocaleString("ko-KR")}
+                          <br />
+                          <code>{h.id.slice(0, 12)}</code>
+                        </span>
+                        <b>
+                          {stateLabel(h.result)} · {h.result.assignment_count}대
+                          / Client {h.result.allocated_clients}개 /{" "}
+                          {h.result.processed_messages}건
+                        </b>
+                      </button>
+                    </div>
                   ))
                 )}
               </section>
@@ -1073,7 +1223,13 @@ function App() {
 }
 createRoot(document.getElementById("root")!).render(<App />);
 
-function DrivingResult({ result }: { result: Result }) {
+function DrivingResult({
+  result,
+  catalog,
+}: {
+  result: Result;
+  catalog: Catalog;
+}) {
   const trace = result.trace!;
   const duration = trace[trace.length - 1].elapsed_seconds || 1;
   const maxSpeed = Math.max(10, ...trace.map((p) => p.speed_kmh));
@@ -1174,8 +1330,185 @@ function DrivingResult({ result }: { result: Result }) {
       </div>
       <details>
         <summary>Trip JSON 보기 · 최대 100대</summary>
-        <pre>{JSON.stringify(result.trip_summaries, null, 2)}</pre>
+        <MessageViewer
+          samples={result.trip_summaries || []}
+          catalog={catalog}
+        />
       </details>
     </>
+  );
+}
+
+const explanations: Record<string, string> = {
+  "데이터 생성 방식":
+    "수동 입력은 입력 JSON을 차량별로 복제합니다. 자동 주행 생성은 운행 설정과 seed로 Microtrip과 종료 Trip을 만듭니다.",
+  "실행 시간":
+    "실제 시간은 설정한 주기에 맞춰 기다립니다. 가상시간은 송신 없이 데이터 시각만 증가시켜 즉시 생성합니다.",
+  "전송 방식":
+    "송신 없는 확인은 MQTT에 연결하지 않습니다. 실제 MQTT는 서버 접속 설정과 별도 송신 확인이 필요합니다.",
+  "차량 수":
+    "생성할 가상 차량의 수입니다. 차량 수와 MQTT 연결 수는 별개의 설정입니다.",
+  "연결 방식":
+    "연결 풀은 여러 차량이 Client를 공유합니다. 차량별 전체 연결은 차량마다 Client 한 개를 배정합니다. 실행 중 배정은 고정됩니다.",
+  "Client 수":
+    "MQTT 연결에 사용할 Client ID 개수입니다. 풀에서는 차량 수 이하, 차량별 연결에서는 차량 수와 같습니다. 실제 동시 연결 수와는 다를 수 있습니다.",
+  "연결 유지 정책":
+    "기간 내내 유지는 실행 시작부터 종료까지 연결합니다. 운행 중 유지는 첫 메시지부터 마지막 메시지 응답까지 유지합니다. 일시중지 중에도 기존 연결을 유지합니다.",
+  "차량당 생성 건수":
+    "수동 모드에서 차량마다 만들 메시지 수입니다. 자동 모드에서는 시작·종료 Microtrip과 종료 Trip을 포함해 자동 계산합니다.",
+  "생성 주기 (밀리초)":
+    "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
+  "운행 프로필":
+    "현재 개발 모델은 같은 상태 순서에서 도심·고속·정체의 기준 속도만 바꿉니다. 실제 도로·교통 상황을 재현하는 모델은 아직 아닙니다.",
+  "생성 확인":
+    "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
+  미생성:
+    "전체 계획 중 아직 생성하지 않은 메시지 수입니다. 중단하면 이 수가 남을 수 있습니다.",
+  "발행 미시도":
+    "MQTT 계획 중 아직 Publish를 시도하지 않은 수입니다. 송신 없는 실행에서는 발행 대상 자체가 없어 0으로 표시합니다.",
+  "최대 주기 지연":
+    "예정 생성 시각에 비해 가장 늦었던 시간입니다. 일시중지 시간은 제외합니다. 목표 속도 달성률이나 네트워크 왕복시간과는 다릅니다.",
+  Microtrip:
+    "운행 중 주기적으로 생성하는 위치·속도·엔진 등의 상세 메시지입니다. 개발 규격 ty=4입니다.",
+  Trip: "운행 종료 시 같은 운행 데이터로 집계한 요약 메시지입니다. 개발 규격 ty=3이며 중단된 운행에는 새 종료 Trip을 만들지 않습니다.",
+  "배정 Client":
+    "실행 전에 고정 배정한 Client ID 수입니다. 실제 접속에 성공한 수와 구분합니다.",
+  "접속 확인 Client":
+    "한 번 이상 접속 성공을 확인한 고유 Client 수입니다. 현재 열려 있는 연결 수가 아닙니다.",
+  "현재 연결":
+    "Worker가 마지막으로 보고한 열려 있는 MQTT 연결 수입니다. 서버에서 직접 조회한 실시간 계정 전체 연결 수는 아닙니다.",
+  "최종 보고 연결":
+    "마지막 Worker 보고의 연결 수입니다. 강제 종료·연결 정리 미확인 상태라면 확정된 최종 값으로 해석하지 않습니다.",
+  "발행 시도":
+    "MQTT Publish 요청을 시도한 메시지 수입니다. PUBACK를 받지 못한 요청도 포함합니다.",
+  "응답 미확인":
+    "발행을 시도했지만 PUBACK를 확인하지 못한 수입니다. 실제 브로커에 도착했을 수 있어 자동 재발행하지 않습니다.",
+  "재연결 시도":
+    "이전에 접속한 Client ID로 다시 접속을 시도한 횟수입니다. 성공 횟수와는 다릅니다.",
+  "MQTT 발행":
+    "현재 QoS 1 구현에서 PUBACK까지 확인한 발행 건수입니다. 발행 시도 수와 구분하며 PUBACK 지표와 같은 기준입니다.",
+  PUBACK:
+    "QoS 1 발행에 대한 MQTT 브로커의 수신 확인 응답입니다. 후속 DB·S3 저장이나 파이프라인 처리 완료를 보장하지 않습니다.",
+  "생성 JSON 크기":
+    "생성한 JSON 본문 크기의 합계입니다. MQTT·TLS·네트워크 헤더와 실제 AWS 과금 단위는 포함하지 않습니다.",
+};
+function Info({ name }: { name: string }) {
+  return (
+    <span className="hint">
+      <button
+        type="button"
+        className="info-button"
+        aria-label={name + " 도움말"}
+        onClick={(e) => e.preventDefault()}
+      >
+        i
+      </button>
+      <span role="tooltip" className="hint-content">
+        {explanations[name] || name}
+      </span>
+    </span>
+  );
+}
+function MessageViewer({
+  samples,
+  catalog,
+}: {
+  samples: Sample[];
+  catalog: Catalog;
+}) {
+  const [table, setTable] = useState(true);
+  function display(key: string, value: unknown) {
+    if (
+      ["ts", "clt", "stt", "edt"].includes(key) &&
+      typeof value === "number"
+    ) {
+      const date = new Date(value);
+      if (Number.isFinite(date.getTime()))
+        return (
+          date.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }) +
+          " (UTC ms: " +
+          value +
+          ")"
+        );
+    }
+    if (typeof value === "number")
+      return value.toLocaleString("ko-KR", { maximumFractionDigits: 6 });
+    return typeof value === "object" ? JSON.stringify(value) : String(value);
+  }
+  return (
+    <div className="message-viewer">
+      <div className="view-switch" role="group" aria-label="메시지 보기 형식">
+        <button aria-pressed={table} onClick={() => setTable(true)}>
+          표로 보기
+        </button>
+        <button aria-pressed={!table} onClick={() => setTable(false)}>
+          JSON으로 보기
+        </button>
+      </div>
+      {!samples.length ? (
+        <p className="note">아직 생성·보관된 메시지가 없습니다.</p>
+      ) : !table ? (
+        <pre>{JSON.stringify(samples, null, 2)}</pre>
+      ) : (
+        samples.map((sample) => {
+          const profile = catalog.profiles[String(sample.message.ty)];
+          const rows: [string, string, unknown][] = [
+            ["ty", "메시지 종류", profile?.title || sample.message.ty],
+            ["ts", "메시지 시각", sample.message.ts],
+            ...Object.entries(sample.message.pld).map(
+              ([key, value]) =>
+                [
+                  key,
+                  profile?.schema.properties.pld.properties[key]?.title ||
+                    "규격 설명 없음",
+                  value,
+                ] as [string, string, unknown],
+            ),
+          ];
+          return (
+            <section
+              className="message-card"
+              key={sample.vehicle_id + ":" + sample.sequence}
+            >
+              <h4>
+                {sample.vehicle_id} · {profile?.title || "메시지"} · 순번{" "}
+                {sample.sequence}
+              </h4>
+              <p className="note">
+                Client <code>{sample.client_id}</code>
+                <br />
+                토픽 <code>{sample.topic}</code>
+              </p>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>항목</th>
+                      <th>필드</th>
+                      <th>값</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(([key, title, value]) => (
+                      <tr key={key}>
+                        <td>{title}</td>
+                        <td>
+                          <code>{key}</code>
+                        </td>
+                        <td title={String(value)}>{display(key, value)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          );
+        })
+      )}
+      <p className="note">
+        표는 한국어 항목명과 소수 최대 6자리로 표시합니다. 미확정 단위 표시는
+        개발 규격을 따르며 JSON 원본과 전송 내용은 바꾸지 않습니다.
+      </p>
+    </div>
   );
 }

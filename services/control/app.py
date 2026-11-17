@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from services.control.jobs import JobManager
+from services.control.jobs import JobManager, ACTIVE
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -296,6 +296,28 @@ def get_run(run_id: str):
     if not row:
         raise HTTPException(404, detail="실행 기록이 없습니다.")
     return {"id": run_id, "created_at": row[0], "request": json.loads(row[1]), "result": json.loads(row[2])}
+
+
+class DeleteRuns(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ids: list[str] = Field(min_length=1, max_length=30)
+    confirm: bool = False
+
+
+@app.post("/api/runs/delete")
+def delete_runs(body: DeleteRuns):
+    if not body.confirm:
+        raise HTTPException(409, detail="선택한 로컬 실행 기록의 영구 삭제 확인이 필요합니다.")
+    ids = list(dict.fromkeys(body.ids))
+    with JOBS.lock, database() as db:
+        for run_id in ids:
+            row = db.execute("SELECT result FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, detail="삭제 대상 실행 기록이 없습니다. 목록을 새로 확인하세요.")
+            if JOBS.active_id() == run_id or json.loads(row[0]).get("job_state") in ACTIVE:
+                raise HTTPException(409, detail="실행 중이거나 일시중지된 기록은 삭제할 수 없습니다. 먼저 중단하세요.")
+        db.executemany("DELETE FROM runs WHERE id=?", [(run_id,) for run_id in ids])
+    return {"deleted_ids": ids, "deleted_count": len(ids)}
 
 
 @app.patch("/api/runs/{run_id}")
