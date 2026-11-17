@@ -140,7 +140,9 @@ def vehicle_trips(req, vehicle):
     return trips
 
 
-def plan(req: ScheduleRequest, offset=0, limit=100):
+def plan(req: ScheduleRequest, offset=0, limit=100, vehicle_id=None):
+    if vehicle_id is not None and not any(v.vehicle_id == vehicle_id for v in req.vehicles):
+        raise ValueError("계획에 없는 차량입니다.")
     start, end = instant(req.measurement.start), instant(req.measurement.end)
     rows, inactive, summaries, total, micros, completed = [], [], [], 0, 0, 0
     seen = set()
@@ -175,4 +177,5 @@ def plan(req: ScheduleRequest, offset=0, limit=100):
             inactive.append(vehicle.vehicle_id)
         summaries.append({"vehicle_id":vehicle.vehicle_id,"observed_trip_count":observed,"driving_ms":driving_ms,"parking_ms":end-start-driving_ms})
     rows.sort(key=lambda r:(r["start_ms"],r["vehicle_id"],r["trip_key"]))
-    return {"schedule_version":req.schedule_version,"status":"plan_only","minimum_parking_seconds":1800,"measurement_start_ms":start,"measurement_end_ms":end,"vehicle_count":len(req.vehicles),"observed_trip_count":len(rows),"vehicles":summaries,"inactive_vehicle_ids":inactive,"microtrip_count":micros,"trip_count":completed,"planned_messages":micros+completed,"offset":offset,"limit":limit,"trips":rows[offset:offset+limit],"has_more":offset+limit<len(rows),"warnings":["일정 미리보기이며 OBD 생성·MQTT 전송·시험용 강제 종료 Trip은 아직 연동되지 않았습니다.","자동 일정은 개발용 계획이며 실제 교통에 따른 도착 시각 계산은 후속입니다."]}
+    matched = [r for r in rows if vehicle_id is None or r["vehicle_id"] == vehicle_id]
+    return {"schedule_version":req.schedule_version,"status":"plan_only","minimum_parking_seconds":1800,"measurement_start_ms":start,"measurement_end_ms":end,"vehicle_count":len(req.vehicles),"observed_trip_count":len(rows),"vehicles":summaries,"inactive_vehicle_ids":inactive,"microtrip_count":micros,"trip_count":completed,"planned_messages":micros+completed,"offset":offset,"limit":limit,"trips":matched[offset:offset+limit],"matched_trip_count":len(matched),"has_more":offset+limit<len(matched),"warnings":["일정 미리보기는 계획만 반환합니다. OBD는 별도 조회하며 MQTT 전송은 아직 연동하지 않았습니다.","자동 일정은 개발용 계획이며 실제 교통에 따른 도착 시각 계산은 후속입니다."]}

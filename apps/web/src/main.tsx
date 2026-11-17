@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import { SchedulePanel } from "./SchedulePanel";
 
 type FieldSchema = {
   type: string;
@@ -9,7 +10,7 @@ type FieldSchema = {
   minimum?: number;
   maximum?: number;
 };
-type Message = { ty: number; ts: number; pld: Record<string, unknown> };
+export type Message = { ty: number; ts: number; pld: Record<string, unknown> };
 type Profile = {
   title: string;
   example: Message;
@@ -51,7 +52,7 @@ type Generation = {
   start_lon: number;
   initial_odometer_m: number;
 };
-type TracePoint = {
+export type TracePoint = {
   elapsed_seconds: number;
   state: string;
   speed_kmh: number;
@@ -203,6 +204,7 @@ function stateLabel(result: Result): string {
   );
 }
 function App() {
+  const [workspace, setWorkspace] = useState<"existing" | "schedule">("existing");
   const [selected, setSelected] = useState<string[]>([]);
   const [deleteReview, setDeleteReview] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -453,6 +455,14 @@ function App() {
         <span className="status">{health}</span>
       </header>
       <main>
+        <div className="workspace-switch" role="group" aria-label="작업 화면 선택">
+          <button aria-pressed={workspace === "existing"} onClick={() => setWorkspace("existing")}>기존 생성·전송{activeJobId ? " · 실행 중" : ""}</button>
+          <button aria-pressed={workspace === "schedule"} onClick={() => setWorkspace("schedule")}>일정 기반 생성 · 로컬 조회</button>
+        </div>
+        <div hidden={workspace !== "schedule"}>
+          {catalog && <SchedulePanel renderMessages={(messages, vehicle, offset = 0) => <MessageViewer catalog={catalog} localOnly samples={messages.map((message, i) => ({message, vehicle_id: vehicle, sequence: offset + i + 1, client_id: "", topic: ""}))} />} />}
+        </div>
+        <div hidden={workspace !== "existing"}>
         <div className="banner">
           <b>
             {transport === "dry_run"
@@ -1601,6 +1611,7 @@ function App() {
             </div>
           </div>
         )}
+        </div>
         <footer>
           개발용 잠정 OBD 규격 · 로컬 확인 전용 · AWS 운영 환경은 추후 선택
         </footer>
@@ -2106,9 +2117,11 @@ function Info({ name }: { name: string }) {
 function MessageViewer({
   samples,
   catalog,
+  localOnly = false,
 }: {
   samples: Sample[];
   catalog: Catalog;
+  localOnly?: boolean;
 }) {
   const [table, setTable] = useState(true);
   function display(key: string, value: unknown) {
@@ -2171,14 +2184,14 @@ function MessageViewer({
               key={sample.vehicle_id + ":" + sample.sequence}
             >
               <h4>
-                {sample.vehicle_id} · {profile?.title || "메시지"} · 순번{" "}
+                {sample.vehicle_id} · {profile?.title || "메시지"} · {localOnly ? "조회 순번" : "순번"}{" "}
                 {sample.sequence}
               </h4>
-              <p className="note">
+              {!localOnly && <p className="note">
                 Client <code>{sample.client_id}</code>
                 <br />
                 토픽 <code>{sample.topic}</code>
-              </p>
+              </p>}
               <div className="table-scroll">
                 <table>
                   <thead>
@@ -2205,7 +2218,7 @@ function MessageViewer({
           );
         })
       )}
-      {!!samples.length && (
+      {!!samples.length && !localOnly && (
         <details>
           <summary>로컬 부가 정보 보기 · MQTT 전송 제외</summary>
           <p className="note">

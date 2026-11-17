@@ -41,9 +41,9 @@ app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifes
 
 
 @app.post("/api/schedules/preview")
-def schedule_preview(body: ScheduleRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100)):
+def schedule_preview(body: ScheduleRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100), vehicle_id: str | None = Query(default=None)):
     try:
-        return plan_schedule(body, offset, limit)
+        return plan_schedule(body, offset, limit, vehicle_id)
     except ValueError as error:
         raise HTTPException(422, detail=str(error)) from error
 

@@ -725,3 +725,18 @@ def test_schedule_obd_two_hours_is_bounded(client):
     assert data["microtrip_count"]==3600 and len(data["messages"])==3 and data["has_more"]
     assert 0<len(data["trace"])<=120 and data["trace"][0]["state"]
     control.validate_message(data["trip"])
+
+
+def test_schedule_vehicle_filter_keeps_global_counts_and_pages(client):
+    body=scheduled_obd_body()["schedule"]
+    body["vehicles"].append({"vehicle_id":"v000002","trips":[]})
+    whole=client.post("/api/schedules/preview",json=body).json()
+    page=client.post("/api/schedules/preview?vehicle_id=v000001&limit=1",json=body).json()
+    assert page["matched_trip_count"]==2 and page["has_more"]
+    assert page["observed_trip_count"]==whole["observed_trip_count"]==2
+    assert page["microtrip_count"]==whole["microtrip_count"]
+    second=client.post("/api/schedules/preview?vehicle_id=v000001&limit=1&offset=1",json=body).json()
+    assert second["trips"]==whole["trips"][1:] and not second["has_more"]
+    inactive=client.post("/api/schedules/preview?vehicle_id=v000002",json=body).json()
+    assert inactive["trips"]==[] and inactive["matched_trip_count"]==0 and not inactive["has_more"]
+    assert client.post("/api/schedules/preview?vehicle_id=v000003",json=body).status_code==422
