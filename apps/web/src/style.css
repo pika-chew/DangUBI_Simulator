@@ -288,6 +288,13 @@ code {
   max-height: 300px;
   overflow: auto;
 }
+.drive-trace {
+  min-width: 1150px;
+}
+.drive-trace th,
+.drive-trace td {
+  white-space: nowrap;
+}
 .drive-chart {
   display: block;
   width: 100%;

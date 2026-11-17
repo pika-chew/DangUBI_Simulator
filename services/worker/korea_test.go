@@ -97,11 +97,12 @@ func TestKoreaAnomalyRespectsWeatherCapAndReplay(t *testing.T) {
 
 func TestPreviousModelsKeepPublishedOutput(t *testing.T) {
 	expected := map[string]string{
+		koreaVersion:     "4be852b58ca24333a961bc62e7a1b47af57fc92f0981b8afe3e194780d09c8a9",
 		generatorVersion: "9c357de35f770dcece11412078f209c1e5d791f0fe432f3f7fc2d548898cea01",
 		scenarioVersion:  "912301a9856ba79113b007454bda87d5fba780021fff66fdacc97c68692806a3",
 		routeVersion:     "11be3113125b44d8ec1af51412f1301908a177570cf74c5b7761cf22902d3542",
 	}
-	// 0a8fe29 배포 코드에서 생성한 3대·600초·도심·seed42 결과의 기준값이다.
+	// v1~v3은0a8fe29, v4는df19242 배포 코드의 3대·600초·도심·seed42 결과 기준값이다.
 	for version, hash := range expected {
 		r := scenarioRequest(600)
 		r.Generation.ModelVersion = version

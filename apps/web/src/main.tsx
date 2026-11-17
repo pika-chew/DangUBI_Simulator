@@ -37,6 +37,7 @@ type Generation = {
   profile: "urban" | "highway" | "congested" | "mixed";
   model_version?: string;
   weather?: "dry" | "rain";
+  engine_start?: "cold" | "warm";
   anomaly_vehicle_percent?: number;
   anomaly_events_per_hour?: number;
   seed: number;
@@ -64,6 +65,11 @@ type TracePoint = {
     eligible: boolean;
     driver_style: string;
     weather: string;
+    gear?: number;
+    engine_state?: string;
+    wheel_power_kw?: number;
+    fuel_rate_lph?: number;
+    coolant_c?: number;
   };
 };
 type Sample = Assignment & {
@@ -178,7 +184,8 @@ function App() {
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
     profile: "mixed",
-    model_version: "combustion-korea-4",
+    model_version: "combustion-powertrain-5",
+    engine_start: "cold",
     weather: "dry",
     anomaly_vehicle_percent: 5,
     anomaly_events_per_hour: 2,
@@ -719,11 +726,11 @@ function App() {
                       <em>02</em> 자동 주행 설정
                     </h2>
                     <p className="note">
-                      기본 v4는 도심 기본 속도와 강우 조건을 반영하며, 가상
-                      혼잡·운전자 성향에 따라 짧은 가감속·정속·시동 유지 정차를
-                      반복합니다. 도로 커브·경사도 근사하며 유턴은 기본 생성하지
-                      않습니다. 실제 도로망·차량 간 상호작용·실차 보정은
-                      포함하지 않습니다.
+                      기본 v5는 v4의 도로·강우 규칙에 기어·RPM·부하·연료의
+                      연관성을 더합니다. 가상 혼잡·운전자 성향에 따라 짧은
+                      가감속·정속·시동 유지 정차를 반복합니다. 개발용 가솔린·6단
+                      자동 모형이며 유턴은 기본 생성하지 않습니다. 실제
+                      도로망·차량 간 상호작용·실차 보정은 포함하지 않습니다.
                     </p>
                     <fieldset disabled={locked}>
                       <label htmlFor="setting-9">
@@ -765,10 +772,16 @@ function App() {
                               setGeneration({
                                 ...generation,
                                 model_version: e.target.value,
-                                weather:
-                                  e.target.value === "combustion-korea-4"
-                                    ? generation.weather || "dry"
+                                engine_start:
+                                  e.target.value === "combustion-powertrain-5"
+                                    ? generation.engine_start || "cold"
                                     : undefined,
+                                weather: [
+                                  "combustion-korea-4",
+                                  "combustion-powertrain-5",
+                                ].includes(e.target.value)
+                                  ? generation.weather || "dry"
+                                  : undefined,
                                 profile:
                                   e.target.value === "combustion-demo-1" &&
                                   generation.profile === "mixed"
@@ -779,6 +792,9 @@ function App() {
                               })
                             }
                           >
+                            <option value="combustion-powertrain-5">
+                              가솔린 연관 모델 v5 · 근사
+                            </option>
                             <option value="combustion-korea-4">
                               국내 기본 규칙 v4 · 근사
                             </option>
@@ -793,7 +809,10 @@ function App() {
                             </option>
                           </select>
                         </label>
-                        {generation.model_version === "combustion-korea-4" && (
+                        {[
+                          "combustion-korea-4",
+                          "combustion-powertrain-5",
+                        ].includes(generation.model_version || "") && (
                           <label>
                             날씨 조건 <Info name="날씨 조건" />
                             <select
@@ -808,6 +827,29 @@ function App() {
                             >
                               <option value="dry">건조</option>
                               <option value="rain">강우 · 젖은 노면</option>
+                            </select>
+                          </label>
+                        )}
+                        {generation.model_version ===
+                          "combustion-powertrain-5" && (
+                          <label>
+                            엔진 시작 상태 <Info name="엔진 시작 상태" />
+                            <select
+                              aria-label="엔진 시작 상태"
+                              value={generation.engine_start || "cold"}
+                              onChange={(e) =>
+                                setGeneration({
+                                  ...generation,
+                                  engine_start: e.target.value as
+                                    | "cold"
+                                    | "warm",
+                                })
+                              }
+                            >
+                              <option value="cold">냉간 · 시동 직후</option>
+                              <option value="warm">
+                                온간 · 이미 데워진 상태
+                              </option>
                             </select>
                           </label>
                         )}
@@ -1642,6 +1684,7 @@ function DrivingResult({
               <th>상태</th>
               <th>속도 (km/h)</th>
               <th>RPM</th>
+              <th>엔진 상태·기어</th>
               <th>누적거리 (m)</th>
               <th>도로·상황</th>
               <th>운전자·노면</th>
@@ -1656,6 +1699,13 @@ function DrivingResult({
                 <td>{p.state}</td>
                 <td>{p.speed_kmh.toFixed(1)}</td>
                 <td>{p.rpm}</td>
+                <td>
+                  {p.context?.engine_state
+                    ? p.context.engine_state +
+                      " · " +
+                      (p.context.gear ? p.context.gear + "단" : "—")
+                    : "이전 모델"}
+                </td>
                 <td>{p.distance_m.toFixed(1)}</td>
                 <td>
                   {p.context
@@ -1785,10 +1835,12 @@ const explanations: Record<string, string> = {
     "수동 모드에서 차량마다 만들 메시지 수입니다. 자동 모드에서는 시작·종료 Microtrip과 종료 Trip을 포함해 자동 계산합니다.",
   "생성 주기 (밀리초)":
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
+  "엔진 시작 상태":
+    "v5 개발 모형의 초기 냉각수 온도를 냉간20℃ 또는 온간85℃로 설정합니다. 냉간에서는 공회전·연료를 보정하고, 연료 차단은 온도·회전수·요구 동력 조건을 함께 봅니다. 실제 차량/외기 온도를 조회한 값은 아닙니다.",
   "날씨 조건":
-    "v4의 실행 전체에 적용할 가상 날씨입니다. 강우·젖은 노면은 도로 기본 속도 상한의 80%를 제어 상한으로 쓰고 가감속도 완화합니다. 실제 기상 조회, 폭우·결빙·가변 속도표지는 포함하지 않습니다.",
+    "v4/v5의 실행 전체에 적용할 가상 날씨입니다. 강우·젖은 노면은 도로 기본 속도 상한의 80%를 제어 상한으로 쓰고 가감속도 완화합니다. 실제 기상 조회, 폭우·결빙·가변 속도표지는 포함하지 않습니다.",
   "운행 프로필":
-    "v4는 도심 기본 속도와 선택한 가상 날씨를 적용하고, 합성 경로의 연결 순서와 구간 지속시간·교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v3/v2/v1 기록은 기존 모델로 재생성합니다.",
+    "v5는 기어·RPM·부하·연료의 연관성을 추가한 가솔린 근사입니다. v4/v5는 도심 기본 속도와 선택한 가상 날씨를 적용하고, 합성 경로의 연결 순서와 구간 지속시간·교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v3/v2/v1 기록은 기존 모델로 재생성합니다.",
   "생성 확인":
     "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
   미생성:

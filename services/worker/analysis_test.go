@@ -58,7 +58,7 @@ func TestAnalysisExactDurationAndStops(t *testing.T) {
 	near(t, clipped.Idle, 6)
 }
 func TestAnalysisMatchesTripAndIntervalInvariant(t *testing.T) {
-	for _, version := range []string{generatorVersion, scenarioVersion, routeVersion, koreaVersion} {
+	for _, version := range []string{generatorVersion, scenarioVersion, routeVersion, koreaVersion, powertrainVersion} {
 		r := auditRequest{Request: scenarioRequest(600)}
 		r.Generation.ModelVersion = version
 		r.Generation.Profile = "urban"

@@ -491,3 +491,33 @@ def test_korean_defaults_and_weather_payload(client,weather):
         control.validate_message(sample["message"])
     body["generation"]["weather"]="snow"
     assert client.post("/api/runs",json=body).status_code==422
+
+
+@pytest.mark.parametrize("engine_start", ["cold", "warm"])
+def test_powertrain_obd_values_and_segment_replay(client,engine_start):
+    body=automatic_request()
+    body["generation"].update(model_version="combustion-powertrain-5",engine_start=engine_start,weather="dry",profile="urban",duration_seconds=600)
+    response=client.post("/api/runs",json=body)
+    assert response.status_code==201,response.text
+    run=response.json()
+    assert run["result"]["model_version"]=="combustion-powertrain-5"
+    for sample in run["result"]["samples"]+run["result"]["trip_summaries"]:
+        control.validate_message(sample["message"])
+        assert set(sample["message"])=={"ty","ts","pld"}
+        assert not ({"gear","engine_state","fuel_rate_lph","coolant_c","wheel_power_kw"}&sample["message"]["pld"].keys())
+    path="/api/runs/"+run["id"]+"/trace/2?start_seconds=580&end_seconds=600"
+    trace=client.get(path)
+    assert trace.status_code==200,trace.text
+    data=trace.json()
+    assert data==client.get(path).json()
+    last=data["samples"][-1]
+    trip=run["result"]["trip_summaries"][1]
+    assert last["message"]["pld"]["fc"]==trip["message"]["pld"]["fc"]
+    assert last["message"]["pld"]["rpm"]==0
+    assert last["context"]["engine_state"]=="시동 OFF"
+    assert (trip["message"]["pld"]["wut"]==0) if engine_start=="warm" else (trip["message"]["pld"]["wut"]>0)
+    assert client.get("/api/runs/"+run["id"]).json()==run
+    body["generation"]["engine_start"]="other"
+    assert client.post("/api/runs",json=body).status_code==422
+    body["generation"].update(model_version="combustion-korea-4",engine_start="warm")
+    assert client.post("/api/runs",json=body).status_code==422

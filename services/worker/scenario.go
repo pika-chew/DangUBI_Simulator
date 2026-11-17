@@ -27,6 +27,7 @@ type motionSegment struct {
 	Before                               motionTotals
 }
 type scenarioPlan struct {
+	Engine         *enginePlan
 	Segments       []motionSegment
 	Warmup         float64
 	Eligible       bool
@@ -50,6 +51,11 @@ type MotionContext struct {
 	Eligible     bool    `json:"eligible"`
 	Style        string  `json:"driver_style"`
 	Weather      string  `json:"weather"`
+	Gear         int     `json:"gear,omitempty"`
+	EngineState  string  `json:"engine_state,omitempty"`
+	WheelPower   float64 `json:"wheel_power_kw,omitempty"`
+	FuelRate     float64 `json:"fuel_rate_lph,omitempty"`
+	Coolant      float64 `json:"coolant_c,omitempty"`
 }
 
 func modelVersion(g *Generation) string {
@@ -60,7 +66,7 @@ func modelVersion(g *Generation) string {
 }
 
 func getScenario(req Request, index int) *scenarioPlan {
-	if req.Generation.ModelVersion == routeVersion || req.Generation.ModelVersion == koreaVersion {
+	if req.Generation.ModelVersion == routeVersion || req.Generation.ModelVersion == koreaVersion || req.Generation.ModelVersion == powertrainVersion {
 		return getRouteScenario(req, index)
 	}
 	g := req.Generation

@@ -15,7 +15,8 @@
     "start_lat": 37.5,
     "start_lon": 127.0,
     "initial_odometer_m": 500000.0,
-    "model_version": "combustion-korea-4",
+    "model_version": "combustion-powertrain-5",
+    "engine_start": "cold",
     "weather": "dry",
     "anomaly_vehicle_percent": 5,
     "anomaly_events_per_hour": 2

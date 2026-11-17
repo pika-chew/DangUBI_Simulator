@@ -164,7 +164,7 @@ func TestMQTTTLSModes(t *testing.T) {
 }
 
 func TestAutomaticMQTTIncludesFinalTrip(t *testing.T) {
-	for _, version := range []string{scenarioVersion, routeVersion, koreaVersion} {
+	for _, version := range []string{scenarioVersion, routeVersion, koreaVersion, powertrainVersion} {
 		t.Run(version, func(t *testing.T) { testAutomaticMQTTIncludesFinalTrip(t, version) })
 	}
 }
@@ -198,7 +198,7 @@ func testAutomaticMQTTIncludesFinalTrip(t *testing.T, version string) {
 		if len(m) != 3 || m["ty"] == nil || m["ts"] == nil || m["pld"] == nil {
 			t.Fatal("OBD 밖 정보가 MQTT에 포함됨", m)
 		}
-		for _, key := range []string{"context", "road", "reason", "driver_style", "weather", "event"} {
+		for _, key := range []string{"context", "road", "reason", "driver_style", "weather", "event", "gear", "engine_state", "wheel_power_kw", "fuel_rate_lph", "coolant_c"} {
 			if m["pld"].(map[string]any)[key] != nil {
 				t.Fatal("내부 상황이 payload에 포함됨", key)
 			}

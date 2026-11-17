@@ -18,7 +18,7 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	duration := float64(g.DurationSeconds)
 	urban := roadContext{"도심 도로", 50, .35}
 	arterial := roadContext{"간선 도로", 70, .12}
-	if g.ModelVersion == koreaVersion {
+	if g.ModelVersion == koreaVersion || g.ModelVersion == powertrainVersion {
 		arterial.Limit = 50
 	}
 	alley := roadContext{"골목·좁은 도로", 20, .2}
@@ -103,7 +103,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	if rng.Float64() < .15 {
 		p.Weather = "젖은 노면"
 	}
-	korean := g.ModelVersion == koreaVersion
+	korean := g.ModelVersion == koreaVersion || g.ModelVersion == powertrainVersion
 	weatherFactor := 1.0
 	if korean {
 		p.Weather = "건조"
@@ -119,6 +119,10 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	flowUntil, flowFactor, grade := 0.0, 1.0, 0.0
 	flowReason := "원활한 흐름"
 	contextRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0x666c6f77))
+	spec := engineSpec{}
+	if g.ModelVersion == powertrainVersion {
+		spec = vehicleEngineSpec(g, index)
+	}
 	t, v := 0.0, 0.0
 	totals := motionTotals{Heading: rng.Float64() * 2 * math.Pi}
 	accel := map[string]float64{"신중": .8, "보통": 1.2, "적극": 1.6}[p.Style]
@@ -139,6 +143,12 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		}
 		if dt <= 1e-8 {
 			return
+		}
+		if g.ModelVersion == powertrainVersion {
+			end = limitPoweredEnd(spec, v, end, dt, grade)
+			if event == "급가속" && (end-v)/dt < 3 {
+				event = ""
+			}
 		}
 		s := motionSegment{Start: t, End: t + dt, V0: v, V1: end, Grade: grade, Curvature: curvature, Road: road, Reason: reason, Event: event, Before: totals}
 		p.Segments = append(p.Segments, s)
