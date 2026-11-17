@@ -1,0 +1,37 @@
+{
+  "schedule_version": "schedule-plan-1",
+  "mode": "manual",
+  "seed": 42,
+  "interval_ms": 2000,
+  "measurement": {
+    "start": "2026-11-17T13:00:00+09:00",
+    "end": "2026-11-17T18:00:00+09:00",
+    "timezone": "Asia/Seoul"
+  },
+  "vehicles": [
+    {
+      "vehicle_id": "v000001",
+      "trips": [
+        {
+          "start": "2026-11-17T13:00:00+09:00",
+          "end": "2026-11-17T13:30:00+09:00",
+          "road_profile": "urban"
+        }
+      ]
+    },
+    {
+      "vehicle_id": "v000002",
+      "trips": [
+        {
+          "start": "2026-11-17T17:00:00+09:00",
+          "end": "2026-11-17T18:00:00+09:00",
+          "road_profile": "urban"
+        }
+      ]
+    },
+    {
+      "vehicle_id": "v000003",
+      "trips": []
+    }
+  ]
+}

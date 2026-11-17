@@ -13,7 +13,8 @@ from typing import Any, Literal
 from uuid import uuid4
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
+from services.control.schedule import ScheduleRequest, plan as plan_schedule
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +37,14 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifespan)
+
+
+@app.post("/api/schedules/preview")
+def schedule_preview(body: ScheduleRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100)):
+    try:
+        return plan_schedule(body, offset, limit)
+    except ValueError as error:
+        raise HTTPException(422, detail=str(error)) from error
 
 
 class ConnectionConfig(BaseModel):

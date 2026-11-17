@@ -547,3 +547,92 @@ def test_timed_events_configuration_and_replay(client,intensity):
     assert client.post("/api/runs",json=body).status_code==422
     body["generation"].update(model_version="combustion-powertrain-5",anomaly_intensity="high")
     assert client.post("/api/runs",json=body).status_code==422
+
+def schedule_example(name="manual"):
+    import json
+    return json.loads((control.ROOT / f"configs/schedule-{name}.example.json").read_text(encoding="utf-8"))
+
+
+def test_schedule_manual_counts_boundaries_and_no_storage(client):
+    body=schedule_example()
+    before=client.get("/api/runs").json()
+    response=client.post("/api/schedules/preview",json=body)
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data["planned_messages"]==2702
+    assert data["microtrip_count"]==2700 and data["trip_count"]==2
+    assert data["inactive_vehicle_ids"]==["v000003"]
+    assert len({r["tid"] for r in data["trips"]})==2
+    assert data==client.post("/api/schedules/preview",json=body).json()
+    page=client.post("/api/schedules/preview?offset=1&limit=1",json=body).json()
+    assert page["trips"]==data["trips"][1:2] and page["planned_messages"]==2702
+    assert client.get("/api/runs").json()==before
+    assert client.post("/api/schedules/preview?limit=101",json=body).status_code==422
+
+
+def test_schedule_partial_trip_and_minimum_parking(client):
+    body=schedule_example()
+    body["vehicles"]=body["vehicles"][:1]
+    trip=body["vehicles"][0]["trips"][0]
+    trip.update(start="2026-11-17T12:30:00+09:00",end="2026-11-17T13:30:00+09:00")
+    rows=client.post("/api/schedules/preview",json=body).json()["trips"]
+    assert rows[0]["started_before_window"] and rows[0]["microtrip_count"]==900 and rows[0]["trip_count"]==1
+    body["vehicles"][0]["trips"].append(dict(start="2026-11-17T14:00:00+09:00",end="2026-11-17T18:30:00+09:00"))
+    data=client.post("/api/schedules/preview",json=body).json()
+    assert data["trips"][1]["continues_after_window"] and data["trips"][1]["trip_count"]==0
+    assert data["trips"][1]["microtrip_count"]==7201
+    body["vehicles"][0]["trips"][1]["start"]="2026-11-17T13:59:59.999+09:00"
+    assert client.post("/api/schedules/preview",json=body).status_code==422
+
+
+def test_schedule_pattern_exceptions_midnight_and_replay(client):
+    body=schedule_example("patterned")
+    body["vehicles"][0]["pattern"]["day_off_probability"]=1.0
+    body["vehicles"][0]["overrides"]["2026-11-17"]=[{"start":"2026-11-17T23:30:00+09:00","end":"2026-11-18T00:30:00+09:00"}]
+    response=client.post("/api/schedules/preview",json=body)
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data["observed_trip_count"]==1 and data["trip_count"]==1
+    original=data["trips"][0]
+    body["measurement"]["start"]="2026-11-18T00:00:00+09:00"
+    clipped=client.post("/api/schedules/preview",json=body).json()["trips"][0]
+    assert clipped["trip_key"]==original["trip_key"] and clipped["tid"]==original["tid"]
+    assert clipped["started_before_window"] and clipped["microtrip_count"]==900
+    normal=schedule_example("patterned")
+    a=client.post("/api/schedules/preview",json=normal)
+    assert a.status_code==200,a.text
+    assert a.json()==client.post("/api/schedules/preview",json=normal).json()
+    from services.control.schedule import instant
+    off_start=instant("2026-11-18T00:00:00+09:00")
+    off_end=instant("2026-11-19T00:00:00+09:00")
+    assert all(not (off_start <= r["start_ms"] < off_end) for r in a.json()["trips"])
+
+
+@pytest.mark.parametrize("change", ["no_offset","duplicate","mode","overlap","too_long","wrong_exception"])
+def test_schedule_invalid_settings(client,change):
+    body=schedule_example()
+    if change=="no_offset":body["measurement"]["start"]="2026-11-17T13:00:00"
+    elif change=="duplicate":body["vehicles"].append(copy.deepcopy(body["vehicles"][0]))
+    elif change=="mode":body["mode"]="patterned"
+    elif change=="overlap":body["vehicles"][0]["trips"]*=2
+    elif change=="too_long":body["measurement"]["end"]="2027-01-17T18:00:00+09:00"
+    else:
+        body=schedule_example("patterned")
+        body["vehicles"][0]["overrides"]["2026-11-18"]=[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T14:00:00+09:00"}]
+    assert client.post("/api/schedules/preview",json=body).status_code==422
+
+def test_schedule_30_days_bounded_page_and_counts(client):
+    body=schedule_example("patterned")
+    body["measurement"].update(start="2026-11-01T00:00:00+09:00",end="2026-12-01T00:00:00+09:00")
+    prototype=body["vehicles"][0]
+    prototype["overrides"]={}
+    prototype["pattern"].update(weekdays=[1,2,3,4,5,6,7],day_off_probability=0.0,baseline_jitter_minutes=0)
+    for slot in prototype["pattern"]["slots"]:
+        slot.update(duration_min_minutes=30,duration_max_minutes=30,departure_jitter_minutes=0)
+    body["vehicles"]=[dict(copy.deepcopy(prototype),vehicle_id=f"v{i:06d}") for i in range(1,101)]
+    response=client.post("/api/schedules/preview?limit=3",json=body)
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data["observed_trip_count"]==6000 and len(data["trips"])==3 and data["has_more"]
+    assert data["microtrip_count"]==5400000 and data["trip_count"]==6000
+    assert len(data["vehicles"])==100 and data["vehicles"][0]["parking_ms"]==2484000000

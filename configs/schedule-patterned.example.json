@@ -1,0 +1,44 @@
+{
+  "schedule_version": "schedule-plan-1",
+  "mode": "patterned",
+  "seed": 42,
+  "interval_ms": 2000,
+  "measurement": {
+    "start": "2026-11-17T00:00:00+09:00",
+    "end": "2026-11-20T00:00:00+09:00",
+    "timezone": "Asia/Seoul"
+  },
+  "vehicles": [
+    {
+      "vehicle_id": "v000001",
+      "pattern": {
+        "weekdays": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "day_off_probability": 0.1,
+        "baseline_jitter_minutes": 10,
+        "slots": [
+          {
+            "start_time": "08:00",
+            "duration_min_minutes": 30,
+            "duration_max_minutes": 60,
+            "departure_jitter_minutes": 10
+          },
+          {
+            "start_time": "18:00",
+            "duration_min_minutes": 30,
+            "duration_max_minutes": 60,
+            "departure_jitter_minutes": 15
+          }
+        ]
+      },
+      "overrides": {
+        "2026-11-18": []
+      }
+    }
+  ]
+}
