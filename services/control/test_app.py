@@ -315,6 +315,9 @@ def test_async_real_tls_mqtt_stop(client, monkeypatch, tmp_path):
         assert result["connection_cleanup_confirmed"] is True
         assert result["forced_termination"] is False
         assert result["unsent_messages"] > 0
+        assert result["performance"]["ack"]["count"] == result["publish_attempts"]
+        assert result["performance"]["connect"]["count"] >= result["connected_clients"]
+        assert result["performance"]["generation"]["count"] == result["processed_messages"]
         assert not control.MQTT_LOCK.locked()
     finally:
         Path(str(profile_path) + ".done").write_text("done")

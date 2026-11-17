@@ -21,15 +21,17 @@ import (
 )
 
 type testBroker struct {
-	listener  net.Listener
-	mu        sync.Mutex
-	sockets   []net.Conn
-	ids       map[string]bool
-	published int
-	messages  []map[string]any
-	noAck     bool
-	closeOnce bool
-	closed    bool
+	listener       net.Listener
+	mu             sync.Mutex
+	sockets        []net.Conn
+	ids            map[string]bool
+	published      int
+	messages       []map[string]any
+	noAck          bool
+	closeOnce      bool
+	closed         bool
+	ackDelay       time.Duration
+	discardPayload bool
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -113,12 +115,16 @@ func (b *testBroker) handle(conn net.Conn) {
 			b.mu.Lock()
 			b.published++
 			var message map[string]any
-			if json.Unmarshal(p.Payload, &message) == nil {
+			if !b.discardPayload && json.Unmarshal(p.Payload, &message) == nil {
 				b.messages = append(b.messages, message)
 			}
 			closeNow := b.closeOnce
+			ackDelay := b.ackDelay
 			b.closeOnce = false
 			b.mu.Unlock()
+			if ackDelay > 0 {
+				time.Sleep(ackDelay)
+			}
 			if !b.noAck {
 				ack := packets.NewControlPacket(packets.Puback).(*packets.PubackPacket)
 				ack.MessageID = p.MessageID
@@ -153,6 +159,9 @@ func TestMQTTTLSModes(t *testing.T) {
 			}
 			if out.State != "mqtt_completed" || out.Puback != 6 || out.Published != 6 || out.Connected != clients || out.ActiveClients != 0 {
 				t.Fatalf("실제 TLS 연결·발행 결과 불일치: %+v", out)
+			}
+			if out.Performance == nil || out.Performance.Ack.Count != 6 || out.Performance.Generation.Count != 6 || out.Performance.Schedule.Count != 6 || out.Performance.Connect.Count != int64(clients) || out.Performance.AckPerSecond <= 0 {
+				t.Fatal("전송 성능 집계 누락", out.Performance)
 			}
 			broker.mu.Lock()
 			defer broker.mu.Unlock()

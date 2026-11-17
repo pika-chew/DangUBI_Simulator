@@ -17,6 +17,7 @@ import (
 
 // 접속 정보는 서버에서만 받으며 결과·실행 기록에는 포함하지 않는다.
 type MQTTProfile struct {
+	LocalBenchmark     bool   `json:"local_benchmark,omitempty"`
 	Enabled            bool   `json:"enabled"`
 	ContractReviewed   bool   `json:"contract_reviewed"`
 	BrokerURL          string `json:"broker_url"`
@@ -41,7 +42,14 @@ func (p *MQTTProfile) validate() error {
 	if err != nil || u.Scheme != "ssl" || u.Hostname() == "" || u.Port() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("MQTT 주소는 ssl://호스트:포트 형식이어야 합니다.")
 	}
-	if p.MaxClients < 1 || p.MaxClients > 20 || p.MaxMessages < 1 || p.MaxMessages > 100 || p.MaxDurationSeconds < 1 || p.MaxDurationSeconds > 30 || p.ConnectPerSecond < 1 || p.ConnectPerSecond > 5 || p.PublishPerSecond < 1 || p.PublishPerSecond > 70 || p.TimeoutMS < 100 || p.TimeoutMS > 5000 || p.ReconnectAttempts < 0 || p.ReconnectAttempts > 3 {
+	maxClients, maxMessages, maxSeconds, maxConnect, maxPublish := 20, 100, 30, 5, 70
+	if p.LocalBenchmark {
+		if u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
+			return errors.New("로컬 측정은 루프백 IP에만 연결할 수 있습니다.")
+		}
+		maxClients, maxMessages, maxSeconds, maxConnect, maxPublish = 100, 5000, 120, 100, 2000
+	}
+	if p.MaxClients < 1 || p.MaxClients > maxClients || p.MaxMessages < 1 || p.MaxMessages > maxMessages || p.MaxDurationSeconds < 1 || p.MaxDurationSeconds > maxSeconds || p.ConnectPerSecond < 1 || p.ConnectPerSecond > maxConnect || p.PublishPerSecond < 1 || p.PublishPerSecond > maxPublish || p.TimeoutMS < 100 || p.TimeoutMS > 5000 || p.ReconnectAttempts < 0 || p.ReconnectAttempts > 3 {
 		return errors.New("소량 MQTT 시험의 연결·건수·시간·속도 상한을 확인하세요.")
 	}
 	if p.TopicPrefix == "" || len(p.TopicPrefix) > 80 || strings.ContainsAny(p.TopicPrefix, "+#\x00") || strings.HasPrefix(p.TopicPrefix, "$") || strings.Count(p.TopicPrefix, "/") > 3 || strings.HasSuffix(p.TopicPrefix, "/") {
@@ -147,7 +155,12 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 	}
 	started := time.Now()
 	control := controlFrom(ctx)
-	report := reporter(started, progress, control)
+	metrics := performanceMetrics{}
+	baseReport := reporter(started, progress, control)
+	report := func(out *Result, force bool) {
+		out.Performance = metrics.summary(out.Puback, time.Since(started))
+		baseReport(out, force)
+	}
 	report(&out, true)
 	out.Published = 0
 	out.Puback = 0
@@ -178,7 +191,9 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 			if seen[id] {
 				out.Reconnects++
 			}
+			connectStarted := time.Now()
 			err := waitToken(ctx, client.Connect(), timeout)
+			metrics.connect.add(time.Since(connectStarted))
 			if err == nil {
 				if !seen[id] {
 					out.Connected++
@@ -260,12 +275,16 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 				fail("실행을 중단했습니다.")
 				return finish(), nil
 			}
+			generationStarted := time.Now()
 			sample := sampleAt(req, i, seq, a, profile.TopicPrefix)
 			if err := recordSample(&out, req, sample, i, seq); err != nil {
 				return finish(), err
 			}
-			out.ScheduleDelayMS = max(out.ScheduleDelayMS, time.Since(scheduledStart).Milliseconds()-pauseMilliseconds(control)-offsetMS(req, seq))
 			encoded, _ := json.Marshal(sample.Message)
+			metrics.generation.add(time.Since(generationStarted))
+			delayMS := max(int64(0), time.Since(scheduledStart).Milliseconds()-pauseMilliseconds(control)-offsetMS(req, seq))
+			out.ScheduleDelayMS = max(out.ScheduleDelayMS, delayMS)
+			metrics.schedule.add(time.Duration(delayMS) * time.Millisecond)
 			topic := sample.Topic
 			if ctx.Err() != nil {
 				fail("실행을 중단했습니다.")
@@ -273,7 +292,10 @@ func runMQTTContext(parent context.Context, req Request, progress func(Result)) 
 			}
 			out.Attempted++
 			report(&out, true)
-			if err := waitToken(ctx, client.Publish(topic, 1, false, encoded), timeout); err != nil {
+			ackStarted := time.Now()
+			err := waitToken(ctx, client.Publish(topic, 1, false, encoded), timeout)
+			metrics.ack.add(time.Since(ackStarted))
+			if err != nil {
 				out.Unconfirmed++
 				fail("발행 응답을 확인하지 못했습니다. 중복 가능성이 있어 자동 재발행하지 않습니다.")
 				return finish(), nil

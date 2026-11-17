@@ -77,6 +77,7 @@ def main():
         env["GOMODCACHE"] = str(LOCAL / "go-mod")
         run(["go", "test", "./..."], cwd=ROOT / "services/worker", env=env)
         run([PYTHON, "-m", "pytest", "services/control/test_app.py", "-q"])
+        run([PYTHON, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_measure_mqtt.py"])
     else:
         if not WORKER.is_file() or not (ROOT / "apps/web/dist/index.html").is_file():
             raise SystemExit("먼저 python scripts/dev.py prepare를 실행하세요.")

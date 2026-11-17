@@ -78,7 +78,20 @@ type Sample = Assignment & {
   topic: string;
   message: Message;
 };
+type TimingSummary = {
+  count: number;
+  mean_ms: number;
+  max_ms: number;
+  p95_upper_ms: number;
+};
 type Result = {
+  performance?: {
+    generation: TimingSummary;
+    schedule: TimingSummary;
+    connect: TimingSummary;
+    ack: TimingSummary;
+    ack_per_second: number;
+  };
   run_id: string;
   transport?: string;
   errors?: string[];
@@ -1266,6 +1279,63 @@ function App() {
                         </div>
                       ))}
                     </div>
+                    {run.result.performance && (
+                      <>
+                        <h3>
+                          전송 성능 <Info name="전송 성능" />
+                        </h3>
+                        <p className="note">
+                          전체 실행 평균 응답 처리량{" "}
+                          {run.result.performance.ack_per_second.toFixed(2)}
+                          건/초 · 접속·주기 대기·일시중지 시간을 포함합니다.
+                          CPU·메모리 비교는 로컬 측정 도구의 요약 보고서에서
+                          확인합니다.
+                        </p>
+                        <div className="table-scroll">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>측정 항목</th>
+                                <th>횟수</th>
+                                <th>평균(ms)</th>
+                                <th>P95 상한(ms)</th>
+                                <th>최대(ms)</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(
+                                [
+                                  [
+                                    "생성·검사",
+                                    run.result.performance.generation,
+                                  ],
+                                  [
+                                    "예정 시각 대비 지연",
+                                    run.result.performance.schedule,
+                                  ],
+                                  [
+                                    "접속 응답 대기",
+                                    run.result.performance.connect,
+                                  ],
+                                  [
+                                    "발행·PUBACK 대기",
+                                    run.result.performance.ack,
+                                  ],
+                                ] as [string, TimingSummary][]
+                              ).map(([title, value]) => (
+                                <tr key={title}>
+                                  <td>{title}</td>
+                                  <td>{value.count}</td>
+                                  <td>{value.mean_ms.toFixed(3)}</td>
+                                  <td>{value.p95_upper_ms.toFixed(3)}</td>
+                                  <td>{value.max_ms.toFixed(3)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
                     {!!run.result.trace?.length && (
                       <DrivingResult
                         key={run.id}
@@ -1878,6 +1948,8 @@ const explanations: Record<string, string> = {
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
   "이상 주행 빈도":
     "v6는 대상 차량당 운행 1시간의 평균 발생 기회입니다. 시점은 무작위이며 정차·부적합 상황·직전 사건 종료 후 30초 회복 중의 기회는 버립니다. 실제 발생 횟수를 보장하지 않습니다. v2~v5는 이전 구간별 추첨 방식입니다.",
+  "전송 성능":
+    "생성·검사는 메시지 생성·검사·직렬화 시간입니다. 예정 시각 대비 지연은 일시중지를 제외하고 발행 직전까지 걸린 지연입니다. 접속과 PUBACK 대기는 실패·시간초과도 포함합니다. P95 상한은 1µs 단위 2배 간격 버킷으로 추정한 95백분위 상한입니다. 정확한 P95가 아니며 전체 메시지 시간을 저장하지 않습니다. CPU/RSS는 별도 측정 보고서의 Worker 프로세스 관측값입니다.",
   "이상 주행 강도":
     "v6의 가감속·회전 강도를 낮음/보통/높음으로 선택합니다. 강우와 차량 출력으로 완화되거나, 실제 가속도·횡가속도가 개발 기준에 못 미치면 이상 이벤트로 표시되지 않을 수 있습니다. 실차 통계나 법정 위험운전 판정 기준은 아닙니다.",
   "엔진 시작 상태":

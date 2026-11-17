@@ -1,0 +1,13 @@
+{
+  "repeats": 1,
+  "cases": [
+    {"name":"10대·풀2", "vehicles":10, "clients":2, "mode":"shared", "duration_seconds":20, "interval_ms":2000},
+    {"name":"10대·전체10", "vehicles":10, "clients":10, "mode":"dedicated", "duration_seconds":20, "interval_ms":2000},
+    {"name":"100대·풀10", "vehicles":100, "clients":10, "mode":"shared", "duration_seconds":20, "interval_ms":2000},
+    {"name":"100대·전체100", "vehicles":100, "clients":100, "mode":"dedicated", "duration_seconds":20, "interval_ms":2000},
+    {"name":"연결1회해제", "vehicles":1, "clients":1, "mode":"shared", "duration_seconds":10, "interval_ms":1000, "fault":"disconnect_once"},
+    {"name":"응답20ms지연", "vehicles":3, "clients":1, "mode":"shared", "duration_seconds":10, "interval_ms":1000, "fault":"delay_ack"},
+    {"name":"응답없음", "vehicles":1, "clients":1, "mode":"shared", "duration_seconds":10, "interval_ms":1000, "fault":"no_ack"},
+    {"name":"응답대기중단", "vehicles":1, "clients":1, "mode":"shared", "duration_seconds":10, "interval_ms":1000, "fault":"stop_wait"}
+  ]
+}
