@@ -244,6 +244,10 @@ func runConcurrentMQTT(ctx context.Context, cancel context.CancelFunc, req Reque
 			}
 		}
 		_, _, wake := control.snapshot()
+		if delay <= 0 {
+			// 즉시 가능한 작업은 타이머/스케줄러를 거치지 않고 다음 반복에서 처리한다.
+			continue
+		}
 		timer := time.NewTimer(delay)
 		select {
 		case done := <-completed:

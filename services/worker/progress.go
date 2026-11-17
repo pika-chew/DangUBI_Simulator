@@ -4,9 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"time"
 )
+
+// 내부 집계는 매 응답마다 유지하되 화면용 전체 JSON은 상태 전환/250ms마다 보낸다.
+// 최종 result는 main에서 별도로 항상 출력한다.
+func managedProgress(w io.Writer, now func() time.Time) func(Result) {
+	encoder := json.NewEncoder(w)
+	var last time.Time
+	var state, execution string
+	return func(out Result) {
+		t := now()
+		if last.IsZero() || out.State != state || out.ExecutionState != execution || t.Sub(last) >= 250*time.Millisecond {
+			encoder.Encode(map[string]any{"kind": "progress", "result": out})
+			last, state, execution = t, out.State, out.ExecutionState
+		}
+	}
+}
 
 func sleepReporting(ctx context.Context, target time.Time, tick func()) error {
 	timer := time.NewTimer(max(0, time.Until(target)))

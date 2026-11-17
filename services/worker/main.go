@@ -258,8 +258,7 @@ func main() {
 	defer cancel()
 	var progress func(Result)
 	if managed {
-		encoder := json.NewEncoder(os.Stdout)
-		progress = func(out Result) { encoder.Encode(map[string]any{"kind": "progress", "result": out}) }
+		progress = managedProgress(os.Stdout, time.Now)
 		go func() {
 			// 제어 API가 사라져 stdin이 닫혀도 실행을 멈춘다.
 			for {
