@@ -18,7 +18,7 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	duration := float64(g.DurationSeconds)
 	urban := roadContext{"도심 도로", 50, .35}
 	arterial := roadContext{"간선 도로", 70, .12}
-	if g.ModelVersion == koreaVersion || g.ModelVersion == powertrainVersion {
+	if g.ModelVersion == koreaVersion || isPowertrain(g.ModelVersion) {
 		arterial.Limit = 50
 	}
 	alley := roadContext{"골목·좁은 도로", 20, .2}
@@ -99,11 +99,17 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	}
 	rng := rand.New(rand.NewSource(g.Seed + int64(index)*1000003))
 	eventRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0xabc123))
+	timedEvents := g.ModelVersion == eventVersion
+	clock := newEventClock(g.Seed+int64(index)*1000003+0x74696d65, g.AnomalyEventsPerHour)
+	if !timedEvents || !g.cache.eligible[index] {
+		clock = newEventClock(0, 0)
+	}
+	lastEventEnd := -30.0
 	p := &scenarioPlan{Duration: float64(g.DurationSeconds), Eligible: g.cache.eligible[index], Style: []string{"신중", "보통", "적극"}[rng.Intn(3)], Weather: "건조"}
 	if rng.Float64() < .15 {
 		p.Weather = "젖은 노면"
 	}
-	korean := g.ModelVersion == koreaVersion || g.ModelVersion == powertrainVersion
+	korean := g.ModelVersion == koreaVersion || isPowertrain(g.ModelVersion)
 	weatherFactor := 1.0
 	if korean {
 		p.Weather = "건조"
@@ -120,7 +126,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	flowReason := "원활한 흐름"
 	contextRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0x666c6f77))
 	spec := engineSpec{}
-	if g.ModelVersion == powertrainVersion {
+	if isPowertrain(g.ModelVersion) {
 		spec = vehicleEngineSpec(g, index)
 	}
 	t, v := 0.0, 0.0
@@ -144,10 +150,19 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if dt <= 1e-8 {
 			return
 		}
-		if g.ModelVersion == powertrainVersion {
+		if isPowertrain(g.ModelVersion) {
 			end = limitPoweredEnd(spec, v, end, dt, grade)
 			if event == "급가속" && (end-v)/dt < 3 {
 				event = ""
+			}
+		}
+		if timedEvents && event != "" {
+			longitudinal := (end - v) / dt
+			if dt < .5 || (event == "급가속" && longitudinal < 3) || (event == "급감속" && longitudinal > -3) || (event == "급회전" && min(v*v, end*end)*math.Abs(curvature) < 3) {
+				event = ""
+			}
+			if event != "" {
+				lastEventEnd = t + dt
 			}
 		}
 		s := motionSegment{Start: t, End: t + dt, V0: v, V1: end, Grade: grade, Curvature: curvature, Road: road, Reason: reason, Event: event, Before: totals}
@@ -201,7 +216,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		target *= min(1, 1-grade*1.5)
 		target = min(target, decel*max(0, p.Duration-t-3)/3) // 끝에서 급정지하지 않도록 여유 확보
 		event := ""
-		if p.Eligible && eventRNG.Float64() < g.AnomalyEventsPerHour*35/3600 {
+		if !timedEvents && p.Eligible && eventRNG.Float64() < g.AnomalyEventsPerHour*35/3600 {
 			event = []string{"급가속", "급감속", "급회전"}[eventRNG.Intn(3)]
 			if road.Name == "고속 도로" && event == "급회전" {
 				event = ""
@@ -224,11 +239,30 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if uturn {
 			radius = 9 + rng.Float64()*5
 		}
+		harshAccel, harshBrake, harshLateral := 3.3, 3.8, 3.4
+		if timedEvents {
+			ready := clock.due(t)
+			if ready && p.Eligible && t >= lastEventEnd+30 {
+				harshAccel, harshBrake, harshLateral = eventStrength(g.AnomalyIntensity, g.Weather == "rain", eventRNG)
+				event = chooseEvent(eventRNG, road, v, flowFactor, turn, harshAccel, harshBrake, harshLateral)
+			}
+			if event == "급가속" {
+				target = min(road.Limit/3.6, max(target, v+4+eventRNG.Float64()*4))
+			}
+			if event == "급감속" {
+				target = max(0, v-4-eventRNG.Float64()*6)
+				reason = "앞차·정차 상황의 강한 감속"
+			}
+			if routeUntil < p.Duration && routeUntil-t <= 60 {
+				target = min(target, routeAt(route, routeUntil).Road.Limit*weatherFactor/3.6)
+			}
+			target = min(target, decel*max(0, p.Duration-t-3)/3)
+		}
 		if turn || event == "급회전" {
 			turn = true
 			lateral := 1.2
 			if event == "급회전" {
-				lateral = 3.4
+				lateral = harshLateral
 			}
 			target = min(target, math.Sqrt(lateral*radius))
 			if target > 1 {
@@ -243,10 +277,10 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			a = decel
 		}
 		if event == "급가속" && target > v {
-			a = 3.3
+			a = harshAccel
 		}
 		if event == "급감속" && target < v {
-			a = 3.8
+			a = harshBrake
 		}
 		transition := math.Abs(target-v) / a
 		if transition > 0 {
@@ -283,7 +317,14 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if curvature != 0 && v*v*math.Abs(curvature) >= 3 {
 			realEvent = "급회전"
 		}
-		appendSegment(max(.1, hold), v, road, turnReason, grade, curvature, realEvent)
+		if timedEvents {
+			// 가감속 중 지나간 후보는 버리고 다음 후보 시각까지만 정속 구간을 만든다.
+			clock.due(t)
+			hold = min(hold, clock.next-t)
+		} else {
+			hold = max(.1, hold)
+		}
+		appendSegment(max(.000001, hold), v, road, turnReason, grade, curvature, realEvent)
 		if rng.Float64() < road.StopChance && p.Duration-t > v/decel+8 {
 			appendSegment(v/decel, 0, road, "정차 전 감속", grade, 0, "")
 			stopReason := "신호 대기"

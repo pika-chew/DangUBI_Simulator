@@ -521,3 +521,24 @@ def test_powertrain_obd_values_and_segment_replay(client,engine_start):
     assert client.post("/api/runs",json=body).status_code==422
     body["generation"].update(model_version="combustion-korea-4",engine_start="warm")
     assert client.post("/api/runs",json=body).status_code==422
+
+@pytest.mark.parametrize("intensity", ["low", "medium", "high"])
+def test_timed_events_configuration_and_replay(client,intensity):
+    body=automatic_request()
+    body["generation"].update(model_version="combustion-events-6",anomaly_intensity=intensity,engine_start="warm",weather="rain",profile="urban",duration_seconds=600,anomaly_vehicle_percent=100,anomaly_events_per_hour=60)
+    response=client.post("/api/runs",json=body)
+    assert response.status_code==201,response.text
+    run=response.json()
+    assert run["result"]["model_version"]=="combustion-events-6"
+    trace_path="/api/runs/"+run["id"]+"/trace/2?start_seconds=100&end_seconds=200"
+    trace=client.get(trace_path)
+    assert trace.status_code==200
+    assert trace.json()==client.get(trace_path).json()
+    for sample in trace.json()["samples"]+run["result"]["trip_summaries"]:
+        control.validate_message(sample["message"])
+        assert "anomaly_intensity" not in sample["message"]["pld"]
+    assert client.get("/api/runs/"+run["id"]).json()==run
+    body["generation"]["anomaly_intensity"]="other"
+    assert client.post("/api/runs",json=body).status_code==422
+    body["generation"].update(model_version="combustion-powertrain-5",anomaly_intensity="high")
+    assert client.post("/api/runs",json=body).status_code==422
