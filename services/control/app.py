@@ -332,6 +332,35 @@ def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, en
     return {"vehicle_id": f"v{vehicle_number:06d}", "trace": result.get("trace", []), "samples": samples, "message_total": result["planned_messages"], "message_offset": message_offset, "range_end_seconds": end, "model_version": result["model_version"], "source": "저장 설정·seed·모델 버전으로 재생성한 구간입니다. 당시 전송 원문·토픽·수신 기록이 아닙니다."}
 
 
+@app.get("/api/runs/{run_id}/analysis")
+def driving_analysis(run_id: str, vehicle_number: int = 0, start_seconds: float = 0, end_seconds: float | None = None, vehicle_offset: int = 0, processed_snapshot: int | None = None):
+    import math
+    run = get_run(run_id)
+    body = RunRequest.model_validate(run["request"])
+    if not body.generation or not 0 <= vehicle_number <= body.config.vehicle_count or not 0 <= vehicle_offset <= 10000:
+        raise HTTPException(422, detail="자동 생성 실행의 분석 차량·페이지를 확인하세요.")
+    end = body.generation.duration_seconds if end_seconds is None else end_seconds
+    if not math.isfinite(start_seconds) or not math.isfinite(end) or not 0 <= start_seconds <= end <= body.generation.duration_seconds:
+        raise HTTPException(422, detail="분석 시작·종료 구간을 확인하세요.")
+    if vehicle_number == 0 and (start_seconds != 0 or end != body.generation.duration_seconds):
+        raise HTTPException(422, detail="전체 차량 분석은 각 차량의 생성 완료 구간 전체를 사용합니다.")
+    snapshot = run["result"]["processed_messages"] if processed_snapshot is None else processed_snapshot
+    if not 0 <= snapshot <= run["result"]["processed_messages"]:
+        raise HTTPException(422, detail="분석 시점은 생성 완료 건수 안으로 지정하세요.")
+    data, timeout = prepare_worker(body, "analysis", run_id)
+    data.update(analysis_vehicle=vehicle_number, analysis_processed=snapshot, analysis_offset=vehicle_offset, trace_start_ms=math.ceil(start_seconds*1000), trace_until_ms=math.floor(end*1000))
+    if data["trace_start_ms"] > data["trace_until_ms"]:
+        raise HTTPException(422, detail="분석 범위는 1ms 이상으로 지정하세요.")
+    try:
+        process = subprocess.run([str(WORKER)], input=json.dumps(data).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        result = json.loads(process.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise HTTPException(502, detail="운행 분석 결과를 확인하지 못했습니다.")
+    if process.returncode or "error" in result:
+        raise HTTPException(422, detail=result.get("error", "운행 분석에 실패했습니다."))
+    return {"analysis": result["analysis"], "references": json.loads((ROOT / "configs/driving-reference.json").read_text(encoding="utf-8")), "source": "생성 완료 구간을 저장 설정·seed·모델 버전으로 재생성하여 내부 선형 구간에서 집계했습니다. 실측 또는 MQTT 수신 통계가 아닙니다."}
+
+
 class DeleteRuns(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     ids: list[str] = Field(min_length=1, max_length=30)

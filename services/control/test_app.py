@@ -468,3 +468,47 @@ def test_interval_microtrip_pagination_and_wire_separation(client,version):
     assert client.get(path+"?message_offset=-1").status_code==422
     assert client.get(path+"?message_offset=10001").status_code==422
     assert client.get("/api/runs/"+run["id"]).json()==run
+
+
+@pytest.mark.parametrize("version", ["combustion-demo-1", "combustion-scenario-2", "combustion-route-3"])
+def test_driving_analysis_readonly_and_coverage(client,version):
+    import math
+    body=automatic_request()
+    body["generation"].update(model_version=version,profile="urban",duration_seconds=600)
+    run=client.post("/api/runs",json=body).json()
+    path="/api/runs/"+run["id"]+"/analysis"
+    response=client.get(path)
+    assert response.status_code==200,response.text
+    data=response.json();s=data["analysis"]["summary"]
+    assert s["vehicle_seconds"]==1800 and s["analyzed_vehicles"]==3
+    for key in ("speed_bins","acceleration_bins","traffic_labels"):
+        assert math.isclose(sum(b["seconds"] for b in s[key]),1800)
+        assert math.isclose(sum(b["percent"] for b in s[key]),100)
+    assert math.isclose(sum(r["seconds"] for r in s["roads"]),1800)
+    assert len(data["references"]["cycles"])==2
+    assert client.get(path).json()==data
+    selected=client.get(path+"?vehicle_number=2&start_seconds=100&end_seconds=120")
+    assert selected.status_code==200 and selected.json()["analysis"]["summary"]["vehicle_seconds"]==20
+    assert client.get(path+"?vehicle_number=4").status_code==422
+    assert client.get(path+"?vehicle_offset=-1").status_code==422
+    assert client.get(path+"?processed_snapshot=999999").status_code==422
+    assert client.get(path+"?start_seconds=10").status_code==422
+    assert client.get(path+"?vehicle_number=1&start_seconds=nan").status_code==422
+    assert client.get(path+"?processed_snapshot=5").json()["analysis"]["summary"]["vehicle_seconds"]==4
+    assert client.get(path+"?vehicle_number=3&end_seconds=2&processed_snapshot=5").status_code==422
+    assert client.get("/api/runs/"+run["id"]).json()==run
+
+
+def test_driving_analysis_rejects_manual(client):
+    run=client.post("/api/runs",json=request()).json()
+    assert client.get("/api/runs/"+run["id"]+"/analysis").status_code==422
+
+
+def test_reference_summary_linear_time_weights():
+    from scripts.build_driving_reference import summarize
+    data=summarize(b"title\n0 0\n1 0\n2 10\n3 20\n4 20\n")
+    assert data["vehicle_seconds"]==4 and data["idle_seconds"]==1
+    assert abs(sum(b["seconds"] for b in data["speed_bins"])-4)<1e-10
+    assert abs(data["distance_m"]-17.8816)<1e-10
+    with pytest.raises(ValueError):
+        summarize(b"0 0\n2 20\n")
