@@ -16,6 +16,7 @@ spec.loader.exec_module(control)
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(control, "DB", tmp_path / "runs.sqlite3")
+    monkeypatch.setattr(control, "CHECKPOINTS", control.CheckpointStore(tmp_path / "states.sqlite3"))
     with TestClient(control.app) as c:
         yield c
 
@@ -825,3 +826,145 @@ def test_fleet_obd_uses_fixed_anomaly_assignment(client):
     assert not b["vehicle_assignment"]["anomaly_eligible"] and b["events_until_query_end"]==0
     assert all(not p["context"]["eligible"] and not p["context"].get("event") for p in b["trace"])
     assert client.post("/api/fleets/obd/v999999/missing",json={"fleet":body}).status_code==422
+
+
+def long_schedule_body():
+    from datetime import date, timedelta
+    trips=[]
+    for n in range(25):
+        day=(date(2026,11,1)+timedelta(days=n)).isoformat()
+        trips.append({"start":day+"T08:00:00+09:00","end":day+"T11:00:00+09:00","road_profile":"urban"})
+    return {"schedule":{"mode":"manual","seed":42,"interval_ms":2000,
+            "measurement":{"start":"2026-11-01T00:00:00+09:00","end":"2026-12-01T00:00:00+09:00"},
+            "vehicles":[{"vehicle_id":"v000001","trips":trips}]}}
+
+
+def finish_obd(client, url, body):
+    progress=[]
+    for _ in range(100):
+        response=client.post(url,json=body)
+        assert response.status_code in (200,202),response.text
+        if response.status_code==200:
+            return response.json(),progress
+        progress.append(response.json()["restoration"]["completed_preceding_trips"])
+    pytest.fail("상태 준비가 완료되지 않았습니다.")
+
+
+def test_checkpoint_long_restore_matches_full_and_reuses(client,monkeypatch):
+    import services.control.schedule_obd as engine
+    body=long_schedule_body()
+    rows=client.post("/api/schedules/preview",json=body["schedule"]).json()["trips"]
+    url="/api/schedules/obd/v000001/"+rows[-1]["trip_key"]
+    calls=[]
+    original=engine.subprocess.run
+    def measured(*args,**kwargs):
+        calls.append(1)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(engine.subprocess,"run",measured)
+    a,progress=finish_obd(client,url,body)
+    assert progress==[16] and len(calls)==25  # 25회 운행·75시간을 분할 복원
+    initial_calls=len(calls)
+    assert a==client.post(url,json=body).json() and len(calls)==initial_calls+1
+    # 캐시 없이 실제 처음부터 계산한 결과와 완전히 일치한다.
+    reference=engine.generate(engine.ScheduledOBDRequest(**body),"v000001",rows[-1]["trip_key"],control.WORKER,None,None,0,100)
+    assert a==reference
+    page=client.post(url+"?offset=10&limit=5",json=body).json()
+    assert page["messages"]==a["messages"][10:15]
+    early=client.post("/api/schedules/obd/v000001/"+rows[3]["trip_key"],json=body)
+    assert early.status_code==200
+    assert client.get("/api/checkpoints").json()["entries"]==25
+    # 생성 모델 식별자가 바뀌면 이전 상태를 쓰지 않고 다시 준비한다.
+    monkeypatch.setattr(engine,"SOURCE_ID",engine.SOURCE_ID+"-changed")
+    again,new_progress=finish_obd(client,url,body)
+    assert again==a and new_progress==[16]
+    before=client.get("/api/runs").json()
+    assert client.delete("/api/checkpoints").json()["entries"]==0
+    after,deleted_progress=finish_obd(client,url,body)
+    assert after==a and deleted_progress==[16]
+    assert client.get("/api/runs").json()==before
+
+
+def test_checkpoint_store_limits_expiry_restart_and_clear_fence(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from services.control.checkpoints import CheckpointStore,CheckpointReset,CheckpointError
+    now=[1000.0]
+    path=tmp_path/"states.sqlite3"
+    store=CheckpointStore(path,max_entries=3,ttl_seconds=10,clock=lambda:now[0])
+    state={"lat":37.5,"lon":127.0,"odometer_m":500000.0,"coolant_c":20.0,"heading_rad":0.0}
+    epoch,_=store.resume("a",99)
+    for i in range(4):
+        now[0]+=1
+        store.put("a",i,1000+i,state,epoch)
+    assert store.stats()["entries"]==3
+    assert store.resume("a",1)[1] is None
+    restarted=CheckpointStore(path,max_entries=3,ttl_seconds=10,clock=lambda:now[0])
+    assert restarted.resume("a",4)[1]==(3,1003,state)
+    assert store.stats()["database_bytes"]<=4194304
+    with sqlite3.connect(path) as con:
+        assert con.execute("PRAGMA auto_vacuum").fetchone()[0]==1
+        con.execute("UPDATE checkpoints SET state='{}' WHERE seq=3")
+    assert store.resume("a",4)[1][0]==2
+    now[0]+=11
+    assert store.stats()["entries"]==0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda i:store.put("b",i,1000+i,state,epoch),range(10)))
+    assert store.stats()["entries"]==3
+    store.clear()
+    with pytest.raises(CheckpointReset): restarted.put("a",10,2000,state,epoch)
+    with pytest.raises(CheckpointError): store.put("a",10,2000,dict(state,lat=float("nan")),epoch+1)
+    assert store.stats()["entries"]==0
+
+
+def test_fleet_lazy_lookup_and_late_checkpoint(client,monkeypatch):
+    import services.control.fleet as fleet_engine
+    body=dict(fleet_example(),vehicle_count=2,daily_driving_minutes=10,vehicle_variation_percent=0,daily_variation_percent=0,
+              measurement={"start":"2026-11-01T00:00:00+09:00","end":"2026-12-01T00:00:00+09:00"},weekend_activity_probability=1.0)
+    plan=client.post("/api/fleets/preview?vehicle_id=v000001",json=body).json()
+    calls=[]
+    original=fleet_engine.iter_vehicle_days
+    def watched(req,vehicle,fixed):
+        calls.append(vehicle)
+        yield from original(req,vehicle,fixed)
+    monkeypatch.setattr(fleet_engine,"iter_vehicle_days",watched)
+    trip=plan["trips"][-1]
+    url="/api/fleets/obd/v000001/"+trip["trip_key"]
+    a,progress=finish_obd(client,url,{"fleet":body})
+    assert progress and progress==sorted(set(progress))
+    assert set(calls)=={"v000001"}  # 다른 차량의 날짜별 일정은 펼치지 않는다.
+    reference=fleet_engine.obd(fleet_engine.FleetOBDRequest(fleet=fleet_engine.FleetRequest(**body)),"v000001",trip["trip_key"],control.WORKER,None,None,0,100)
+    assert a==reference and client.post(url,json={"fleet":body}).status_code==200
+    count=client.get("/api/checkpoints").json()["entries"]
+    changed=dict(body,anomaly_events_per_hour=3.0)
+    _,new_progress=finish_obd(client,url,{"fleet":changed})
+    assert new_progress and client.get("/api/checkpoints").json()["entries"]>count
+
+
+def test_checkpoint_clear_during_request_and_synthetic_state(client,monkeypatch):
+    import json
+    import sqlite3
+    store=control.CHECKPOINTS
+    original=store.put
+    once=[True]
+    def cleared(*args):
+        if once[0]:
+            once[0]=False
+            store.clear()
+        return original(*args)
+    monkeypatch.setattr(store,"put",cleared)
+    body=scheduled_obd_body()
+    key=client.post("/api/schedules/preview",json=body["schedule"]).json()["trips"][0]["trip_key"]
+    url="/api/schedules/obd/v000001/"+key
+    interrupted=client.post(url,json=body)
+    assert interrupted.status_code==409 and client.get("/api/checkpoints").json()["entries"]==0
+    old_epoch=0
+    assert client.post(url,json=dict(body,checkpoint_epoch=old_epoch)).status_code==409
+    body["checkpoint_epoch"]=client.get("/api/checkpoints").json()["epoch"]
+    body["force_end_trip"]=True
+    body["schedule"]["measurement"]["end"]="2026-11-17T13:00:30+09:00"
+    result=client.post(url,json=body).json()
+    assert result["synthetic_trip"]
+    with sqlite3.connect(store.path) as con:
+        end_ms,state=con.execute("SELECT end_ms,state FROM checkpoints").fetchone()
+    assert end_ms>result["trip"]["ts"]
+    assert json.loads(state)["odometer_m"]>result["trip"]["pld"]["tdis"]

@@ -140,14 +140,14 @@ def vehicle_trips(req, vehicle):
     return trips
 
 
-def plan(req: ScheduleRequest, offset=0, limit=100, vehicle_id=None):
+def plan(req: ScheduleRequest, offset=0, limit=100, vehicle_id=None, trip_provider=None):
     if vehicle_id is not None and not any(v.vehicle_id == vehicle_id for v in req.vehicles):
         raise ValueError("계획에 없는 차량입니다.")
     start, end = instant(req.measurement.start), instant(req.measurement.end)
     rows, inactive, summaries, total, micros, completed = [], [], [], 0, 0, 0
     seen = set()
     for vehicle in sorted(req.vehicles, key=lambda v:v.vehicle_id):
-        trips = sorted(vehicle_trips(req, vehicle))
+        trips = sorted(trip_provider(req, vehicle) if trip_provider else vehicle_trips(req, vehicle))
         previous = None
         observed, driving_ms = 0, 0
         for a, b, profile in trips:

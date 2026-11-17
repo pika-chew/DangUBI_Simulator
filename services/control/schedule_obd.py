@@ -1,4 +1,4 @@
-"""측정 일정의 한 운행을 기존 Go 물리 모델로 재생성한다. 전송/DB 저장 없음."""
+"""선택 운행을 재생성하고 차량 종료 상태만 제한된 캐시에 보관한다."""
 import hashlib
 import json
 import math
@@ -8,10 +8,15 @@ import time
 
 from pydantic import Field
 from services.control.schedule import Strict, ScheduleRequest, instant, plan, vehicle_trips
+from services.control.checkpoints import CheckpointError, CheckpointReset
+
+# 실행 중 파일 수정과 구분해 서버가 시작할 때의 생성 정책을 식별한다.
+SOURCE_ID = hashlib.sha256(b"obd-state-1" + b"".join(Path(__file__).with_name(name).read_bytes() for name in ("schedule_obd.py", "schedule.py", "fleet.py"))).hexdigest()
 
 
 class ScheduledOBDRequest(Strict):
     schedule: ScheduleRequest
+    checkpoint_epoch: int | None = Field(default=None, ge=0)
     initial_lat: float = Field(default=37.5, ge=-85, le=85)
     initial_lon: float = Field(default=127.0, ge=-180, le=180)
     initial_odometer_m: float = Field(default=500000, ge=0, le=1e9)
@@ -23,7 +28,7 @@ def key_for(vehicle, a, b, profile):
     return hashlib.sha256(f"schedule-plan-1|{vehicle}|{a}|{b}|{profile}".encode()).hexdigest()
 
 
-def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None):
+def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None, checkpoint_store=None, cache_context=None):
     req = body.schedule
     plan(req)  # 기존 일정·주차·건수 검증을 그대로 적용한다.
     vehicle = next((v for v in req.vehicles if v.vehicle_id == vehicle_id), None)
@@ -34,8 +39,6 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
     if index is None:
         raise ValueError("계획에 없는 운행입니다.")
     chain = trips[:index+1]
-    if len(chain)>16 or sum(b-a for a,b,_ in chain)>48*3600000:
-        raise ValueError("초기 상태 복원은 선행 운행 포함16회·누적48시간까지입니다. 체크포인트 연동은 후속입니다.")
     if any((b-a)%1000 for a,b,_ in chain):
         raise ValueError("현재 OBD 연동은 운행 길이가 정수 초인 일정만 지원합니다.")
     a,b,profile=chain[-1]
@@ -50,10 +53,36 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
     state={"lat":body.initial_lat,"lon":body.initial_lon,"odometer_m":body.initial_odometer_m}
     coolant,heading=body.initial_coolant_c,0.0
     vehicle_seed=int(hashlib.sha256(f"{req.seed}|{vehicle_id}".encode()).hexdigest()[:7],16)
+    worker_id = hashlib.sha256(worker.read_bytes()).hexdigest()
+    scope = hashlib.sha256(json.dumps({"source":SOURCE_ID,"worker":worker_id,
+        "seed":req.seed,"interval_ms":req.interval_ms,"measurement":req.measurement.model_dump(),
+        "vehicle":({"vehicle_id":vehicle_id} if cache_context is not None else vehicle.model_dump()),"initial":dict(state,coolant_c=coolant),
+        "anomaly":anomaly,"context":cache_context},sort_keys=True,separators=(",", ":")).encode()).hexdigest()
+    resume_start, epoch = 0, None
+    saved = None
+    if checkpoint_store is not None:
+        epoch, saved = checkpoint_store.resume(scope, index)
+        if body.checkpoint_epoch is not None and body.checkpoint_epoch != epoch:
+            raise CheckpointReset("중간 상태가 비워졌습니다. 새 조회를 시작하세요.")
     deadline=time.monotonic()+30
     previous_end=None
     selected_initial=None
-    for i,(departure,arrival,road) in enumerate(chain):
+    if saved is not None:
+        seq, arrival, cached = saved
+        if arrival != chain[seq][1]:
+            raise CheckpointError("중간 상태 시각이 일정과 다릅니다. 중간 상태를 비운 뒤 다시 조회하세요.")
+        state = {key:cached[key] for key in ("lat","lon","odometer_m")}
+        coolant, heading, previous_end = cached["coolant_c"], cached["heading_rad"], arrival
+        resume_start = seq+1
+    computed, computed_ms = 0, 0
+    for i in range(resume_start, len(chain)):
+        departure,arrival,road = chain[i]
+        if checkpoint_store is not None and (computed >= 16 or computed_ms+arrival-departure > 48*3600000 or time.monotonic() >= deadline-1):
+            return {"status":"preparing", "vehicle_id":vehicle_id,"trip_key":trip_key,
+                    "restoration":{"checkpoint_epoch":epoch,"completed_preceding_trips":i,"total_preceding_trips":index,
+                                   "computed_trips":computed,"reused_preceding_trips":resume_start}}
+        if hashlib.sha256(worker.read_bytes()).hexdigest() != worker_id:
+            raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
         if previous_end is not None:
             # 외기20℃·냉각 시정수2시간의 개발 근사. 실차/외기 조회값이 아니다.
             coolant=20+(coolant-20)*math.exp(-(departure-previous_end)/7200000)
@@ -73,5 +102,11 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         state={"lat":output["final_lat"],"lon":output["final_lon"],"odometer_m":output["final_odometer_m"]}
         coolant,heading=output["final_coolant_c"],output["final_heading_rad"]
         previous_end=arrival
+        computed += 1
+        computed_ms += arrival-departure
+        if hashlib.sha256(worker.read_bytes()).hexdigest() != worker_id:
+            raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
+        if checkpoint_store is not None:
+            checkpoint_store.put(scope,i,arrival,dict(state,coolant_c=coolant,heading_rad=heading),epoch)
         if selected: selected_initial=initial
-    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output["events_until_query_end"],"initial_state":selected_initial,"messages":output["messages"],"trace":output["trace"],"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행/DB 저장은 없습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}
+    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output["events_until_query_end"],"initial_state":selected_initial,"messages":output["messages"],"trace":output["trace"],"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}

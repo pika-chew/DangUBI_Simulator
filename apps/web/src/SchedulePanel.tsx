@@ -9,7 +9,10 @@ type Vehicle = { vehicle_id: string; trips?: TripInput[]; pattern?: { weekdays: 
 type Schedule = { schedule_version: "schedule-plan-1"; mode: "manual" | "patterned"; seed: number; interval_ms: number; measurement: { start: string; end: string; timezone: "Asia/Seoul" }; vehicles: Vehicle[] };
 type Trip = { vehicle_id: string; trip_key: string; start_ms: number; end_ms: number; observed_start_ms: number; observed_end_ms: number; road_profile: Road; started_before_window: boolean; continues_after_window: boolean };
 type Plan = { anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[] };
-type OBD = { vehicle_assignment?: {pattern: string; anomaly_eligible: boolean}; messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
+type OBD = { status: "generated_local_only"; vehicle_assignment?: {pattern: string; anomaly_eligible: boolean}; messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
+type Restoration = {checkpoint_epoch:number; completed_preceding_trips: number; total_preceding_trips: number; computed_trips: number; reused_preceding_trips: number};
+type Preparing = {status: "preparing"; restoration: Restoration};
+type CacheStats = {epoch:number; entries:number; max_entries:number; ttl_seconds:number; database_bytes:number; max_database_bytes:number};
 type Loaded = { data: OBD; start: number; end: number; offset: number };
 const roads: Record<Road, string> = { urban: "도심", highway: "고속도로", congested: "정체", mixed: "혼합" };
 const kst = (ms: number) => new Date(ms + 9 * 3600000).toISOString().slice(0, 23);
@@ -56,22 +59,42 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
   const [force, setForce] = useState(false);
+  const [restoration, setRestoration] = useState<Restoration | null>(null);
+  const [cache, setCache] = useState<CacheStats | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [cacheError, setCacheError] = useState("");
+  const cacheID = useRef(0);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   const trip = trips.find(t => t.trip_key === tripKey);
-  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => {
+    void cacheAction("GET");
+    return () => { request.current?.abort(); cacheID.current++; };
+  }, []);
+  async function cacheAction(method: "GET" | "DELETE") {
+    if (method === "DELETE") { request.current?.abort(); setBusy(""); setRestoration(null); }
+    const id = ++cacheID.current;
+    setCacheBusy(true); setCacheError("");
+    try {
+      const response = await fetch("/api/checkpoints", {method});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "중간 상태 관리 요청에 실패했습니다.");
+      if (id === cacheID.current) setCache(data);
+    } catch (e) { if (id === cacheID.current) setCacheError(e instanceof Error ? e.message : "조회 실패"); }
+    finally { if (id === cacheID.current) setCacheBusy(false); }
+  }
   function begin(label: string) {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
-    setBusy(label); setError("");
+    setBusy(label); setError(""); setRestoration(null);
     return controller;
   }
   function fail(e: unknown, c: AbortController) { if (!c.signal.aborted) setError(e instanceof Error ? e.message : "처리 실패"); }
-  function done(c: AbortController) { if (request.current === c) setBusy(""); }
+  function done(c: AbortController) { if (request.current === c) { setBusy(""); setRestoration(null); } }
   function resetResults() {
-    request.current?.abort(); setBusy(""); setError("");
+    request.current?.abort(); setBusy(""); setError(""); setRestoration(null);
     setRaw(""); setPlan(null); setFrozen(null); setFrozenFleet(null); setTrips([]); setLoaded(null); setSummary(null); setVehicle(""); setTripKey("");
   }
   function edit(next: Schedule) { resetResults(); setDraft(next); }
@@ -120,10 +143,30 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
     const c = begin("선택 운행의 OBD를 생성하고 있습니다.");
     setLoaded(null);
     try {
-      const data = await post<OBD>(`/api/${frozenFleet ? "fleets" : "schedules"}/obd/${vehicle}/${trip.trip_key}?start_ms=${start}&end_ms=${end}&offset=${offset}`, { ...(frozenFleet ? {fleet: frozenFleet} : {schedule: frozen}), force_end_trip: forceValue && end === Date.parse(source.measurement.end) }, c.signal);
+      const stateResponse = await fetch("/api/checkpoints", {signal:c.signal});
+      const stateInfo = await stateResponse.json();
+      if (!stateResponse.ok) throw new Error(stateInfo.detail || "중간 상태 저장소를 확인할 수 없습니다.");
       if (c.signal.aborted) return;
-      setLoaded({ data, start, end, offset }); setRangeStart(kst(start)); setRangeEnd(kst(end));
-      if (whole) setSummary(data);
+      setCache(stateInfo);
+      let previous = -1;
+      let epoch: number = stateInfo.epoch;
+      for (let batch = 0; batch < 100; batch++) {
+        const data = await post<OBD | Preparing>(`/api/${frozenFleet ? "fleets" : "schedules"}/obd/${vehicle}/${trip.trip_key}?start_ms=${start}&end_ms=${end}&offset=${offset}`, { ...(frozenFleet ? {fleet: frozenFleet} : {schedule: frozen}), checkpoint_epoch: epoch, force_end_trip: forceValue && end === Date.parse(source.measurement.end) }, c.signal);
+        if (c.signal.aborted) return;
+        if (data.status === "preparing") {
+          if (data.restoration.completed_preceding_trips <= previous) throw new Error("중간 상태 준비가 진행되지 않습니다. 다른 조회나 저장소 상태를 확인하고 다시 시작하세요.");
+          previous = data.restoration.completed_preceding_trips;
+          epoch = data.restoration.checkpoint_epoch;
+          setRestoration(data.restoration);
+          setBusy(`과거 운행 상태를 준비하고 있습니다. ${previous} / ${data.restoration.total_preceding_trips}회`);
+          continue;
+        }
+        setLoaded({ data, start, end, offset }); setRangeStart(kst(start)); setRangeEnd(kst(end));
+        if (whole) setSummary(data);
+        void cacheAction("GET");
+        return;
+      }
+      throw new Error("준비 요청 상한에 도달했습니다. 중간 상태는 보관되므로 다시 조회할 수 있습니다.");
     } catch (e) { fail(e, c); } finally { done(c); }
   }
   async function applyJSON() {
@@ -146,6 +189,14 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   const patchSlot = (i: number, value: Partial<Slot>) => patchPattern({ slots: current.pattern!.slots.map((s, n) => n === i ? { ...s, ...value } : s) });
   return <section className="schedule-panel" aria-label="일정 기반 생성">
     <div className="banner"><b>일정 기반 생성 · 로컬 조회</b><span>측정 기간 안에서 차량마다 다른 운행을 생성합니다. 이 화면은 MQTT 전송과 실행 기록 저장을 하지 않습니다.</span></div>
+    <details className="card schedule-cache">
+      <summary>차량 중간 상태 관리 · {cache ? `${cache.entries.toLocaleString()}건` : "확인 중"}</summary>
+      <p className="note">전체 메시지가 아닌 운행 종료 상태만 보관합니다. 기본 위치는 .local/obd-state.sqlite3이며 실행 기록과 별개입니다. 설정·모델이 다르면 구분하고, 오래되거나 한도를 넘은 항목은 자동 정리합니다.</p>
+      {cache && <p>보관 {cache.entries.toLocaleString()} / {cache.max_entries.toLocaleString()}건 · 마지막 사용 후 {cache.ttl_seconds / 3600}시간 · DB {(cache.database_bytes / 1024).toFixed(0)} KiB / {(cache.max_database_bytes / 1048576).toFixed(0)} MiB</p>}
+      <div className="schedule-actions"><button disabled={cacheBusy} onClick={() => void cacheAction("GET")}>중간 상태 새로고침</button><button disabled={cacheBusy} onClick={() => void cacheAction("DELETE")}>중간 상태만 비우기</button></div>
+      <p className="note">비워도 설정·실행 기록·이미 표시한 표/그래프는 유지합니다. 다음 조회에 필요한 상태는 다시 계산합니다. 진행 중인 준비 요청은 비우기 이전 상태를 다시 저장하지 않습니다.</p>
+      {cacheError && <p className="error" role="alert">{cacheError}</p>}
+    </details>
     <section className="card">
       <h2>01 전체 조건과 운행 설정</h2>
       <label>설정 범위<select disabled={!!busy} value={setup} onChange={e => { resetResults(); setSetup(e.target.value as "fleet" | "individual"); }}><option value="fleet">전체 조건 자동 배정 · 기본</option><option value="individual">개별 차량 설정 · 점검용</option></select></label>
@@ -226,7 +277,13 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
         <p className="note">관측 범위 {clock(trip.observed_start_ms)} → {clock(trip.observed_end_ms)}{trip.started_before_window && " · 측정 시작 전 출발"}{trip.continues_after_window && " · 측정 종료 후에도 운행 중"}</p>
         <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>
         <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>선택 운행 OBD 생성·조회</button>
-        <p className="note">주행 상태 복원은 선행 포함 16회·누적 운행 48시간까지입니다. 장기 일정의 후반 운행은 이 상한으로 조회가 제한될 수 있습니다.</p>
+        <p className="note">먼저 가까운 중간 상태에서 이어 계산합니다. 처음 조회하는 먼 구간은 요청당 최대16회·48시간의 운행을 나누어 준비한 뒤 자동으로 조회합니다.</p>
+        {restoration && <div className="schedule-status" role="status">
+          <p>중간 상태 준비 · {restoration.completed_preceding_trips} / {restoration.total_preceding_trips}회 완료</p>
+          <progress aria-label="중간 상태 준비 진행률" max={Math.max(1,restoration.total_preceding_trips)} value={restoration.completed_preceding_trips} />
+          <button onClick={() => { request.current?.abort(); setBusy(""); setRestoration(null); void cacheAction("GET"); }}>이후 준비 중단</button>
+          <p className="note">추가 요청을 중단합니다. 이미 서버에 전달한 한 회차의 계산은 끝날 수 있으며 완료한 중간 상태는 다음 조회에 재사용합니다.</p>
+        </div>}
       </>}
     </section>}
     {summary && trip && <section className="card">

@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Request, Query
 from services.control.schedule import ScheduleRequest, plan as plan_schedule
 from services.control.schedule_obd import ScheduledOBDRequest, generate as generate_scheduled_obd
 from services.control.fleet import FleetRequest, FleetOBDRequest, preview as preview_fleet, obd as fleet_obd
+from services.control.checkpoints import CheckpointStore, CheckpointError, CheckpointReset
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +30,7 @@ WORKER = ROOT / ".local" / ("worker.exe" if os.name == "nt" else "worker")
 DB = Path(os.environ.get("DANGUBI_DB", str(ROOT / ".local/runs.sqlite3")))
 MQTT_PROFILE = Path(os.environ.get("DANGUBI_MQTT_PROFILE", str(ROOT / ".local/mqtt.json")))
 MQTT_LOCK = threading.Lock()
+CHECKPOINTS = CheckpointStore(ROOT / ".local" / "obd-state.sqlite3")
 @asynccontextmanager
 async def lifespan(_app):
     JOBS.recover()
@@ -39,6 +41,25 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifespan)
+
+
+@app.exception_handler(CheckpointError)
+async def checkpoint_error(_request, error):
+    return JSONResponse(status_code=409 if isinstance(error, CheckpointReset) else 503, content={"detail": str(error)})
+
+
+@app.get("/api/checkpoints")
+def checkpoint_stats():
+    return CHECKPOINTS.stats()
+
+
+@app.delete("/api/checkpoints")
+def clear_checkpoints():
+    return CHECKPOINTS.clear()
+
+
+def scheduled_response(data):
+    return JSONResponse(status_code=202, content=data) if data["status"] == "preparing" else data
 
 
 @app.post("/api/fleets/preview")
@@ -54,7 +75,7 @@ def fleet_generate(body: FleetOBDRequest, vehicle_id: str, trip_key: str, start_
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
     try:
-        return fleet_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit)
+        return scheduled_response(fleet_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit, CHECKPOINTS))
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         raise HTTPException(422, detail=str(error)) from error
 
@@ -72,7 +93,7 @@ def schedule_obd(body: ScheduledOBDRequest, vehicle_id: str, trip_key: str, star
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
     try:
-        return generate_scheduled_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit)
+        return scheduled_response(generate_scheduled_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit, checkpoint_store=CHECKPOINTS))
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         raise HTTPException(422, detail=str(error)) from error
 

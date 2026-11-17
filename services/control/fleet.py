@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 from services.control.schedule import Strict, Measurement, ScheduleRequest, KST, instant, plan
-from services.control.schedule_obd import ScheduledOBDRequest, generate
+from services.control.schedule_obd import ScheduledOBDRequest, generate, key_for
 
 
 class PatternMix(Strict):
@@ -63,6 +63,7 @@ class FleetRequest(Strict):
 
 class FleetOBDRequest(Strict):
     fleet: FleetRequest
+    checkpoint_epoch: int | None = Field(default=None, ge=0)
     force_end_trip: bool = False
 
 
@@ -103,58 +104,67 @@ def allocation(req):
     return result
 
 
-def expand(req):
-    assigned = allocation(req)
+def iter_vehicle_days(req, vehicle, fixed):
     first = datetime.fromtimestamp(instant(req.measurement.start) / 1000, KST).date() - timedelta(days=2)
     last = datetime.fromtimestamp(instant(req.measurement.end) / 1000, KST).date() + timedelta(days=1)
-    vehicles = []
-    for vehicle, fixed in assigned.items():
-        trips = []
-        for n in range((last-first).days+1):
-            day = first + timedelta(days=n)
-            daily = rng(req, vehicle, day.isoformat(), "day")
-            weekend = day.isoweekday() >= 6
-            # 미운행과 주말 참여 여부는 별도 난수 키: 한 항목의 수정이 시간 배정을 흔들지 않는다.
-            if rng(req, vehicle, day.isoformat(), "off").random() < req.day_off_probability:
-                continue
-            if weekend and rng(req, vehicle, day.isoformat(), "weekend").random() >= req.weekend_activity_probability:
-                continue
-            kind = "flexible" if weekend else fixed["pattern"]
-            count = 2 if kind == "commute" else daily.randint(2, 3) if kind == "daytime" else daily.randint(1, 3)
-            delta = req.daily_variation_percent / 100
-            budget = max(count, round(fixed["daily_target_minutes"] * daily.uniform(1-delta, 1+delta)))
-            weights = [daily.uniform(.8, 1.2) for _ in range(count)]
-            durations = [max(1, int(budget * weight / sum(weights))) for weight in weights[:-1]]
-            durations.append(budget-sum(durations))
-            start = fixed["first_departure_minute"] + daily.randint(-req.departure_jitter_minutes, req.departure_jitter_minutes)
-            if weekend:
-                start += 60
-            # 첫 출발은 04~13시, 최대 운행600분+주차60분으로 자정 안에 배치 가능하다.
-            available = 1440-start-budget
-            gaps = [30] * (count-1)
-            extra = max(0, available-sum(gaps))
-            if kind == "commute":
-                desired = fixed["evening_departure_minute"] + daily.randint(-req.departure_jitter_minutes, req.departure_jitter_minutes)
-                gaps[0] += min(extra, max(0, desired-start-durations[0]-30))
-            else:
-                for i in range(len(gaps)):
-                    add = min(extra, daily.randint(0, 120 if kind == "flexible" else 60))
-                    gaps[i] += add
-                    extra -= add
-            midnight = datetime(day.year, day.month, day.day, tzinfo=KST)
-            for i, duration in enumerate(durations):
-                departure = midnight + timedelta(minutes=start)
-                arrival = departure + timedelta(minutes=duration)
-                trips.append({"start": departure.isoformat(), "end": arrival.isoformat(), "road_profile": fixed["road_profile"]})
-                start += duration + (gaps[i] if i < len(gaps) else 0)
-        vehicles.append({"vehicle_id": vehicle, "trips": trips})
-    schedule = ScheduleRequest(mode="manual", measurement=req.measurement, seed=req.seed, interval_ms=req.interval_ms, vehicles=vehicles)
-    return schedule, assigned
+    for n in range((last-first).days+1):
+        day = first + timedelta(days=n)
+        daily = rng(req, vehicle, day.isoformat(), "day")
+        weekend = day.isoweekday() >= 6
+        # 미운행과 주말 참여 여부는 별도 난수 키: 한 항목의 수정이 시간 배정을 흔들지 않는다.
+        if rng(req, vehicle, day.isoformat(), "off").random() < req.day_off_probability:
+            continue
+        if weekend and rng(req, vehicle, day.isoformat(), "weekend").random() >= req.weekend_activity_probability:
+            continue
+        kind = "flexible" if weekend else fixed["pattern"]
+        count = 2 if kind == "commute" else daily.randint(2, 3) if kind == "daytime" else daily.randint(1, 3)
+        delta = req.daily_variation_percent / 100
+        budget = max(count, round(fixed["daily_target_minutes"] * daily.uniform(1-delta, 1+delta)))
+        weights = [daily.uniform(.8, 1.2) for _ in range(count)]
+        durations = [max(1, int(budget * weight / sum(weights))) for weight in weights[:-1]]
+        durations.append(budget-sum(durations))
+        start = fixed["first_departure_minute"] + daily.randint(-req.departure_jitter_minutes, req.departure_jitter_minutes)
+        if weekend:
+            start += 60
+        # 첫 출발은 04~13시, 최대 운행600분+주차60분으로 자정 안에 배치 가능하다.
+        available = 1440-start-budget
+        gaps = [30] * (count-1)
+        extra = max(0, available-sum(gaps))
+        if kind == "commute":
+            desired = fixed["evening_departure_minute"] + daily.randint(-req.departure_jitter_minutes, req.departure_jitter_minutes)
+            gaps[0] += min(extra, max(0, desired-start-durations[0]-30))
+        else:
+            for i in range(len(gaps)):
+                add = min(extra, daily.randint(0, 120 if kind == "flexible" else 60))
+                gaps[i] += add
+                extra -= add
+        midnight = datetime(day.year, day.month, day.day, tzinfo=KST)
+        for i, duration in enumerate(durations):
+            departure = midnight + timedelta(minutes=start)
+            arrival = departure + timedelta(minutes=duration)
+            if not 0 <= departure.timestamp()*1000 < arrival.timestamp()*1000 <= 4102444800000:
+                raise ValueError("일정 문맥을 포함한 운행은 1970~2100년 범위여야 합니다.")
+            yield {"start": departure.isoformat(), "end": arrival.isoformat(), "road_profile": fixed["road_profile"]}
+            start += duration + (gaps[i] if i < len(gaps) else 0)
+
+
+def selected_schedule(req, vehicles):
+    return ScheduleRequest(mode="manual", measurement=req.measurement, seed=req.seed, interval_ms=req.interval_ms, vehicles=vehicles)
+
+
+def expand(req):
+    # 전체 확장은 재현 비교용으로 유지한다. 제품 조회는 선택 차량/날짜 생성 경로를 사용한다.
+    assigned = allocation(req)
+    vehicles = [{"vehicle_id":v,"trips":list(iter_vehicle_days(req,v,fixed))} for v,fixed in assigned.items()]
+    return selected_schedule(req,vehicles), assigned
 
 
 def preview(req, offset=0, limit=100, vehicle_id=None):
-    schedule, assigned = expand(req)
-    data = plan(schedule, offset, limit, vehicle_id)
+    assigned = allocation(req)
+    schedule = selected_schedule(req,[{"vehicle_id":v,"trips":[]} for v in assigned])
+    def provide(_req, vehicle):
+        return ((instant(t["start"]),instant(t["end"]),t["road_profile"]) for t in iter_vehicle_days(req,vehicle.vehicle_id,assigned[vehicle.vehicle_id]))
+    data = plan(schedule, offset, limit, vehicle_id, trip_provider=provide)
     data["fleet_version"] = req.fleet_version
     data["anomaly_target_count"] = sum(v["anomaly_eligible"] for v in assigned.values())
     for vehicle in data["vehicles"]:
@@ -162,18 +172,26 @@ def preview(req, offset=0, limit=100, vehicle_id=None):
     data["warnings"].extend([
         "전체 조건으로 배정한 개발용 합성 일정이며 한국 실차 통계로 보정하지 않았습니다.",
         "일일 목표는 운행하는 날의 전체 운행 합계입니다. 미운행·관측 경계·정수 분 반올림으로 관측 평균은 달라집니다.",
-        "설정 자동화이며 대규모 전송 지원 확대가 아닙니다. 계획100대/10000운행·상태 복원16회/48시간 제한을 유지합니다.",
+        "설정 자동화이며 대규모 전송 지원 확대가 아닙니다. 계획100대/10000운행 상한을 유지하며 장기 상태는 제한된 요청 단위로 나누어 준비합니다.",
     ])
     return data
 
 
-def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit):
-    schedule, assigned = expand(body.fleet)
+def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit, checkpoint_store=None):
+    assigned = allocation(body.fleet)
     if vehicle_id not in assigned:
         raise ValueError("계획에 없는 차량입니다.")
     fixed = assigned[vehicle_id]
-    output = generate(ScheduledOBDRequest(schedule=schedule, force_end_trip=body.force_end_trip), vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit,
-                      anomaly={"anomaly_eligible": fixed["anomaly_eligible"], "anomaly_events_per_hour": body.fleet.anomaly_events_per_hour, "anomaly_intensity": body.fleet.anomaly_intensity})
+    trips = []
+    for trip in iter_vehicle_days(body.fleet,vehicle_id,fixed):
+        trips.append(trip)
+        if key_for(vehicle_id,instant(trip["start"]),instant(trip["end"]),trip["road_profile"]) == trip_key:
+            break
+    else:
+        raise ValueError("계획에 없는 운행입니다.")
+    schedule = selected_schedule(body.fleet,[{"vehicle_id":vehicle_id,"trips":trips}])
+    output = generate(ScheduledOBDRequest(schedule=schedule, force_end_trip=body.force_end_trip, checkpoint_epoch=body.checkpoint_epoch), vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit,
+                      anomaly={"anomaly_eligible": fixed["anomaly_eligible"], "anomaly_events_per_hour": body.fleet.anomaly_events_per_hour, "anomaly_intensity": body.fleet.anomaly_intensity}, checkpoint_store=checkpoint_store, cache_context=body.fleet.model_dump())
     output["vehicle_assignment"] = fixed
     output["fleet_version"] = body.fleet.fleet_version
     return output
