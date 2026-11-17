@@ -11,12 +11,13 @@ const generatorVersion = "combustion-demo-1"
 
 // 실차 보정 전의 재현 가능한 개발 모델. 단위는 제품 사용 안내에 명시한다.
 type Generation struct {
-	AnomalyIntensity      string  `json:"anomaly_intensity,omitempty"`
-	EngineStart           string  `json:"engine_start,omitempty"`
-	Weather               string  `json:"weather,omitempty"`
-	ModelVersion          string  `json:"model_version,omitempty"`
-	AnomalyVehiclePercent float64 `json:"anomaly_vehicle_percent"`
-	AnomalyEventsPerHour  float64 `json:"anomaly_events_per_hour"`
+	Continuity            *EngineContinuity `json:"continuity,omitempty"`
+	AnomalyIntensity      string            `json:"anomaly_intensity,omitempty"`
+	EngineStart           string            `json:"engine_start,omitempty"`
+	Weather               string            `json:"weather,omitempty"`
+	ModelVersion          string            `json:"model_version,omitempty"`
+	AnomalyVehiclePercent float64           `json:"anomaly_vehicle_percent"`
+	AnomalyEventsPerHour  float64           `json:"anomaly_events_per_hour"`
 	cache                 *scenarioCache
 
 	Profile          string  `json:"profile"`
@@ -41,6 +42,9 @@ func normalize(req Request) (Request, error) {
 	g := req.Generation
 	if g == nil {
 		return req, nil
+	}
+	if g.Continuity != nil {
+		return req, errors.New("운행 연속 상태는 일정 전용 조회에서만 사용합니다.")
 	}
 	if len(req.Message) > 0 {
 		return req, errors.New("자동 생성 설정과 수동 메시지는 동시에 사용할 수 없습니다.")

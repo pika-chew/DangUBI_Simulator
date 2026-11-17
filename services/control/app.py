@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Query
 from services.control.schedule import ScheduleRequest, plan as plan_schedule
+from services.control.schedule_obd import ScheduledOBDRequest, generate as generate_scheduled_obd
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +45,16 @@ def schedule_preview(body: ScheduleRequest, offset: int = Query(default=0, ge=0,
     try:
         return plan_schedule(body, offset, limit)
     except ValueError as error:
+        raise HTTPException(422, detail=str(error)) from error
+
+
+@app.post("/api/schedules/obd/{vehicle_id}/{trip_key}")
+def schedule_obd(body: ScheduledOBDRequest, vehicle_id: str, trip_key: str, start_ms: int | None = Query(default=None, ge=0), end_ms: int | None = Query(default=None, ge=0), offset: int = Query(default=0, ge=0, le=1000000), limit: int = Query(default=100, ge=1, le=100)):
+    if not WORKER.is_file():
+        raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
+    try:
+        return generate_scheduled_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         raise HTTPException(422, detail=str(error)) from error
 
 

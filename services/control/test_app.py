@@ -636,3 +636,92 @@ def test_schedule_30_days_bounded_page_and_counts(client):
     assert data["observed_trip_count"]==6000 and len(data["trips"])==3 and data["has_more"]
     assert data["microtrip_count"]==5400000 and data["trip_count"]==6000
     assert len(data["vehicles"])==100 and data["vehicles"][0]["parking_ms"]==2484000000
+
+def scheduled_obd_body():
+    body=schedule_example()
+    body["vehicles"]=body["vehicles"][:1]
+    body["vehicles"][0]["trips"]=[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:01:00+09:00","road_profile":"urban"},{"start":"2026-11-17T13:31:00+09:00","end":"2026-11-17T13:32:00+09:00","road_profile":"urban"}]
+    return {"schedule":body}
+
+
+def test_schedule_obd_continuity_and_pages(client):
+    body=scheduled_obd_body()
+    plan=client.post("/api/schedules/preview",json=body["schedule"]).json()
+    urls=["/api/schedules/obd/v000001/"+r["trip_key"] for r in plan["trips"]]
+    before=client.get("/api/runs").json()
+    first=client.post(urls[0],json=body)
+    assert first.status_code==200,first.text
+    a=first.json()
+    assert len(a["messages"])==30 and a["trip"]["ty"]==3
+    assert a["messages"][-1]["ts"]<a["trip"]["ts"]
+    second=client.post(urls[1],json=body)
+    assert second.status_code==200,second.text
+    b=second.json()
+    assert b["initial_state"]["lat"]==a["trip"]["pld"]["edlat"]
+    assert b["initial_state"]["lon"]==a["trip"]["pld"]["edlon"]
+    assert b["initial_state"]["odometer_m"]==a["trip"]["pld"]["tdis"]
+    assert 20<b["initial_state"]["coolant_c"]<90
+    assert b["messages"][0]["pld"]["fc"]==0 and b["messages"][0]["pld"]["cdit"]==0
+    assert a["trip"]["pld"]["tid"]!=b["trip"]["pld"]["tid"]
+    for m in a["messages"]+[a["trip"]]+b["messages"]+[b["trip"]]: control.validate_message(m)
+    page=client.post(urls[1]+"?offset=10&limit=5",json=body).json()
+    assert page["messages"]==b["messages"][10:15] and page["initial_state"]==b["initial_state"]
+    assert b==client.post(urls[1],json=body).json()
+    assert client.get("/api/runs").json()==before
+
+
+def test_schedule_obd_partial_and_synthetic_trip(client):
+    body=scheduled_obd_body()
+    key=client.post("/api/schedules/preview",json=body["schedule"]).json()["trips"][0]["trip_key"]
+    url="/api/schedules/obd/v000001/"+key
+    full=client.post(url,json=body).json()
+    body["schedule"]["measurement"].update(start="2026-11-17T13:00:10+09:00",end="2026-11-17T13:00:30+09:00")
+    partial=client.post(url,json=body).json()
+    assert partial["trip"] is None and partial["microtrip_count"]==11
+    assert partial["messages"]==full["messages"][5:16]
+    body["force_end_trip"]=True
+    response=client.post(url,json=body)
+    assert response.status_code==200,response.text
+    synthetic=response.json()
+    assert synthetic["synthetic_trip"] and synthetic["microtrip_count"]==10
+    assert synthetic["trip"]["ts"]==partial["messages"][-1]["ts"]
+    assert synthetic["trip"]["pld"]["fc"]<full["trip"]["pld"]["fc"]
+    assert synthetic["trip"]["pld"]["stt"]==full["trip"]["pld"]["stt"]
+    assert synthetic["messages"][-1]["ts"]<synthetic["trip"]["ts"]
+    control.validate_message(synthetic["trip"])
+    body["schedule"]["measurement"]["end"]="2026-11-17T13:01:00+09:00"
+    natural=client.post(url,json=body).json()
+    assert not natural["synthetic_trip"] and natural["trip"]["ts"]==full["trip"]["ts"]
+
+
+def test_schedule_obd_rejects_unknown_and_subsecond(client):
+    body=scheduled_obd_body()
+    assert client.post("/api/schedules/obd/v000001/missing",json=body).status_code==422
+    body["schedule"]["vehicles"][0]["trips"][0]["end"]="2026-11-17T13:01:00.001+09:00"
+    body["schedule"]["vehicles"][0]["trips"]=body["schedule"]["vehicles"][0]["trips"][:1]
+    plan=client.post("/api/schedules/preview",json=body["schedule"]).json()
+    url="/api/schedules/obd/v000001/"+plan["trips"][0]["trip_key"]
+    assert client.post(url,json=body).status_code==422
+
+def test_schedule_obd_non_grid_end_has_only_trip(client):
+    body=scheduled_obd_body()
+    body["schedule"]["vehicles"][0]["trips"]=body["schedule"]["vehicles"][0]["trips"][:1]
+    body["schedule"]["vehicles"][0]["trips"][0]["end"]="2026-11-17T13:01:01+09:00"
+    key=client.post("/api/schedules/preview",json=body["schedule"]).json()["trips"][0]["trip_key"]
+    data=client.post("/api/schedules/obd/v000001/"+key,json=body).json()
+    assert len(data["messages"])==31
+    assert data["trip"]["ts"]-data["messages"][-1]["ts"]==1000
+    assert data["messages"][-1]["pld"]["fc"]<=data["trip"]["pld"]["fc"]
+    control.validate_message(data["trip"])
+
+def test_schedule_obd_two_hours_is_bounded(client):
+    body=scheduled_obd_body()
+    body["schedule"]["vehicles"][0]["trips"]=body["schedule"]["vehicles"][0]["trips"][:1]
+    body["schedule"]["vehicles"][0]["trips"][0]["end"]="2026-11-17T15:00:00+09:00"
+    key=client.post("/api/schedules/preview",json=body["schedule"]).json()["trips"][0]["trip_key"]
+    response=client.post("/api/schedules/obd/v000001/"+key+"?limit=3",json=body)
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data["microtrip_count"]==3600 and len(data["messages"])==3 and data["has_more"]
+    assert 0<len(data["trace"])<=120 and data["trace"][0]["state"]
+    control.validate_message(data["trip"])

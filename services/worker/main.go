@@ -24,18 +24,19 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
-	Operation    string         `json:"operation"`
-	RunID        string         `json:"run_id"`
-	Config       Config         `json:"config"`
-	Message      map[string]any `json:"message"`
-	MQTT         *MQTTProfile   `json:"mqtt,omitempty"`
-	Generation   *Generation    `json:"generation,omitempty"`
-	TraceVehicle int            `json:"trace_vehicle,omitempty"`
-	TraceStartMS int64          `json:"trace_start_ms,omitempty"`
-	TraceUntilMS int64          `json:"trace_until_ms,omitempty"`
-	TraceOffset  int            `json:"trace_offset,omitempty"`
-	TraceLimit   int            `json:"trace_limit,omitempty"`
-	Realtime     bool           `json:"realtime,omitempty"`
+	Scheduled    *ScheduledInput `json:"scheduled,omitempty"`
+	Operation    string          `json:"operation"`
+	RunID        string          `json:"run_id"`
+	Config       Config          `json:"config"`
+	Message      map[string]any  `json:"message"`
+	MQTT         *MQTTProfile    `json:"mqtt,omitempty"`
+	Generation   *Generation     `json:"generation,omitempty"`
+	TraceVehicle int             `json:"trace_vehicle,omitempty"`
+	TraceStartMS int64           `json:"trace_start_ms,omitempty"`
+	TraceUntilMS int64           `json:"trace_until_ms,omitempty"`
+	TraceOffset  int             `json:"trace_offset,omitempty"`
+	TraceLimit   int             `json:"trace_limit,omitempty"`
+	Realtime     bool            `json:"realtime,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`
@@ -52,6 +53,7 @@ type Sample struct {
 	VehicleState   string         `json:"vehicle_state,omitempty"`
 }
 type Result struct {
+	Scheduled         *ScheduledOutput     `json:"scheduled,omitempty"`
 	Transmission      *TransmissionSummary `json:"transmission,omitempty"`
 	Performance       *PerformanceSummary  `json:"performance,omitempty"`
 	RunID             string               `json:"run_id"`
@@ -93,6 +95,9 @@ type Result struct {
 func process(req Request) (Result, error) { return processContext(context.Background(), req, nil) }
 
 func processContext(ctx context.Context, req Request, progress func(Result)) (Result, error) {
+	if req.Operation == "schedule_obd" {
+		return scheduledOBD(req)
+	}
 	var err error
 	req, err = normalize(req)
 	if err != nil {

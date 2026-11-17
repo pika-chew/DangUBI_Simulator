@@ -19,6 +19,12 @@ type engineSpec struct {
 var forwardRatios = []float64{3.8, 2.25, 1.55, 1.15, .86, .67}
 
 func vehicleEngineSpec(g *Generation, index int) engineSpec {
+	if g.Continuity != nil {
+		clone := *g
+		clone.Seed = g.Continuity.VehicleSeed
+		clone.Continuity = nil
+		return vehicleEngineSpec(&clone, index)
+	}
 	rng := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0x706f776572))
 	return engineSpec{Mass: 1350 * (.92 + .16*rng.Float64()), DragArea: .62 + .1*rng.Float64(), Rolling: .011 + .003*rng.Float64(), WheelRadius: .30 + .02*rng.Float64(), FinalDrive: 3.9, RatedKW: 120 * (.92 + .16*rng.Float64()), PeakTorque: 230 * (.92 + .16*rng.Float64()), IdleRPM: 750 + 100*rng.Float64(), IdleFuel: .65 + .15*rng.Float64(), RestVolts: 12.5 + .2*rng.Float64(), ChargeVolts: 14.1 + .2*rng.Float64()}
 }
@@ -145,6 +151,9 @@ func getEnginePlan(req Request, index int) *enginePlan {
 	temp := 20.0
 	if req.Generation.EngineStart == "warm" {
 		temp = 85
+	}
+	if req.Generation.Continuity != nil {
+		temp = req.Generation.Continuity.Coolant
 	}
 	s := setEnginePoint(p, spec, engineState{Coolant: temp, Gear: 1, LastShift: -2}, 0)
 	plan := &enginePlan{Spec: spec, States: []engineState{s}}

@@ -106,6 +106,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	}
 	lastEventEnd := -30.0
 	p := &scenarioPlan{Duration: float64(g.DurationSeconds), Eligible: g.cache.eligible[index], Style: []string{"신중", "보통", "적극"}[rng.Intn(3)], Weather: "건조"}
+	if g.Continuity != nil {
+		p.Style = []string{"신중", "보통", "적극"}[uint64(g.Continuity.VehicleSeed)%3]
+	}
 	if rng.Float64() < .15 {
 		p.Weather = "젖은 노면"
 	}
@@ -131,6 +134,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	}
 	t, v := 0.0, 0.0
 	totals := motionTotals{Heading: rng.Float64() * 2 * math.Pi}
+	if g.Continuity != nil {
+		totals.Heading = g.Continuity.Heading
+	}
 	accel := map[string]float64{"신중": .8, "보통": 1.2, "적극": 1.6}[p.Style]
 	decel := 1.5
 	preference := .8 + rng.Float64()*.18
