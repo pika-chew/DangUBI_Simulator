@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, Query
 from services.control.schedule import ScheduleRequest, plan as plan_schedule
 from services.control.schedule_obd import ScheduledOBDRequest, generate as generate_scheduled_obd
+from services.control.fleet import FleetRequest, FleetOBDRequest, preview as preview_fleet, obd as fleet_obd
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +39,24 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifespan)
+
+
+@app.post("/api/fleets/preview")
+def fleet_preview(body: FleetRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100), vehicle_id: str | None = Query(default=None)):
+    try:
+        return preview_fleet(body, offset, limit, vehicle_id)
+    except ValueError as error:
+        raise HTTPException(422, detail=str(error)) from error
+
+
+@app.post("/api/fleets/obd/{vehicle_id}/{trip_key}")
+def fleet_generate(body: FleetOBDRequest, vehicle_id: str, trip_key: str, start_ms: int | None = Query(default=None, ge=0), end_ms: int | None = Query(default=None, ge=0), offset: int = Query(default=0, ge=0, le=1000000), limit: int = Query(default=100, ge=1, le=100)):
+    if not WORKER.is_file():
+        raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
+    try:
+        return fleet_obd(body, vehicle_id, trip_key, WORKER, start_ms, end_ms, offset, limit)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        raise HTTPException(422, detail=str(error)) from error
 
 
 @app.post("/api/schedules/preview")

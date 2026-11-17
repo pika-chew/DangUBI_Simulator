@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Message, TracePoint } from "./main";
+import { FleetControls, defaultFleet, type FleetConfig } from "./FleetControls";
 
 type Road = "urban" | "highway" | "congested" | "mixed";
 type TripInput = { start: string; end: string; road_profile: Road };
@@ -7,8 +8,8 @@ type Slot = { start_time: string; duration_min_minutes: number; duration_max_min
 type Vehicle = { vehicle_id: string; trips?: TripInput[]; pattern?: { weekdays: number[]; day_off_probability: number; baseline_jitter_minutes: number; slots: Slot[] }; overrides?: Record<string, TripInput[]> };
 type Schedule = { schedule_version: "schedule-plan-1"; mode: "manual" | "patterned"; seed: number; interval_ms: number; measurement: { start: string; end: string; timezone: "Asia/Seoul" }; vehicles: Vehicle[] };
 type Trip = { vehicle_id: string; trip_key: string; start_ms: number; end_ms: number; observed_start_ms: number; observed_end_ms: number; road_profile: Road; started_before_window: boolean; continues_after_window: boolean };
-type Plan = { measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number }[] };
-type OBD = { messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
+type Plan = { anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[] };
+type OBD = { vehicle_assignment?: {pattern: string; anomaly_eligible: boolean}; messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
 type Loaded = { data: OBD; start: number; end: number; offset: number };
 const roads: Record<Road, string> = { urban: "도심", highway: "고속도로", congested: "정체", mixed: "혼합" };
 const kst = (ms: number) => new Date(ms + 9 * 3600000).toISOString().slice(0, 23);
@@ -39,6 +40,9 @@ function RoadSelect({ value, onChange }: { value: Road; onChange: (road: Road) =
 }
 
 export function SchedulePanel({ renderMessages }: { renderMessages: (messages: Message[], vehicle: string, offset?: number) => ReactNode }) {
+  const [setup, setSetup] = useState<"fleet" | "individual">("fleet");
+  const [fleet, setFleet] = useState<FleetConfig>(defaultFleet);
+  const [frozenFleet, setFrozenFleet] = useState<FleetConfig | null>(null);
   const [draft, setDraft] = useState<Schedule>(example);
   const [editor, setEditor] = useState(0);
   const [raw, setRaw] = useState("");
@@ -66,20 +70,22 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   }
   function fail(e: unknown, c: AbortController) { if (!c.signal.aborted) setError(e instanceof Error ? e.message : "처리 실패"); }
   function done(c: AbortController) { if (request.current === c) setBusy(""); }
-  function edit(next: Schedule) {
+  function resetResults() {
     request.current?.abort(); setBusy(""); setError("");
-    setDraft(next); setRaw(""); setPlan(null); setFrozen(null); setTrips([]); setLoaded(null); setSummary(null); setVehicle(""); setTripKey("");
+    setRaw(""); setPlan(null); setFrozen(null); setFrozenFleet(null); setTrips([]); setLoaded(null); setSummary(null); setVehicle(""); setTripKey("");
   }
+  function edit(next: Schedule) { resetResults(); setDraft(next); }
+  function editFleet(next: FleetConfig) { resetResults(); setFleet(next); }
   function editVehicle(next: Vehicle) { edit({ ...draft, vehicles: draft.vehicles.map((v, i) => i === editor ? next : v) }); }
   function clearOBD() { setLoaded(null); setSummary(null); setError(""); }
   function chooseTrip(t?: Trip) {
     clearOBD(); setForce(false); setTripKey(t?.trip_key || "");
     setRangeStart(t ? kst(t.observed_start_ms) : ""); setRangeEnd(t ? kst(t.observed_end_ms) : "");
   }
-  async function vehicleTrips(schedule: Schedule, id: string, c: AbortController) {
+  async function vehicleTrips(schedule: Schedule | FleetConfig, id: string, c: AbortController, fleetSource = false) {
     const all: Trip[] = [];
     for (let offset = 0; ; offset += 100) {
-      const page = await post<Plan>(`/api/schedules/preview?vehicle_id=${id}&offset=${offset}`, schedule, c.signal);
+      const page = await post<Plan>(`/api/${fleetSource ? "fleets" : "schedules"}/preview?vehicle_id=${id}&offset=${offset}`, schedule, c.signal);
       all.push(...page.trips);
       if (!page.has_more) break;
     }
@@ -87,30 +93,34 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   }
   async function preview() {
     const c = begin("차량별 운행을 계획하고 있습니다.");
-    setPlan(null); setFrozen(null); setTrips([]); clearOBD();
+    setPlan(null); setFrozen(null); setFrozenFleet(null); setTrips([]); clearOBD();
     try {
-      const p = await post<Plan>("/api/schedules/preview", draft, c.signal);
+      const fleetSource = setup === "fleet";
+      const input = fleetSource ? fleet : draft;
+      const p = await post<Plan>(`/api/${fleetSource ? "fleets" : "schedules"}/preview`, input, c.signal);
       if (c.signal.aborted) return;
-      setPlan(p); setFrozen(draft); setForce(false);
+      setPlan(p); if (fleetSource) setFrozenFleet(fleet); else setFrozen(draft); setForce(false);
       const id = p.vehicles[0].vehicle_id;
-      setVehicle(id); await vehicleTrips(draft, id, c);
+      setVehicle(id); await vehicleTrips(input, id, c, fleetSource);
     } catch (e) { fail(e, c); } finally { done(c); }
   }
   async function selectVehicle(id: string) {
-    if (!frozen) return;
+    const source = frozenFleet ?? frozen;
+    if (!source) return;
     const c = begin("차량의 운행을 불러오고 있습니다.");
     setVehicle(id); setTrips([]); chooseTrip();
-    try { await vehicleTrips(frozen, id, c); } catch (e) { fail(e, c); } finally { done(c); }
+    try { await vehicleTrips(source, id, c, !!frozenFleet); } catch (e) { fail(e, c); } finally { done(c); }
   }
   async function query(a?: number, b?: number, offset = 0, whole = false, forceValue = force) {
-    if (!frozen || !trip) return;
+    const source = frozenFleet ?? frozen;
+    if (!source || !trip) return;
     const start = whole ? trip.observed_start_ms : a ?? Date.parse(iso(rangeStart));
     const end = whole ? trip.observed_end_ms : b ?? Date.parse(iso(rangeEnd));
     if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < trip.observed_start_ms || end > trip.observed_end_ms) { setError("조회 구간은 선택 운행의 관측 범위 안에서 시작 ≤ 종료로 지정하세요."); return; }
     const c = begin("선택 운행의 OBD를 생성하고 있습니다.");
     setLoaded(null);
     try {
-      const data = await post<OBD>(`/api/schedules/obd/${vehicle}/${trip.trip_key}?start_ms=${start}&end_ms=${end}&offset=${offset}`, { schedule: frozen, force_end_trip: forceValue && end === Date.parse(frozen.measurement.end) }, c.signal);
+      const data = await post<OBD>(`/api/${frozenFleet ? "fleets" : "schedules"}/obd/${vehicle}/${trip.trip_key}?start_ms=${start}&end_ms=${end}&offset=${offset}`, { ...(frozenFleet ? {fleet: frozenFleet} : {schedule: frozen}), force_end_trip: forceValue && end === Date.parse(source.measurement.end) }, c.signal);
       if (c.signal.aborted) return;
       setLoaded({ data, start, end, offset }); setRangeStart(kst(start)); setRangeEnd(kst(end));
       if (whole) setSummary(data);
@@ -137,7 +147,10 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   return <section className="schedule-panel" aria-label="일정 기반 생성">
     <div className="banner"><b>일정 기반 생성 · 로컬 조회</b><span>측정 기간 안에서 차량마다 다른 운행을 생성합니다. 이 화면은 MQTT 전송과 실행 기록 저장을 하지 않습니다.</span></div>
     <section className="card">
-      <h2>01 측정 기간과 차량별 일정</h2>
+      <h2>01 전체 조건과 운행 설정</h2>
+      <label>설정 범위<select disabled={!!busy} value={setup} onChange={e => { resetResults(); setSetup(e.target.value as "fleet" | "individual"); }}><option value="fleet">전체 조건 자동 배정 · 기본</option><option value="individual">개별 차량 설정 · 점검용</option></select></label>
+      {setup === "fleet" && <FleetControls value={fleet} onChange={editFleet} disabled={!!busy} />}
+      <div hidden={setup !== "individual"}>
       <p className="note">모든 시각은 한국 시간(KST)입니다. 설정을 수정하면 이전 조회를 비우고 새 일정으로 다시 계획합니다.</p>
       <fieldset disabled={!!busy} className="schedule-fieldset">
         <div className="fields">
@@ -187,14 +200,16 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
           <textarea aria-label="일정 설정 JSON" value={raw} onChange={e => setRaw(e.target.value)} spellCheck={false} />
           <button onClick={() => void applyJSON()}>입력 JSON 적용</button>
         </details>
-        <div className="schedule-actions"><button className="primary" onClick={() => void preview()}>일정 미리보기</button><button onClick={() => { edit(example()); setEditor(0); }}>직접 지정 예시로 초기화</button></div>
       </fieldset>
+      </div>
+      <div className="schedule-actions"><button className="primary" disabled={!!busy} onClick={() => void preview()}>일정 미리보기</button><button disabled={!!busy} onClick={() => { if (setup === "fleet") editFleet(defaultFleet()); else { edit(example()); setEditor(0); } }}>설정 예시로 초기화</button></div>
     </section>
     {busy && <p role="status" className="schedule-status">{busy}</p>}
     {error && <p role="alert" className="error">{error}</p>}
     {plan && <section className="card">
       <h2>02 차량과 운행 선택</h2>
       <p>전체 {plan.vehicles.length}대 · 관측 운행 {plan.observed_trip_count.toLocaleString()}회 · 예상 Microtrip {plan.microtrip_count.toLocaleString()}건 · 정상 종료 Trip {plan.trip_count.toLocaleString()}건</p>
+      {plan.anomaly_target_count !== undefined && <p>이상 이벤트 대상 {plan.anomaly_target_count}대 · 실제 발생 차량 수와 다를 수 있습니다.</p>}
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
       <div className="fields">
         <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} · 운행 {v.observed_trip_count}회</option>)}</select></label>
@@ -206,6 +221,7 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
       </div>
       {!trips.length && !busy && <p className="schedule-empty">이 차량은 측정 기간에 관측 운행이 없습니다. 주차 중 Microtrip이나 종료 Trip을 만들지 않습니다.</p>}
       {trip && <>
+        {plan.vehicles.find(v => v.vehicle_id === vehicle)?.pattern && <p className="note">배정 패턴: {({commute:"출퇴근형",daytime:"주간 운행형",flexible:"비정기형"} as Record<string,string>)[plan.vehicles.find(v => v.vehicle_id === vehicle)!.pattern!]} · 이상 이벤트 {plan.vehicles.find(v => v.vehicle_id === vehicle)?.anomaly_eligible ? "대상" : "비대상"} 차량</p>}
         <p>{roads[trip.road_profile]} · 실제 운행 {clock(trip.start_ms)} → {clock(trip.end_ms)}</p>
         <p className="note">관측 범위 {clock(trip.observed_start_ms)} → {clock(trip.observed_end_ms)}{trip.started_before_window && " · 측정 시작 전 출발"}{trip.continues_after_window && " · 측정 종료 후에도 운행 중"}</p>
         <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>

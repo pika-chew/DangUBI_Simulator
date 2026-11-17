@@ -740,3 +740,88 @@ def test_schedule_vehicle_filter_keeps_global_counts_and_pages(client):
     inactive=client.post("/api/schedules/preview?vehicle_id=v000002",json=body).json()
     assert inactive["trips"]==[] and inactive["matched_trip_count"]==0 and not inactive["has_more"]
     assert client.post("/api/schedules/preview?vehicle_id=v000003",json=body).status_code==422
+
+
+def fleet_example():
+    return {"vehicle_count":20,"measurement":{"start":"2026-11-17T00:00:00+09:00","end":"2026-11-20T00:00:00+09:00"},"seed":42,"daily_driving_minutes":60,"day_off_probability":0.0,"anomaly_vehicle_percent":25.0}
+
+
+def test_fleet_allocation_and_reproducible_pages(client):
+    body=fleet_example()
+    before=client.get("/api/runs").json()
+    full=client.post("/api/fleets/preview",json=body)
+    assert full.status_code==200,full.text
+    a=full.json()
+    assert len(a["vehicles"])==20 and a["anomaly_target_count"]==5
+    assert sum(v["pattern"]=="commute" for v in a["vehicles"])==12
+    assert sum(v["pattern"]=="daytime" for v in a["vehicles"])==4
+    assert sum(v["pattern"]=="flexible" for v in a["vehicles"])==4
+    assert len({t["start_ms"] for t in a["trips"]})>3
+    assert a==client.post("/api/fleets/preview",json=body).json()
+    page=client.post("/api/fleets/preview?offset=2&limit=3",json=body).json()
+    assert page["trips"]==a["trips"][2:5] and page["vehicles"]==a["vehicles"]
+    selected=client.post("/api/fleets/preview?vehicle_id=v000001",json=body).json()
+    assert selected["trips"]==[t for t in a["trips"] if t["vehicle_id"]=="v000001"]
+    changed=dict(body,anomaly_vehicle_percent=0.0)
+    b=client.post("/api/fleets/preview",json=changed).json()
+    assert b["trips"]==a["trips"] and b["anomaly_target_count"]==0
+    assert client.get("/api/runs").json()==before
+
+
+def test_fleet_parking_duration_and_calendar():
+    from services.control.fleet import FleetRequest, expand
+    from services.control.schedule import instant
+    body=fleet_example()
+    body.update(vehicle_count=8,daily_driving_minutes=240,vehicle_variation_percent=50,daily_variation_percent=50,weekend_activity_probability=1.0)
+    req=FleetRequest(**body)
+    schedule, assigned=expand(req)
+    for vehicle in schedule.vehicles:
+        trips=sorted(vehicle.trips,key=lambda t: t.start)
+        for previous,current in zip(trips,trips[1:]):
+            assert instant(current.start)-instant(previous.end)>=1800000
+        days={}
+        for t in trips:
+            assert t.start[:10]==t.end[:10] or t.end[11:19]=="00:00:00"
+            days[t.start[:10]]=days.get(t.start[:10],0)+(instant(t.end)-instant(t.start))/60000
+        target=assigned[vehicle.vehicle_id]["daily_target_minutes"]
+        assert all(target*.5-1<=n<=target*1.5+1 for n in days.values())
+    # 같은 날짜의 일정은 관측창 확장만으로 달라지지 않는다(물리 초기 문맥 제한은 별도).
+    other=FleetRequest(**dict(body,measurement={"start":"2026-11-16T00:00:00+09:00","end":"2026-11-22T00:00:00+09:00"}))
+    wider,_=expand(other)
+    for a,b in zip(schedule.vehicles,wider.vehicles):
+        original=[t for t in a.trips if t.start.startswith("2026-11-18")]
+        assert original==[t for t in b.trips if t.start.startswith("2026-11-18")]
+
+
+def test_fleet_probability_extremes_limits_and_weekends(client):
+    body=fleet_example()
+    off=client.post("/api/fleets/preview",json=dict(body,day_off_probability=1.0)).json()
+    assert off["planned_messages"]==0 and off["observed_trip_count"]==0
+    weekend=dict(body,measurement={"start":"2026-11-21T00:00:00+09:00","end":"2026-11-23T00:00:00+09:00"},weekend_activity_probability=0.0)
+    assert client.post("/api/fleets/preview",json=weekend).json()["observed_trip_count"]==0
+    for invalid in [dict(body,vehicle_count=101),dict(body,pattern_mix={"commute":100,"daytime":20,"flexible":0}),dict(body,road_mix={"urban":1}),dict(body,daily_driving_minutes=480,vehicle_variation_percent=50,daily_variation_percent=50)]:
+        assert client.post("/api/fleets/preview",json=invalid).status_code==422
+    large=dict(body,vehicle_count=100,measurement={"start":"2026-11-01T00:00:00+09:00","end":"2026-12-01T00:00:00+09:00"})
+    response=client.post("/api/fleets/preview?limit=3",json=large)
+    assert response.status_code==200,response.text
+    assert len(response.json()["trips"])==3 and response.json()["has_more"]
+
+
+def test_fleet_obd_uses_fixed_anomaly_assignment(client):
+    body=dict(fleet_example(),vehicle_count=1,pattern_mix={"commute":100,"daytime":0,"flexible":0},anomaly_vehicle_percent=100.0,anomaly_events_per_hour=60.0,road_mix={"urban":100,"highway":0,"congested":0,"mixed":0})
+    plan=client.post("/api/fleets/preview",json=body).json()
+    trip=plan["trips"][0]
+    url="/api/fleets/obd/v000001/"+trip["trip_key"]
+    response=client.post(url+"?limit=3",json={"fleet":body})
+    assert response.status_code==200,response.text
+    a=response.json()
+    assert a["vehicle_assignment"]["anomaly_eligible"]
+    assert all(p["context"]["eligible"] for p in a["trace"])
+    assert a["events_until_query_end"]>0
+    for message in a["messages"]+[a["trip"]]: control.validate_message(message)
+    assert a==client.post(url+"?limit=3",json={"fleet":body}).json()
+    body["anomaly_vehicle_percent"]=0.0
+    b=client.post(url+"?limit=3",json={"fleet":body}).json()
+    assert not b["vehicle_assignment"]["anomaly_eligible"] and b["events_until_query_end"]==0
+    assert all(not p["context"]["eligible"] and not p["context"].get("event") for p in b["trace"])
+    assert client.post("/api/fleets/obd/v999999/missing",json={"fleet":body}).status_code==422

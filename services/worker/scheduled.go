@@ -11,34 +11,38 @@ type EngineContinuity struct {
 	Heading     float64 `json:"heading_rad"`
 }
 type ScheduledInput struct {
-	StartMS    int64            `json:"start_ms"`
-	EndMS      int64            `json:"end_ms"`
-	FromMS     int64            `json:"from_ms"`
-	UntilMS    int64            `json:"until_ms"`
-	IntervalMS int64            `json:"interval_ms"`
-	Offset     int              `json:"offset"`
-	Limit      int              `json:"limit"`
-	TID        int64            `json:"tid"`
-	Seed       int64            `json:"seed"`
-	Profile    string           `json:"profile"`
-	Lat        float64          `json:"lat"`
-	Lon        float64          `json:"lon"`
-	Odometer   float64          `json:"odometer_m"`
-	Continuity EngineContinuity `json:"continuity"`
-	ForceEnd   bool             `json:"force_end"`
+	AnomalyEligible      bool             `json:"anomaly_eligible"`
+	AnomalyEventsPerHour float64          `json:"anomaly_events_per_hour"`
+	AnomalyIntensity     string           `json:"anomaly_intensity"`
+	StartMS              int64            `json:"start_ms"`
+	EndMS                int64            `json:"end_ms"`
+	FromMS               int64            `json:"from_ms"`
+	UntilMS              int64            `json:"until_ms"`
+	IntervalMS           int64            `json:"interval_ms"`
+	Offset               int              `json:"offset"`
+	Limit                int              `json:"limit"`
+	TID                  int64            `json:"tid"`
+	Seed                 int64            `json:"seed"`
+	Profile              string           `json:"profile"`
+	Lat                  float64          `json:"lat"`
+	Lon                  float64          `json:"lon"`
+	Odometer             float64          `json:"odometer_m"`
+	Continuity           EngineContinuity `json:"continuity"`
+	ForceEnd             bool             `json:"force_end"`
 }
 type ScheduledOutput struct {
-	Model         string           `json:"model"`
-	MicroCount    int64            `json:"microtrip_count"`
-	Messages      []map[string]any `json:"messages"`
-	Trace         []TracePoint     `json:"trace"`
-	Trip          map[string]any   `json:"trip,omitempty"`
-	Synthetic     bool             `json:"synthetic_trip"`
-	FinalLat      float64          `json:"final_lat"`
-	FinalLon      float64          `json:"final_lon"`
-	FinalOdometer float64          `json:"final_odometer_m"`
-	FinalCoolant  float64          `json:"final_coolant_c"`
-	FinalHeading  float64          `json:"final_heading_rad"`
+	EventsUntilQueryEnd int              `json:"events_until_query_end"`
+	Model               string           `json:"model"`
+	MicroCount          int64            `json:"microtrip_count"`
+	Messages            []map[string]any `json:"messages"`
+	Trace               []TracePoint     `json:"trace"`
+	Trip                map[string]any   `json:"trip,omitempty"`
+	Synthetic           bool             `json:"synthetic_trip"`
+	FinalLat            float64          `json:"final_lat"`
+	FinalLon            float64          `json:"final_lon"`
+	FinalOdometer       float64          `json:"final_odometer_m"`
+	FinalCoolant        float64          `json:"final_coolant_c"`
+	FinalHeading        float64          `json:"final_heading_rad"`
 }
 
 func scheduledOBD(input Request) (Result, error) {
@@ -54,8 +58,16 @@ func scheduledOBD(input Request) (Result, error) {
 	if s.Profile != "urban" && s.Profile != "highway" && s.Profile != "congested" && s.Profile != "mixed" {
 		return Result{}, errors.New("도로 프로필을 확인하세요.")
 	}
+	if !finite(s.AnomalyEventsPerHour) || s.AnomalyEventsPerHour < 0 || s.AnomalyEventsPerHour > 60 || (s.AnomalyIntensity != "" && s.AnomalyIntensity != "low" && s.AnomalyIntensity != "medium" && s.AnomalyIntensity != "high") {
+		return Result{}, errors.New("이상 이벤트 빈도·강도를 확인하세요.")
+	}
 	n := int((span + s.IntervalMS - 1) / s.IntervalMS)
 	r := Request{Config: Config{VehicleCount: 1, ClientCount: 1, MessagesPerVehicle: n + 1, IntervalMS: s.IntervalMS}, Generation: &Generation{ModelVersion: eventVersion, Seed: s.Seed, Profile: s.Profile, StartTimeMS: s.StartMS, DurationSeconds: int(span / 1000), StartLat: s.Lat, StartLon: s.Lon, InitialOdometerM: s.Odometer, Weather: "dry", Continuity: &s.Continuity}}
+	if s.AnomalyEligible {
+		r.Generation.AnomalyVehiclePercent = 100
+	}
+	r.Generation.AnomalyEventsPerHour = s.AnomalyEventsPerHour
+	r.Generation.AnomalyIntensity = s.AnomalyIntensity
 	message := func(seq int) map[string]any {
 		m, _ := automaticMessage(r, 0, seq)
 		m["pld"].(map[string]any)["tid"] = float64(s.TID)
@@ -72,6 +84,7 @@ func scheduledOBD(input Request) (Result, error) {
 		}
 	}
 	out := &ScheduledOutput{Model: "schedule-obd-1/event-6", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
+	_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
 	for seq := first + int64(s.Offset); seq <= last && len(out.Messages) < s.Limit; seq++ {
 		out.Messages = append(out.Messages, message(int(seq)))
 	}
