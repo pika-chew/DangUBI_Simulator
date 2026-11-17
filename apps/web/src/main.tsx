@@ -177,7 +177,7 @@ function App() {
   const [mode, setMode] = useState<"manual" | "automatic">("manual");
   const [generation, setGeneration] = useState<Generation>({
     profile: "mixed",
-    model_version: "combustion-scenario-2",
+    model_version: "combustion-route-3",
     anomaly_vehicle_percent: 5,
     anomaly_events_per_hour: 2,
     seed: 42,
@@ -717,7 +717,8 @@ function App() {
                       <em>02</em> 자동 주행 설정
                     </h2>
                     <p className="note">
-                      상황 기반 v2는 도로·가상 혼잡·운전자 성향에 따라 짧은
+                      경로 기반 v3는 도로 연결 순서와 구간 유지를 반영하며,
+                      가상 혼잡·운전자 성향에 따라 짧은
                       가감속·정속·시동 유지 정차를 반복합니다. 커브·유턴과
                       경사·노면도 근사합니다. 실제 도로망·차량 간 상호작용·실차
                       보정은 포함하지 않습니다.
@@ -741,8 +742,7 @@ function App() {
                           <option
                             value="mixed"
                             disabled={
-                              generation.model_version !==
-                              "combustion-scenario-2"
+                              generation.model_version === "combustion-demo-1"
                             }
                           >
                             도심·고속 혼합
@@ -773,6 +773,9 @@ function App() {
                               })
                             }
                           >
+                            <option value="combustion-route-3">
+                              경로 기반 모델 v3 · 근사
+                            </option>
                             <option value="combustion-scenario-2">
                               상황 기반 모델 v2 · 근사
                             </option>
@@ -789,8 +792,7 @@ function App() {
                             max={100}
                             step="any"
                             disabled={
-                              generation.model_version !==
-                              "combustion-scenario-2"
+                              generation.model_version === "combustion-demo-1"
                             }
                             value={generation.anomaly_vehicle_percent || 0}
                             onChange={(e) =>
@@ -809,8 +811,7 @@ function App() {
                             max={60}
                             step="any"
                             disabled={
-                              generation.model_version !==
-                              "combustion-scenario-2"
+                              generation.model_version === "combustion-demo-1"
                             }
                             value={generation.anomaly_events_per_hour || 0}
                             onChange={(e) =>
@@ -1573,7 +1574,7 @@ const explanations: Record<string, string> = {
   "생성 주기 (밀리초)":
     "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
   "운행 프로필":
-    "상황 기반 v2는 도로 구성과 정차·혼잡의 비중을 바꾸며 차량별 seed·운전자 성향·노면 편차를 적용합니다. 실제 도로망·실차 보정은 없습니다. v1은 이전 고정 비율 모델입니다.",
+    "v3는 합성 경로의 연결 순서와 구간 지속시간을 먼저 정하고 교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v2/v1 기록은 기존 모델로 재생성합니다.",
   "생성 확인":
     "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
   미생성:

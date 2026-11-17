@@ -59,7 +59,7 @@ class ConnectionConfig(BaseModel):
 class Generation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
     profile: Literal["urban", "highway", "congested", "mixed"]
-    model_version: Literal["combustion-demo-1", "combustion-scenario-2"] = "combustion-demo-1"
+    model_version: Literal["combustion-demo-1", "combustion-scenario-2", "combustion-route-3"] = "combustion-demo-1"
     anomaly_vehicle_percent: float = Field(default=0, ge=0, le=100)
     anomaly_events_per_hour: float = Field(default=0, ge=0, le=60)
     seed: int = Field(ge=-2147483648, le=2147483647)

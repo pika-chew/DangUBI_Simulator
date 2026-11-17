@@ -421,3 +421,18 @@ def test_trace_does_not_show_future_for_partial_job(client):
     assert client.get("/api/runs/"+run_id+"/trace/2?end_seconds=60").status_code==422
     client.post("/api/jobs/"+run_id+"/stop")
     wait_job(client,run_id,lambda r:r["job_state"]=="stopped")
+
+
+def test_route_model_and_replay(client):
+    body=automatic_request()
+    body["generation"].update(model_version="combustion-route-3",profile="highway",duration_seconds=3600)
+    body["config"]["interval_ms"]=4000
+    response=client.post("/api/runs",json=body)
+    assert response.status_code==201,response.text
+    run=response.json()
+    assert run["result"]["model_version"]=="combustion-route-3"
+    trace=client.get("/api/runs/"+run["id"]+"/trace/2?start_seconds=900&end_seconds=1000")
+    assert trace.status_code==200,trace.text
+    assert all(p["context"]["road"]=="고속 도로" for p in trace.json()["trace"])
+    for sample in run["result"]["samples"]+run["result"]["trip_summaries"]:
+        control.validate_message(sample["message"])

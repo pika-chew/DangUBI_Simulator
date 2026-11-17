@@ -60,6 +60,9 @@ func modelVersion(g *Generation) string {
 }
 
 func getScenario(req Request, index int) *scenarioPlan {
+	if req.Generation.ModelVersion == routeVersion {
+		return getRouteScenario(req, index)
+	}
 	g := req.Generation
 	if g.cache == nil {
 		g.cache = &scenarioCache{plans: map[int]*scenarioPlan{}}

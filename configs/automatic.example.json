@@ -15,7 +15,7 @@
     "start_lat": 37.5,
     "start_lon": 127.0,
     "initial_odometer_m": 500000.0,
-    "model_version": "combustion-scenario-2",
+    "model_version": "combustion-route-3",
     "anomaly_vehicle_percent": 5,
     "anomaly_events_per_hour": 2
   },

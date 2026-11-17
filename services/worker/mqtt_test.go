@@ -164,11 +164,17 @@ func TestMQTTTLSModes(t *testing.T) {
 }
 
 func TestAutomaticMQTTIncludesFinalTrip(t *testing.T) {
+	for _, version := range []string{scenarioVersion, routeVersion} {
+		t.Run(version, func(t *testing.T) { testAutomaticMQTTIncludesFinalTrip(t, version) })
+	}
+}
+
+func testAutomaticMQTTIncludesFinalTrip(t *testing.T, version string) {
 	broker, profile := localBroker(t, false, false)
 	profile.MaxMessages = 100
 	profile.MaxDurationSeconds = 15
 	req := automaticRequest()
-	req.Generation.ModelVersion = scenarioVersion
+	req.Generation.ModelVersion = version
 	req.Operation = "mqtt"
 	req.MQTT = profile
 	req.Config.VehicleCount = 2
