@@ -968,3 +968,53 @@ def test_checkpoint_clear_during_request_and_synthetic_state(client,monkeypatch)
         end_ms,state=con.execute("SELECT end_ms,state FROM checkpoints").fetchone()
     assert end_ms>result["trip"]["ts"]
     assert json.loads(state)["odometer_m"]>result["trip"]["pld"]["tdis"]
+
+
+def test_workspace_plan_and_existing_run_share_history(client):
+    old=client.post("/api/runs",json=request()).json()
+    settings=dict(fleet_example(),vehicle_count=1)
+    response=client.post("/api/workspace/plans",json={"title":"도심 출퇴근 확인","fleet":settings})
+    assert response.status_code==201,response.text
+    plan=response.json()
+    assert plan["kind"]=="plan" and plan["state"]=="planned" and plan["transport"]=="local"
+    assert "trips" not in plan["result"] and "messages" not in plan["result"]
+    assert plan["request"]["fleet"]["seed"]==42
+    records=client.get("/api/workspace/records").json()["records"]
+    assert {r["key"] for r in records}=={plan["key"],"run:"+old["id"]}
+    assert all("request" not in r and "result" not in r for r in records)
+    assert client.get("/api/workspace/records/"+plan["key"]).json()==plan
+    legacy=client.get("/api/workspace/records/run:"+old["id"]).json()
+    assert legacy["request"]==old["request"] and legacy["result"]==old["result"]
+    copied=client.post("/api/workspace/plans",json={"title":"새 조건","fleet":dict(settings,seed=123)}).json()
+    assert copied["key"]!=plan["key"]
+    assert client.get("/api/workspace/records/"+plan["key"]).json()["request"]["fleet"]["seed"]==42
+    assert client.get("/api/runs/"+old["id"]).json()==old
+
+
+def test_workspace_record_delete_is_confirmed_atomic_and_protects_active(client,monkeypatch):
+    run=client.post("/api/runs",json=request()).json()
+    plan=client.post("/api/workspace/plans",json={"title":"시험 일정","schedule":scheduled_obd_body()["schedule"]}).json()
+    keys=[plan["key"],"run:"+run["id"]]
+    assert client.post("/api/workspace/delete",json={"keys":keys}).status_code==409
+    assert client.post("/api/workspace/delete",json={"keys":keys+["plan:missing"],"confirm":True}).status_code==404
+    assert len(client.get("/api/workspace/records").json()["records"])==2
+    monkeypatch.setattr(control.JOBS,"active_id",lambda:run["id"])
+    assert client.post("/api/workspace/delete",json={"keys":keys,"confirm":True}).status_code==409
+    assert client.get("/api/workspace/records/"+plan["key"]).status_code==200
+    monkeypatch.setattr(control.JOBS,"active_id",lambda:None)
+    assert client.post("/api/workspace/delete",json={"keys":keys,"confirm":True}).json()["deleted_count"]==2
+    assert client.get("/api/workspace/records").json()["records"]==[]
+    assert client.get("/api/runs/"+run["id"]).status_code==404
+
+
+def test_workspace_plan_rejects_ambiguous_sources_and_can_replay(client):
+    assert client.post("/api/workspace/plans",json={"title":" "}).status_code==422
+    assert client.post("/api/workspace/plans",json={"fleet":fleet_example(),"schedule":scheduled_obd_body()["schedule"]}).status_code==422
+    assert client.get("/api/workspace/records").json()["records"]==[]
+    body=scheduled_obd_body()["schedule"]
+    saved=client.post("/api/workspace/plans",json={"title":"다회 운행","schedule":body}).json()
+    reloaded=client.get("/api/workspace/records/"+saved["key"]).json()
+    plan=client.post("/api/schedules/preview",json=reloaded["request"]["schedule"]).json()
+    key=plan["trips"][0]["trip_key"]
+    first=client.post("/api/schedules/obd/v000001/"+key,json={"schedule":reloaded["request"]["schedule"]}).json()
+    assert first["microtrip_count"]==30 and first["trip"]["ty"]==3

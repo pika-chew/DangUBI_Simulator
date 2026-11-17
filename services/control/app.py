@@ -257,6 +257,7 @@ def database():
     DB.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB)
     connection.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created TEXT, request TEXT, result TEXT)")
+    connection.execute("CREATE TABLE IF NOT EXISTS workspace_plans (id TEXT PRIMARY KEY, created TEXT, request TEXT, summary TEXT)")
     try:
         with connection:
             yield connection
@@ -426,6 +427,101 @@ def delete_runs(body: DeleteRuns):
 def frozen_run(run_id: str):
     get_run(run_id)
     raise HTTPException(409, detail="실행 설정과 배정표는 고정됩니다. 다른 조건은 새 실행으로 비교하세요.")
+
+
+class WorkspacePlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    title: str = Field(default="차량 시뮬레이션", min_length=1, max_length=80)
+    fleet: FleetRequest | None = None
+    schedule: ScheduleRequest | None = None
+
+    @model_validator(mode="after")
+    def source(self):
+        if (self.fleet is None) == (self.schedule is None) or not self.title.strip():
+            raise ValueError("전체 조건 또는 개별 일정 하나와 작업 이름을 지정하세요.")
+        return self
+
+
+def workspace_record(kind, row, detail=False):
+    record_id, created, raw_request, raw_result = row
+    request, result = json.loads(raw_request), json.loads(raw_result)
+    planned = kind == "plan"
+    item = {"key":kind+":"+record_id,"id":record_id,"kind":kind,"created_at":created,
+            "title":request["title"] if planned else ("MQTT 전송" if request.get("transport")=="mqtt" else "로컬 생성")+" · "+str(request["config"]["vehicle_count"])+"대",
+            "state":"planned" if planned else result.get("job_state",result.get("state","unknown")),
+            "vehicle_count":result["vehicle_count"] if planned else request["config"]["vehicle_count"],
+            "planned_messages":result.get("planned_messages",0),
+            "transport":"local" if planned else request.get("transport","dry_run")}
+    if detail:
+        item.update(request=request,result=result)
+    return item
+
+
+@app.get("/api/workspace/records")
+def workspace_records():
+    with database() as db:
+        plans=db.execute("SELECT id,created,request,summary FROM workspace_plans ORDER BY created DESC LIMIT 50").fetchall()
+        runs=db.execute("SELECT id,created,request,result FROM runs ORDER BY created DESC LIMIT 50").fetchall()
+    records=[workspace_record("plan",r) for r in plans]+[workspace_record("run",r) for r in runs]
+    return {"records":sorted(records,key=lambda r:r["created_at"],reverse=True)[:50],"limit":50}
+
+
+@app.get("/api/workspace/records/{key}")
+def workspace_get_record(key: str):
+    kind, _, record_id=key.partition(":")
+    if kind not in ("plan","run") or not record_id:
+        raise HTTPException(404,detail="작업 기록이 없습니다.")
+    with database() as db:
+        query="SELECT id,created,request,summary FROM workspace_plans WHERE id=?" if kind=="plan" else "SELECT id,created,request,result FROM runs WHERE id=?"
+        row=db.execute(query,(record_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404,detail="작업 기록이 없습니다.")
+    return workspace_record(kind,row,True)
+
+
+@app.post("/api/workspace/plans",status_code=201)
+def workspace_create_plan(body: WorkspacePlanRequest):
+    payload=body.model_dump(exclude_none=True)
+    if len(json.dumps(payload).encode())>2097152:
+        raise HTTPException(422,detail="일정 설정은2MiB 이하여야 합니다.")
+    try:
+        summary=preview_fleet(body.fleet) if body.fleet is not None else plan_schedule(body.schedule)
+    except ValueError as error:
+        raise HTTPException(422,detail=str(error)) from error
+    summary={k:v for k,v in summary.items() if k not in ("trips","offset","limit","has_more")}
+    record_id,created=uuid4().hex,datetime.now(timezone.utc).isoformat()
+    with database() as db:
+        db.execute("INSERT INTO workspace_plans VALUES (?,?,?,?)",(record_id,created,json.dumps(payload),json.dumps(summary)))
+    return workspace_get_record("plan:"+record_id)
+
+
+class DeleteWorkspaceRecords(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    keys: list[str]=Field(min_length=1,max_length=30)
+    confirm: bool=False
+
+
+@app.post("/api/workspace/delete")
+def workspace_delete_records(body: DeleteWorkspaceRecords):
+    if not body.confirm:
+        raise HTTPException(409,detail="선택한 로컬 작업 기록의 영구 삭제 확인이 필요합니다.")
+    keys=list(dict.fromkeys(body.keys))
+    with JOBS.lock,database() as db:
+        targets=[]
+        for key in keys:
+            kind,_,record_id=key.partition(":")
+            if kind not in ("plan","run") or not record_id:
+                raise HTTPException(404,detail="삭제할 작업 기록이 없습니다.")
+            query="SELECT summary FROM workspace_plans WHERE id=?" if kind=="plan" else "SELECT result FROM runs WHERE id=?"
+            row=db.execute(query,(record_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404,detail="삭제 대상이 없습니다. 목록을 새로 확인하세요.")
+            if kind=="run" and (JOBS.active_id()==record_id or json.loads(row[0]).get("job_state") in ACTIVE):
+                raise HTTPException(409,detail="진행 중인 실행은 먼저 중단하세요.")
+            targets.append((kind,record_id))
+        for kind,record_id in targets:
+            db.execute("DELETE FROM workspace_plans WHERE id=?" if kind=="plan" else "DELETE FROM runs WHERE id=?",(record_id,))
+    return {"deleted_keys":keys,"deleted_count":len(keys)}
 
 
 if (ROOT / "apps/web/dist").is_dir():

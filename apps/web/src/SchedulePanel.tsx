@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { Message, TracePoint } from "./main";
+import type { Message, TracePoint } from "./SimulationTools";
+import { SpeedChart } from "./TelemetryChart";
+import type {PlanRecord, PlanInput, View} from "./workspaceTypes";
 import { FleetControls, defaultFleet, type FleetConfig } from "./FleetControls";
 
 type Road = "urban" | "highway" | "congested" | "mixed";
 type TripInput = { start: string; end: string; road_profile: Road };
 type Slot = { start_time: string; duration_min_minutes: number; duration_max_minutes: number; departure_jitter_minutes: number; road_profile: Road };
 type Vehicle = { vehicle_id: string; trips?: TripInput[]; pattern?: { weekdays: number[]; day_off_probability: number; baseline_jitter_minutes: number; slots: Slot[] }; overrides?: Record<string, TripInput[]> };
-type Schedule = { schedule_version: "schedule-plan-1"; mode: "manual" | "patterned"; seed: number; interval_ms: number; measurement: { start: string; end: string; timezone: "Asia/Seoul" }; vehicles: Vehicle[] };
+export type Schedule = { schedule_version: "schedule-plan-1"; mode: "manual" | "patterned"; seed: number; interval_ms: number; measurement: { start: string; end: string; timezone: "Asia/Seoul" }; vehicles: Vehicle[] };
 type Trip = { vehicle_id: string; trip_key: string; start_ms: number; end_ms: number; observed_start_ms: number; observed_end_ms: number; road_profile: Road; started_before_window: boolean; continues_after_window: boolean };
-type Plan = { anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[] };
+export type Plan = { anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[] };
 type OBD = { status: "generated_local_only"; vehicle_assignment?: {pattern: string; anomaly_eligible: boolean}; messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
 type Restoration = {checkpoint_epoch:number; completed_preceding_trips: number; total_preceding_trips: number; computed_trips: number; reused_preceding_trips: number};
 type Preparing = {status: "preparing"; restoration: Restoration};
@@ -42,7 +44,13 @@ function RoadSelect({ value, onChange }: { value: Road; onChange: (road: Road) =
   return <label>도로 설정<select value={value} onChange={e => onChange(e.target.value as Road)}>{Object.entries(roads).map(([key, title]) => <option key={key} value={key}>{title}</option>)}</select></label>;
 }
 
-export function SchedulePanel({ renderMessages }: { renderMessages: (messages: Message[], vehicle: string, offset?: number) => ReactNode }) {
+export function SchedulePanel({ renderMessages, view, record, draftToken, draftInput, onRecorded, onConfigure, onActivity }: {
+  renderMessages: (messages: Message[], vehicle: string, offset?: number) => ReactNode;
+  view: View | "none"; record: PlanRecord | null; draftToken:number; draftInput?:PlanInput;
+  onRecorded:(record:PlanRecord)=>void; onConfigure:()=>void; onActivity:(message:string)=>void;
+}) {
+  const [title,setTitle]=useState("차량 시뮬레이션");
+  const readOnly=!!record;
   const [setup, setSetup] = useState<"fleet" | "individual">("fleet");
   const [fleet, setFleet] = useState<FleetConfig>(defaultFleet);
   const [frozenFleet, setFrozenFleet] = useState<FleetConfig | null>(null);
@@ -115,18 +123,34 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
     if (!c.signal.aborted) { setTrips(all); chooseTrip(all[0]); }
   }
   async function preview() {
-    const c = begin("차량별 운행을 계획하고 있습니다.");
-    setPlan(null); setFrozen(null); setFrozenFleet(null); setTrips([]); clearOBD();
+    const c = begin("일정을 생성하고 작업 기록을 저장하고 있습니다.");
+    setPlan(null); setLoaded(null); setSummary(null);
     try {
-      const fleetSource = setup === "fleet";
-      const input = fleetSource ? fleet : draft;
-      const p = await post<Plan>(`/api/${fleetSource ? "fleets" : "schedules"}/preview`, input, c.signal);
-      if (c.signal.aborted) return;
-      setPlan(p); if (fleetSource) setFrozenFleet(fleet); else setFrozen(draft); setForce(false);
-      const id = p.vehicles[0].vehicle_id;
-      setVehicle(id); await vehicleTrips(input, id, c, fleetSource);
-    } catch (e) { fail(e, c); } finally { done(c); }
+      const created=await post<PlanRecord>("/api/workspace/plans",{title:title.trim() || "차량 시뮬레이션",...(setup === "fleet" ? {fleet} : {schedule:draft})},c.signal);
+      if (!c.signal.aborted) onRecorded(created);
+    } catch (e) { fail(e,c); } finally { done(c); }
   }
+  useEffect(() => {
+    resetResults();
+    const source=record?.request ?? draftInput;
+    setTitle(source?.title || "차량 시뮬레이션");
+    setSetup(source?.schedule ? "individual" : "fleet");
+    setFleet(source?.fleet || defaultFleet());
+    setDraft(source?.schedule || example()); setEditor(0);
+    if (!record || !source) return;
+    const c=begin("저장된 일정의 차량 목록을 불러오고 있습니다.");
+    const input=source.fleet ?? source.schedule!;
+    if (source.fleet) setFrozenFleet(source.fleet); else setFrozen(source.schedule!);
+    void (async () => {
+      try {
+        const p=await post<Plan>(`/api/${source.fleet ? "fleets" : "schedules"}/preview`,input,c.signal);
+        if (c.signal.aborted) return;
+        setPlan(p); const id=p.vehicles[0].vehicle_id; setVehicle(id);
+        await vehicleTrips(input,id,c,!!source.fleet);
+      } catch (e) { fail(e,c); } finally { done(c); }
+    })();
+    return ()=>c.abort();
+  },[record?.key,draftToken]);
   async function selectVehicle(id: string) {
     const source = frozenFleet ?? frozen;
     if (!source) return;
@@ -164,6 +188,7 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
         setLoaded({ data, start, end, offset }); setRangeStart(kst(start)); setRangeEnd(kst(end));
         if (whole) setSummary(data);
         void cacheAction("GET");
+        onActivity(`${vehicle} 구간 조회 완료 · Microtrip ${data.microtrip_count.toLocaleString()}건 · 로컬 재생성`);
         return;
       }
       throw new Error("준비 요청 상한에 도달했습니다. 중간 상태는 보관되므로 다시 조회할 수 있습니다.");
@@ -188,8 +213,8 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
   const patchPattern = (value: Partial<NonNullable<Vehicle["pattern"]>>) => editVehicle({ ...current, pattern: { ...current.pattern!, ...value } });
   const patchSlot = (i: number, value: Partial<Slot>) => patchPattern({ slots: current.pattern!.slots.map((s, n) => n === i ? { ...s, ...value } : s) });
   return <section className="schedule-panel" aria-label="일정 기반 생성">
-    <div className="banner"><b>일정 기반 생성 · 로컬 조회</b><span>측정 기간 안에서 차량마다 다른 운행을 생성합니다. 이 화면은 MQTT 전송과 실행 기록 저장을 하지 않습니다.</span></div>
-    <details className="card schedule-cache">
+    <div hidden={view !== "settings"} className="banner"><b>차량 일정 생성</b><span>측정 기간 안에서 차량마다 다른 운행을 생성합니다. 설정과 요약을 기록하며, 전체 메시지 저장이나 MQTT 전송은 하지 않습니다.</span></div>
+    <details className="card schedule-cache" open hidden={view !== "storage"}>
       <summary>차량 중간 상태 관리 · {cache ? `${cache.entries.toLocaleString()}건` : "확인 중"}</summary>
       <p className="note">전체 메시지가 아닌 운행 종료 상태만 보관합니다. 기본 위치는 .local/obd-state.sqlite3이며 실행 기록과 별개입니다. 설정·모델이 다르면 구분하고, 오래되거나 한도를 넘은 항목은 자동 정리합니다.</p>
       {cache && <p>보관 {cache.entries.toLocaleString()} / {cache.max_entries.toLocaleString()}건 · 마지막 사용 후 {cache.ttl_seconds / 3600}시간 · DB {(cache.database_bytes / 1024).toFixed(0)} KiB / {(cache.max_database_bytes / 1048576).toFixed(0)} MiB</p>}
@@ -197,13 +222,15 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
       <p className="note">비워도 설정·실행 기록·이미 표시한 표/그래프는 유지합니다. 다음 조회에 필요한 상태는 다시 계산합니다. 진행 중인 준비 요청은 비우기 이전 상태를 다시 저장하지 않습니다.</p>
       {cacheError && <p className="error" role="alert">{cacheError}</p>}
     </details>
-    <section className="card">
-      <h2>01 전체 조건과 운행 설정</h2>
-      <label>설정 범위<select disabled={!!busy} value={setup} onChange={e => { resetResults(); setSetup(e.target.value as "fleet" | "individual"); }}><option value="fleet">전체 조건 자동 배정 · 기본</option><option value="individual">개별 차량 설정 · 점검용</option></select></label>
-      {setup === "fleet" && <FleetControls value={fleet} onChange={editFleet} disabled={!!busy} />}
+    <section className="card" hidden={view !== "settings"}>
+      <div className="panel-heading"><div><h2>생성 조건</h2><p className="note">전체 조건을 지정한 뒤 일정을 기록하고 차량 데이터를 탐색합니다.</p></div><div className="config-actions"><button className="primary" disabled={!!busy || readOnly} onClick={()=>void preview()}>일정 생성·기록</button><button disabled={!!busy || readOnly} onClick={()=>{if(setup==="fleet") editFleet(defaultFleet()); else {edit(example());setEditor(0);}}}>초기값</button></div></div>
+      <label>작업 이름<input value={title} disabled={!!busy || readOnly} maxLength={80} onChange={e=>setTitle(e.target.value)} /></label>
+      {readOnly && <p className="context-note">저장된 설정은 고정됩니다. 상단의 ‘설정 복사’로 새 작업을 만들 수 있습니다.</p>}
+      <label>설정 범위<select disabled={!!busy || readOnly} value={setup} onChange={e => { resetResults(); setSetup(e.target.value as "fleet" | "individual"); }}><option value="fleet">전체 조건 자동 배정 · 기본</option><option value="individual">개별 차량 설정 · 점검용</option></select></label>
+      {setup === "fleet" && <FleetControls value={fleet} onChange={editFleet} disabled={!!busy || readOnly} />}
       <div hidden={setup !== "individual"}>
       <p className="note">모든 시각은 한국 시간(KST)입니다. 설정을 수정하면 이전 조회를 비우고 새 일정으로 다시 계획합니다.</p>
-      <fieldset disabled={!!busy} className="schedule-fieldset">
+      <fieldset disabled={!!busy || readOnly} className="schedule-fieldset">
         <div className="fields">
           <label>측정 시작<input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
           <label>측정 종료<input type="datetime-local" step="1" value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
@@ -253,12 +280,12 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
         </details>
       </fieldset>
       </div>
-      <div className="schedule-actions"><button className="primary" disabled={!!busy} onClick={() => void preview()}>일정 미리보기</button><button disabled={!!busy} onClick={() => { if (setup === "fleet") editFleet(defaultFleet()); else { edit(example()); setEditor(0); } }}>설정 예시로 초기화</button></div>
     </section>
     {busy && <p role="status" className="schedule-status">{busy}</p>}
     {error && <p role="alert" className="error">{error}</p>}
-    {plan && <section className="card">
-      <h2>02 차량과 운행 선택</h2>
+    {!plan && !busy && view === "data" && <div className="empty-state"><h2>조회할 일정을 선택하세요</h2><p>왼쪽 작업 기록을 열거나 새 조건으로 일정을 만드세요.</p><button onClick={onConfigure}>조건 설정으로 이동</button></div>}
+    {plan && <section className="card" hidden={view !== "data"}>
+      <h2>차량·운행 탐색</h2>
       <p>전체 {plan.vehicles.length}대 · 관측 운행 {plan.observed_trip_count.toLocaleString()}회 · 예상 Microtrip {plan.microtrip_count.toLocaleString()}건 · 정상 종료 Trip {plan.trip_count.toLocaleString()}건</p>
       {plan.anomaly_target_count !== undefined && <p>이상 이벤트 대상 {plan.anomaly_target_count}대 · 실제 발생 차량 수와 다를 수 있습니다.</p>}
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
@@ -286,8 +313,8 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
         </div>}
       </>}
     </section>}
-    {summary && trip && <section className="card">
-      <h2>03 운행 데이터 확인</h2>
+    {summary && trip && <section className="card" hidden={view !== "data"}>
+      <h2>차량 데이터</h2>
       <p>{vehicle} · {clock(trip.start_ms)} 출발 · 모델 {summary.model}</p>
       <p className="note">출발 위치 {summary.initial_state.lat.toFixed(6)}, {summary.initial_state.lon.toFixed(6)} · 초기 총주행거리 {(summary.initial_state.odometer_m / 1000).toFixed(3)} km · 냉각수 {summary.initial_state.coolant_c.toFixed(1)}℃. 주차 냉각은 외기 20℃·시정수 2시간의 개발 근사입니다.</p>
       <div className={`schedule-trip-status ${summary.synthetic_trip ? "synthetic" : ""}`}><b>{summary.trip ? summary.synthetic_trip ? "시험용 종료 Trip" : "정상 종료 Trip" : "종료 Trip 없음"}</b><p>{summary.trip ? summary.synthetic_trip ? "측정 종료까지의 값만 집계한 시험 요약입니다. 실제 운행 종료가 아닙니다." : "실제 출발부터 종료까지의 전체 운행 요약입니다. 아래 조회 구간을 좁혀도 이 요약은 바뀌지 않습니다." : "이 운행은 측정 종료 이후에도 계속됩니다. 종료 전에는 정상 Trip을 생성하지 않습니다."}</p></div>
@@ -308,25 +335,4 @@ export function SchedulePanel({ renderMessages }: { renderMessages: (messages: M
       </>}
     </section>}
   </section>;
-}
-
-function SpeedChart({ trace, start, end, departure, disabled, onRange }: { trace: TracePoint[]; start: number; end: number; departure: number; disabled: boolean; onRange: (a: number, b: number) => void }) {
-  const anchor = useRef<number | null>(null);
-  const [drag, setDrag] = useState<[number, number] | null>(null);
-  const span = Math.max(1, end - start), max = Math.max(10, ...trace.map(p => p.speed_kmh));
-  const at = (e: React.PointerEvent<SVGSVGElement>) => Math.max(60, Math.min(940, (e.clientX - e.currentTarget.getBoundingClientRect().left) / e.currentTarget.getBoundingClientRect().width * 1000));
-  if (!trace.length) return <p className="schedule-empty">이 구간에는 Microtrip이 없습니다. 실제 종료 시각에는 Trip만 생성합니다.</p>;
-  return <svg className="drive-chart schedule-chart" viewBox="0 0 1000 240" role="img" aria-label="선택 운행 속도 그래프 · 드래그로 구간 선택"
-    onPointerDown={e => { if (disabled || end <= start || e.button !== 0) return; const x = at(e); anchor.current = x; setDrag([x, x]); e.currentTarget.setPointerCapture(e.pointerId); }}
-    onPointerMove={e => { if (anchor.current !== null) setDrag([anchor.current, at(e)]); }}
-    onPointerCancel={() => { anchor.current = null; setDrag(null); }}
-    onLostPointerCapture={() => { anchor.current = null; setDrag(null); }}
-    onPointerUp={e => { const from = anchor.current, to = at(e); anchor.current = null; setDrag(null); if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); if (from === null || Math.abs(to - from) < 4) return; onRange(Math.round(start + (Math.min(from, to) - 60) / 880 * span), Math.round(start + (Math.max(from, to) - 60) / 880 * span)); }}>
-    <path d="M60 30 V190 H940 M60 110 H940 M60 40 H940" fill="none" stroke="#c6d4de" />
-    <polyline points={trace.map(p => `${60 + (departure + p.elapsed_seconds * 1000 - start) / span * 880},${190 - p.speed_kmh / max * 150}`).join(" ")} fill="none" stroke="#087c70" strokeWidth="3" />
-    {trace.length === 1 && <circle cx={60 + (departure + trace[0].elapsed_seconds * 1000 - start) / span * 880} cy={190 - trace[0].speed_kmh / max * 150} r="4" fill="#087c70" />}
-    {drag && <rect x={Math.min(...drag)} y="30" width={Math.abs(drag[1] - drag[0])} height="160" fill="#087c70" fillOpacity="0.18" pointerEvents="none" />}
-    <text x="4" y="22">km/h</text><text x="10" y="46">{max.toFixed(0)}</text><text x="30" y="194">0</text>
-    <text x="60" y="223">{clock(start)}</text><text x="940" y="223" textAnchor="end">{clock(end)}</text>
-  </svg>;
 }
