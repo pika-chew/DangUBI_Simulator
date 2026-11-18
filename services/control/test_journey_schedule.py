@@ -71,7 +71,7 @@ def bounded_request(**changes):
 
 def test_bounded_journeys_obey_trip_limits_parking_and_replay_at_extremes():
     for low,high in [(3,90),(2,2),(12,17),(180,240),(240,240)]:
-        req=bounded_request(trip_min_minutes=low,trip_max_minutes=high,vehicle_variation_percent=50,daily_variation_percent=50,departure_jitter_minutes=120)
+        req=bounded_request(trip_min_minutes=low,trip_max_minutes=high,daily_variation_percent=50,departure_jitter_minutes=120)
         schedule,assigned=expand(req)
         assert req.daily_driving_minutes is None
         assert all("daily_target_minutes" not in v for v in assigned.values())
@@ -104,3 +104,17 @@ def test_bounded_calendar_replay_and_off_days():
     for a,b in zip(original.vehicles,wider.vehicles):
         assert [t for t in a.trips if t.start.startswith("2026-11-18")]==[t for t in b.trips if t.start.startswith("2026-11-18")]
     assert all(not v.trips for v in expand(bounded_request(day_off_probability=1))[0].vehicles)
+
+
+def test_new_fleet_removes_vehicle_coefficient_and_preserves_legacy_schedule():
+    import hashlib
+    import pytest
+    req=bounded_request()
+    assert req.vehicle_variation_percent is None
+    assert all("duration_preference" not in v for v in allocation(req).values())
+    with pytest.raises(ValueError,match="차량 간"):
+        bounded_request(vehicle_variation_percent=20)
+    body=json.loads((Path(__file__).resolve().parents[2]/"configs/fleet-bounded.example.json").read_text(encoding="utf-8"))
+    body.update(fleet_version="fleet-plan-3",vehicle_count=2,vehicle_variation_percent=20)
+    schedule=expand(FleetRequest(**body))[0]
+    assert hashlib.sha256(schedule.model_dump_json().encode()).hexdigest()=="869b084ca26842f237248868606deb28fd929cd659a50d7c225274279e6cf8dd"

@@ -1,5 +1,5 @@
 {
-  "fleet_version": "fleet-plan-3",
+  "fleet_version": "fleet-plan-4",
   "vehicle_count": 20,
   "measurement": {
     "start": "2026-11-17T00:00:00+09:00",
@@ -8,7 +8,6 @@
   },
   "seed": 42,
   "interval_ms": 2000,
-  "vehicle_variation_percent": 20,
   "daily_variation_percent": 25,
   "departure_jitter_minutes": 30,
   "day_off_probability": 0.2,

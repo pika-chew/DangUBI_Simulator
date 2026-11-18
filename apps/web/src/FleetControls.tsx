@@ -1,6 +1,6 @@
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
-  fleet_version: "fleet-plan-1" | "fleet-plan-2" | "fleet-plan-3";
+  fleet_version: "fleet-plan-1" | "fleet-plan-2" | "fleet-plan-3" | "fleet-plan-4";
   vehicle_count: number;
   measurement: { start: string; end: string; timezone: "Asia/Seoul" };
   interval_ms: number;
@@ -8,7 +8,7 @@ export type FleetConfig = {
   daily_driving_minutes?: number | null;
   trip_min_minutes?: number | null;
   trip_max_minutes?: number | null;
-  vehicle_variation_percent: number;
+  vehicle_variation_percent?: number | null;
   daily_variation_percent: number;
   departure_jitter_minutes: number;
   day_off_probability: number;
@@ -32,10 +32,10 @@ export function defaultFleet(): FleetConfig {
   const day = localTime(Date.now()).slice(0, 10);
   const start = `${day}T00:00:00+09:00`;
   return {
-    fleet_version: "fleet-plan-3", vehicle_count: 20,
+    fleet_version: "fleet-plan-4", vehicle_count: 20,
     measurement: { start, end: iso(localTime(Date.parse(start) + 3 * 86400000)), timezone: "Asia/Seoul" },
     interval_ms: 2000, seed: 42, trip_min_minutes: 3, trip_max_minutes: 90,
-    vehicle_variation_percent: 20, daily_variation_percent: 25, departure_jitter_minutes: 30,
+    daily_variation_percent: 25, departure_jitter_minutes: 30,
     day_off_probability: 0.2, weekend_activity_probability: 0.5,
     anomaly_vehicle_percent: 5, anomaly_events_per_hour: 2, anomaly_intensity: "medium",
     pattern_mix: { ...presets.mixed }, road_mix: { urban: 35, highway: 20, congested: 5, mixed: 40 },
@@ -54,9 +54,9 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
   const preset = Object.entries(presets).find(([, m]) => JSON.stringify(m) === JSON.stringify(v.pattern_mix))?.[0] ?? "custom";
   return <fieldset disabled={disabled} className="schedule-fieldset">
     <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
-    {v.fleet_version!=="fleet-plan-3" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’ 후 ‘최소·최대 시간 배정’을 선택하면 하루 목표 없이 새 일정을 만듭니다. 원본은 보존합니다.</p>}
+    {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’ 후 ‘최소·최대 시간 배정’을 선택하면 하루 목표 없이 새 일정을 만듭니다. 원본은 보존합니다.</p>}
     <div className="fields">
-      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-3" ? {fleet_version:"fleet-plan-3",daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??90} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-3">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-3" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
+      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-4" ? {fleet_version:"fleet-plan-4",vehicle_variation_percent:undefined,daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??90} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-4">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-4" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
       {numeric("vehicle_count", "차량 수", 1, 100, "현재 로컬 계획은 최대100대입니다. 설정 자동화가 대규모 생성·전송 지원을 의미하지는 않습니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
       <label>측정 종료 (KST)<input type="datetime-local" step="1" value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
@@ -67,20 +67,20 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
         <option value="flexible">비정기 중심 · 20% / 30% / 50%</option>
         {preset === "custom" && <option value="custom" disabled>고급 설정의 사용자 비율</option>}
       </select></label>
-      {v.fleet_version==="fleet-plan-3" ? <>
+      {(v.fleet_version==="fleet-plan-3" || v.fleet_version==="fleet-plan-4") ? <>
         {numeric("trip_min_minutes", "최소 운행 시간 (분/회)", 2, 240, "시동을 켜고 출발한 뒤 종료할 때까지 한 번의 전체 운행 시간 하한입니다. 측정 기간과 겹친 관측 부분은 더 짧을 수 있습니다.")}
         {numeric("trip_max_minutes", "최대 운행 시간 (분/회)", 2, 240, "한 번의 전체 운행 시간 상한입니다. 용무·출퇴근·긴 이동을 범위 안에서 선택하며 하루 합계나 최댓값을 채우지 않습니다. 최소값 이상이어야 합니다.")}
       </> : numeric("daily_driving_minutes", "이전 운행일 하루 목표 시간 (분)", 10, 480, "저장된 이전 배정의 설정입니다. 목표 없이 배정하려면 설정 복사 후 최소·최대 시간 배정을 선택하세요.")}
 
       <label><span className="label-line">하루 미운행 확률 (%) <Help text="각 차량이 하루 전체 운행을 쉬는 확률입니다. 기간 전체 미운행 차량 비율과 다릅니다. 주말 참여 여부와 별도로 적용됩니다." /></span><input aria-label="하루 미운행 확률 (%)" type="number" min="0" max="100" step="1" value={v.day_off_probability * 100} onChange={e => patch({ day_off_probability: Number(e.target.value) / 100 })} /></label>
-      {numeric("vehicle_variation_percent", "차량 간 운행 시간 편차 (±%)", 0, 50, "차량마다 선호 운행 길이의 편차를 정해 여러 날짜에 유지합니다. 새 배정에서는 최소·최대 시간 밖으로 나가지 않습니다.")}
-      {numeric("daily_variation_percent", "같은 차량의 날짜별 편차 (±%)", 0, 50, "같은 차량도 날짜마다 길이가 달라집니다. 새 배정에서는 편차 적용 뒤에도 최소·최대 시간을 지킵니다.")}
       {numeric("anomaly_vehicle_percent", "이상 이벤트 대상 차량 (%)", 0, 100, "대상 차량을 명부에서 고정 선정합니다. 차량 수×비율을 가장 가까운 정수로 반올림합니다. 실제 이벤트 관측 차량 비율과는 다릅니다.", 0.1)}
       {numeric("anomaly_events_per_hour", "이상 이벤트 후보 빈도 (회/운행 1시간)", 0, 60, "대상 차량에 적용하는 운행1시간당 후보 발생 기댓값입니다. 속도·도로·회복 조건에 맞지 않으면 발생하지 않으므로 실제 횟수를 보장하지 않습니다.", 0.1)}
       <label>이상 이벤트 강도<select value={v.anomaly_intensity} onChange={e => patch({ anomaly_intensity: e.target.value as FleetConfig["anomaly_intensity"] })}><option value="low">낮음</option><option value="medium">보통</option><option value="high">높음</option></select></label>
     </div>
     <details className="schedule-advanced"><summary>고급 전체 조건 · 패턴·주말·도로·재현</summary>
       <div className="fields">
+        {v.fleet_version!=="fleet-plan-4" && numeric("vehicle_variation_percent", "차량 간 운행 시간 편차 (±%)", 0, 50, "차량마다 선호 운행 길이의 편차를 정해 여러 날짜에 유지합니다. 새 배정에서는 최소·최대 시간 밖으로 나가지 않습니다.")}
+      {numeric("daily_variation_percent", "같은 차량의 날짜별 편차 (±%)", 0, 50, "차량별로 날짜마다 공통 시간 계수를 정합니다. 최소·최대는 유지합니다. 0%는 이 계수만 고정하며, 목적별 길이 추첨과 출퇴근의 운행별 ±10% 변화는 남습니다.")}
         {numeric("departure_jitter_minutes", "날짜별 출발 편차 (±분)", 0, 120, "차량의 기본 첫 출발 시각에 더하는 날짜별 편차입니다. 후속 운행은 최소 주차30분과 자정까지 배치 가능한 시간을 고려합니다.")}
         <label><span className="label-line">주말 운행 참여 확률 (%) <Help text="주말은 이 확률로 운행 후보일이 되며, 후보일에도 하루 미운행 확률을 별도로 적용합니다. 출퇴근형도 주말에는 비정기 시간 배치를 사용합니다." /></span><input aria-label="주말 운행 참여 확률 (%)" type="number" min="0" max="100" value={v.weekend_activity_probability * 100} onChange={e => patch({ weekend_activity_probability: Number(e.target.value) / 100 })} /></label>
         {numeric("seed", "재현 seed", -2147483648, 2147483647, "같은 전체 조건과 seed는 차량 배정·요일별 일정·조회 결과를 재현합니다. 페이지나 조회 순서로 배정이 바뀌지 않습니다.")}

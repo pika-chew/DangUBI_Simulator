@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 
 def varied_day(req, day, fixed, daily, kind, kst):
-    bounded=req.fleet_version=="fleet-plan-3"
+    bounded=req.fleet_version in ("fleet-plan-3", "fleet-plan-4")
     scale=1 if bounded else fixed["daily_target_minutes"]/60
     lower,upper=(req.trip_min_minutes,req.trip_max_minutes) if bounded else (2,120)
     day_factor=daily.uniform(1-req.daily_variation_percent/100,1+req.daily_variation_percent/100)
@@ -14,7 +14,7 @@ def varied_day(req, day, fixed, daily, kind, kst):
             # 범위 내부의 상대 위치를 목적별로 선택한다. 최댓값을 채우지 않는다.
             a,b,mode={"local":(0,.2,.03),"regular":(.1,.65,.28),"long":(.45,1,.75)}[purpose]
             fraction=daily.triangular(a,b,mode)
-            value=(lower+(upper-lower)*fraction)*fixed["duration_preference"]*day_factor
+            value=(lower+(upper-lower)*fraction)*fixed.get("duration_preference",1)*day_factor
         elif purpose=="commute":
             value=fixed["commute_minutes"]*day_factor*daily.uniform(.9,1.1)
         elif purpose=="local":
