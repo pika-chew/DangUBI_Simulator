@@ -257,6 +257,10 @@ func main() {
 		fail("요청 JSON을 읽을 수 없습니다.")
 		return
 	}
+	if req.Operation == "schedule_stream" {
+		serveScheduleStream(io.MultiReader(dec.Buffered(), reader), os.Stdout)
+		return
+	}
 	if req.Operation == "mqtt_stream" {
 		serveMQTTStream(req, dec, os.Stdout)
 		return

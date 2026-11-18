@@ -28,7 +28,7 @@ def key_for(vehicle, a, b, profile):
     return hashlib.sha256(f"schedule-plan-1|{vehicle}|{a}|{b}|{profile}".encode()).hexdigest()
 
 
-def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None, checkpoint_store=None, cache_context=None):
+def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None, checkpoint_store=None, cache_context=None, session=None):
     req = body.schedule
     plan(req)  # 기존 일정·주차·건수 검증을 그대로 적용한다.
     vehicle = next((v for v in req.vehicles if v.vehicle_id == vehicle_id), None)
@@ -94,11 +94,14 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
             payload.update(anomaly)
         remaining=deadline-time.monotonic()
         if remaining<=0: raise ValueError("상태 복원 제한시간을 초과했습니다.")
-        process=subprocess.run([str(worker)],input=json.dumps({"operation":"schedule_obd","scheduled":payload}).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(15,remaining))
-        result=json.loads(process.stdout)
-        if process.returncode or "scheduled" not in result:
-            raise ValueError(result.get("error","일정 OBD 생성 실패"))
-        output=result["scheduled"]
+        if session is not None:
+            output=session.page(payload,min(15,remaining))
+        else:
+            process=subprocess.run([str(worker)],input=json.dumps({"operation":"schedule_obd","scheduled":payload}).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(15,remaining))
+            result=json.loads(process.stdout)
+            if process.returncode or "scheduled" not in result:
+                raise ValueError(result.get("error","일정 OBD 생성 실패"))
+            output=result["scheduled"]
         state={"lat":output["final_lat"],"lon":output["final_lon"],"odometer_m":output["final_odometer_m"]}
         coolant,heading=output["final_coolant_c"],output["final_heading_rad"]
         previous_end=arrival
@@ -109,4 +112,4 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         if checkpoint_store is not None:
             checkpoint_store.put(scope,i,arrival,dict(state,coolant_c=coolant,heading_rad=heading),epoch)
         if selected: selected_initial=initial
-    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output["events_until_query_end"],"initial_state":selected_initial,"messages":output["messages"],"trace":output["trace"],"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}
+    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output.get("events_until_query_end",0),"initial_state":selected_initial,"messages":output["messages"],"trace":output.get("trace",[]),"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}

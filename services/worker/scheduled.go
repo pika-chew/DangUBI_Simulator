@@ -46,6 +46,10 @@ type ScheduledOutput struct {
 }
 
 func scheduledOBD(input Request) (Result, error) {
+	return scheduledPage(input, nil, false)
+}
+
+func scheduledPage(input Request, cache *scheduledCache, executionOnly bool) (Result, error) {
 	s := input.Scheduled
 	if s == nil {
 		return Result{}, errors.New("일정 운행 입력이 필요합니다.")
@@ -68,6 +72,9 @@ func scheduledOBD(input Request) (Result, error) {
 	}
 	r.Generation.AnomalyEventsPerHour = s.AnomalyEventsPerHour
 	r.Generation.AnomalyIntensity = s.AnomalyIntensity
+	if cache != nil {
+		r = cache.request(*s, r)
+	}
 	message := func(seq int) map[string]any {
 		m, _ := automaticMessage(r, 0, seq)
 		m["pld"].(map[string]any)["tid"] = float64(s.TID)
@@ -84,19 +91,23 @@ func scheduledOBD(input Request) (Result, error) {
 		}
 	}
 	out := &ScheduledOutput{Model: "schedule-obd-3/journey-8", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
-	_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
+	if !executionOnly {
+		_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
+	}
 	for seq := first + int64(s.Offset); seq <= last && len(out.Messages) < s.Limit; seq++ {
 		out.Messages = append(out.Messages, message(int(seq)))
 	}
-	stride := max(int64(1), (last-first+120)/120)
-	for seq := first; seq <= last; seq += stride {
-		m := message(int(seq))
-		p := m["pld"].(map[string]any)
-		t := float64(seq*s.IntervalMS) / 1000
-		_, label := automaticMessage(r, 0, int(seq))
-		_, _, context, _ := scenarioAt(r, 0, t)
-		addEngineContext(r, 0, t, &context)
-		out.Trace = append(out.Trace, TracePoint{ElapsedSeconds: t, State: label, Context: &context, Speed: p["sp"].(float64), RPM: p["rpm"].(float64), Distance: p["cdit"].(float64)})
+	if !executionOnly {
+		stride := max(int64(1), (last-first+120)/120)
+		for seq := first; seq <= last; seq += stride {
+			m := message(int(seq))
+			p := m["pld"].(map[string]any)
+			t := float64(seq*s.IntervalMS) / 1000
+			_, label := automaticMessage(r, 0, int(seq))
+			_, _, context, _ := scenarioAt(r, 0, t)
+			addEngineContext(r, 0, t, &context)
+			out.Trace = append(out.Trace, TracePoint{ElapsedSeconds: t, State: label, Context: &context, Speed: p["sp"].(float64), RPM: p["rpm"].(float64), Distance: p["cdit"].(float64)})
+		}
 	}
 	if s.UntilMS == s.EndMS {
 		out.Trip = fullTrip
@@ -133,5 +144,11 @@ func scheduledOBD(input Request) (Result, error) {
 	out.FinalOdometer = p["tdis"].(float64)
 	out.FinalCoolant = end.Coolant
 	out.FinalHeading = totals.Heading
+	if executionOnly && int64(s.Offset+len(out.Messages)) < out.MicroCount {
+		out.Trip = nil
+	}
+	if cache != nil {
+		cache.retain(*s, r)
+	}
 	return Result{Scheduled: out}, nil
 }

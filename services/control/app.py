@@ -558,10 +558,10 @@ def workspace_execute(body: ScheduleExecutionRequest):
     config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
     request={"config":config,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
     checkpoint_epoch=CHECKPOINTS.stats()["epoch"]
-    def generate(vehicle,key,offset):
+    def generate(vehicle,key,offset,session=None):
         if source.fleet:
-            return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
-        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS)
+            return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS,session=session)
+        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS,session=session)
     data={"operation":body.transport,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"trips_by_vehicle":trips,"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if profile:data["mqtt"]=profile
     timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+30 if body.realtime else 120

@@ -3,6 +3,7 @@ import heapq
 import json
 import time
 from services.control.mqtt_bridge import MQTTBridge, MQTTFailure
+from services.control.generation_session import GenerationSession, GenerationFailure
 
 
 def execute(manager, job, data, worker, timeout):
@@ -14,6 +15,7 @@ def execute(manager, job, data, worker, timeout):
     last_save = 0.0
     mqtt=data["operation"]=="mqtt"
     bridge=None
+    generation=None
     cleanup=True
     result["transport"]="mqtt" if mqtt else "dry_run"
     if mqtt:
@@ -35,6 +37,13 @@ def execute(manager, job, data, worker, timeout):
             if not cleanup and state=="completed":
                 state="failed"
                 result["errors"]=["MQTT 연결 정리의 최종 상태를 확인하지 못했습니다."]
+        if generation:
+            generation.close(abort=job.stop_requested)
+            result["generation_session"]=dict(generation.stats,cleanup_confirmed=generation.cleaned,forced_termination=generation.forced or job.forced)
+            if state=="completed" and job.stop_requested:state="failed" if job.timed_out else "stopped"
+            if state=="completed" and (not generation.cleaned or not generation.close_acknowledged):
+                state="failed"
+                result["errors"]=["생성 세션 종료 응답 또는 프로세스 정리를 확인하지 못했습니다."]
         report(state,True)
 
     def report(state="running", final=False):
@@ -78,7 +87,7 @@ def execute(manager, job, data, worker, timeout):
         for trip in data["trips_by_vehicle"].get(vehicle,[]):
             offset=0
             while gate():
-                output=data["generate"](vehicle,trip["trip_key"],offset)
+                output=data["generate"](vehicle,trip["trip_key"],offset,session=generation) if generation else data["generate"](vehicle,trip["trip_key"],offset)
                 if output["status"]=="preparing":
                     continue
                 for message in output["messages"]:
@@ -99,6 +108,9 @@ def execute(manager, job, data, worker, timeout):
                     if not gate():break
                     bridge.command("connect",client_id=client)
                     sync_mqtt();report()
+        else:
+            generation=GenerationSession(worker,job)
+            with manager.lock:job.process=generation.process
         pending=[]
         driving={}
         if mqtt and data["config"]["connection_lifetime"]=="while_driving":
@@ -175,9 +187,10 @@ def execute(manager, job, data, worker, timeout):
         finish("failed" if job.timed_out else "stopped" if job.stop_requested else "completed")
     except Exception as error:
         if mqtt:sync_mqtt()
-        result["errors"]=[str(error) if isinstance(error,MQTTFailure) else "일정 생성 또는 전송에 실패했습니다. 일부 결과만 보관하며 자동 재실행하지 않습니다."]
+        result["errors"]=[str(error) if isinstance(error,(MQTTFailure,GenerationFailure)) else "일정 생성 또는 전송에 실패했습니다. 일부 결과만 보관하며 자동 재실행하지 않습니다."]
         finish("failed" if job.timed_out else "stopped" if job.stop_requested else "failed")
     finally:
+        if generation:generation.close(abort=True)
         with manager.lock:
             if manager.active is job:
                 manager.active=None

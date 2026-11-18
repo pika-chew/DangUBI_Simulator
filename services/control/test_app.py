@@ -1121,3 +1121,19 @@ def test_web_html_does_not_reuse_old_interface(client):
     page=client.get("/")
     assert page.status_code==200
     assert page.headers["cache-control"]=="no-store"
+
+
+def test_workspace_dry_run_reuses_generation_session(client):
+    schedule=scheduled_obd_body()["schedule"]
+    schedule["measurement"]={"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:10:00+09:00"}
+    schedule["vehicles"]=[{"vehicle_id":"v000001","trips":[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:10:00+09:00","road_profile":"mixed"}]}]
+    saved=client.post("/api/workspace/plans",json={"title":"지속 생성","schedule":schedule}).json()
+    start=client.post("/api/workspace/execute",json={"plan_key":saved["key"],"realtime":False})
+    assert start.status_code==202,start.text
+    result=wait_workspace_job(client,start.json()["id"])["result"]
+    assert result["job_state"]=="completed",result
+    assert result["processed_messages"]==301 and result["microtrip_count"]==300 and result["trip_count"]==1
+    stats=result["generation_session"]
+    assert stats["process_starts"]==1 and stats["page_requests"]==3
+    assert stats["plan_builds"]==1 and stats["cache_hits"]==2
+    assert stats["cleanup_confirmed"] and stats["close_acknowledged"] and not stats["forced_termination"]

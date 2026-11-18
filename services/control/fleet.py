@@ -208,7 +208,7 @@ def preview(req, offset=0, limit=100, vehicle_id=None):
     return data
 
 
-def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit, checkpoint_store=None):
+def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit, checkpoint_store=None, session=None):
     assigned = allocation(body.fleet)
     if vehicle_id not in assigned:
         raise ValueError("계획에 없는 차량입니다.")
@@ -222,7 +222,7 @@ def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit, che
         raise ValueError("계획에 없는 운행입니다.")
     schedule = selected_schedule(body.fleet,[{"vehicle_id":vehicle_id,"trips":trips}])
     output = generate(ScheduledOBDRequest(schedule=schedule, force_end_trip=body.force_end_trip, checkpoint_epoch=body.checkpoint_epoch), vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit,
-                      anomaly={"anomaly_eligible": fixed["anomaly_eligible"], "anomaly_events_per_hour": body.fleet.anomaly_events_per_hour, "anomaly_intensity": body.fleet.anomaly_intensity}, checkpoint_store=checkpoint_store, cache_context=body.fleet.model_dump())
+                      anomaly={"anomaly_eligible": fixed["anomaly_eligible"], "anomaly_events_per_hour": body.fleet.anomaly_events_per_hour, "anomaly_intensity": body.fleet.anomaly_intensity}, checkpoint_store=checkpoint_store, cache_context=body.fleet.model_dump(), session=session)
     output["vehicle_assignment"] = fixed
     output["fleet_version"] = body.fleet.fleet_version
     return output
