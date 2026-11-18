@@ -4,15 +4,20 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"hash"
+	"math"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -22,23 +27,29 @@ import (
 )
 
 type testBroker struct {
-	listener       net.Listener
-	mu             sync.Mutex
-	sockets        []net.Conn
-	ids            map[string]bool
-	published      int
-	messages       []map[string]any
-	noAck          bool
-	closeOnce      bool
-	closed         bool
-	ackDelay       time.Duration
-	slowSuffix     string
-	discardPayload bool
-	handling       int
-	peakHandling   int
-	receivedAt     []time.Time
-	receivedIDs    []string
-	receivedTopics []string
+	listener        net.Listener
+	mu              sync.Mutex
+	sockets         []net.Conn
+	ids             map[string]bool
+	published       int
+	messages        []map[string]any
+	noAck           bool
+	closeOnce       bool
+	closed          bool
+	ackDelay        time.Duration
+	slowSuffix      string
+	discardPayload  bool
+	handling        int
+	peakHandling    int
+	receivedAt      []time.Time
+	receivedIDs     []string
+	receivedTopics  []string
+	measureDigest   bool
+	fingerprint     [32]byte
+	lastTimestamp   map[string]float64
+	lastKind        map[string]float64
+	invalidMeasured int
+	outOfOrder      int
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -131,8 +142,13 @@ func (b *testBroker) handle(conn net.Conn) {
 				b.receivedTopics = append(b.receivedTopics, p.TopicName)
 			}
 			var message map[string]any
-			if !b.discardPayload && json.Unmarshal(p.Payload, &message) == nil {
-				b.messages = append(b.messages, message)
+			if (!b.discardPayload || b.measureDigest) && json.Unmarshal(p.Payload, &message) == nil {
+				if !b.discardPayload {
+					b.messages = append(b.messages, message)
+				}
+				if b.measureDigest {
+					b.measureMessage(p.TopicName, message)
+				}
 			}
 			closeNow := b.closeOnce
 			ackDelay := b.ackDelay
@@ -161,6 +177,79 @@ func (b *testBroker) handle(conn net.Conn) {
 		case *packets.DisconnectPacket:
 			return
 		}
+	}
+}
+
+// JSON 수치 표기 차이를 없앤 개발 측정용 지문. 원문을 보관하지 않는다.
+func measurementValue(h hash.Hash, v any) {
+	switch x := v.(type) {
+	case nil:
+		h.Write([]byte{'n'})
+	case bool:
+		if x {
+			h.Write([]byte{'t'})
+		} else {
+			h.Write([]byte{'f'})
+		}
+	case float64:
+		h.Write([]byte{'d'})
+		if x == 0 {
+			x = 0
+		}
+		binary.Write(h, binary.BigEndian, math.Float64bits(x))
+	case string:
+		h.Write([]byte{'s'})
+		binary.Write(h, binary.BigEndian, uint32(len([]byte(x))))
+		h.Write([]byte(x))
+	case []any:
+		h.Write([]byte{'a'})
+		binary.Write(h, binary.BigEndian, uint32(len(x)))
+		for _, v := range x {
+			measurementValue(h, v)
+		}
+	case map[string]any:
+		h.Write([]byte{'o'})
+		binary.Write(h, binary.BigEndian, uint32(len(x)))
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			measurementValue(h, k)
+			measurementValue(h, x[k])
+		}
+	}
+}
+
+func (b *testBroker) measureMessage(topic string, m map[string]any) {
+	if b.lastTimestamp == nil {
+		b.lastTimestamp = map[string]float64{}
+		b.lastKind = map[string]float64{}
+	}
+	ts, tok := m["ts"].(float64)
+	ty, yok := m["ty"].(float64)
+	if !tok || !yok || len(m) != 3 || (ty != 3 && ty != 4) {
+		b.invalidMeasured++
+		return
+	}
+	if _, ok := b.lastTimestamp[topic]; !ok && len(b.lastTimestamp) >= 100 {
+		b.invalidMeasured++
+		return
+	}
+	if previous, ok := b.lastTimestamp[topic]; ok && (ts < previous || b.lastKind[topic] == 3) {
+		b.outOfOrder++
+	}
+	b.lastTimestamp[topic] = ts
+	b.lastKind[topic] = ty
+	h := sha256.New()
+	measurementValue(h, m)
+	digest := h.Sum(nil)
+	carry := 0
+	for i := 31; i >= 0; i-- {
+		n := int(b.fingerprint[i]) + int(digest[i]) + carry
+		b.fingerprint[i] = byte(n)
+		carry = n >> 8
 	}
 }
 func TestMQTTTLSModes(t *testing.T) {

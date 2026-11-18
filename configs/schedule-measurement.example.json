@@ -1,0 +1,135 @@
+{
+  "repeats": 2,
+  "cases": [
+    {
+      "name": "base-always-c2-w1",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 1,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-always-c2-w2",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-always-c2-w4",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 4,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-always-c10-w1",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 1,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-always-c10-w2",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-always-c10-w4",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 4,
+      "lifetime": "always"
+    },
+    {
+      "name": "base-while_driving-c2-w1",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 1,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "base-while_driving-c2-w2",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 2,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "base-while_driving-c2-w4",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 4,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "base-while_driving-c10-w1",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 1,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "base-while_driving-c10-w2",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "base-while_driving-c10-w4",
+      "vehicles": 10,
+      "clients": 10,
+      "workers": 4,
+      "lifetime": "while_driving"
+    },
+    {
+      "name": "history120-c2-w1",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 1,
+      "lifetime": "while_driving",
+      "history_minutes": 120
+    },
+    {
+      "name": "history120-c2-w2",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 2,
+      "lifetime": "while_driving",
+      "history_minutes": 120
+    },
+    {
+      "name": "history120-c2-w4",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 4,
+      "lifetime": "while_driving",
+      "history_minutes": 120
+    },
+    {
+      "name": "burst20-c4-w2",
+      "vehicles": 20,
+      "clients": 4,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "burst20-c20-w2",
+      "vehicles": 20,
+      "clients": 20,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "ack20ms-c2-w2",
+      "vehicles": 10,
+      "clients": 2,
+      "workers": 2,
+      "lifetime": "while_driving",
+      "fault": "delay_ack"
+    }
+  ]
+}

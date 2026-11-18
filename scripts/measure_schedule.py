@@ -1,0 +1,271 @@
+"""실제 일정 API→생성 풀→MQTT 경로의 로컬 계측. 사용자 DB와 AWS는 사용하지 않는다."""
+import argparse
+import ctypes
+from datetime import datetime,timedelta,timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import struct
+import statistics
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from types import SimpleNamespace
+from urllib.parse import urlparse
+import uuid
+
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
+from scripts.measure_mqtt import ProcessResources
+from scripts.measurement_process import ProcessTree
+
+
+def validate_config(config):
+    if not isinstance(config,dict) or set(config)-{"cases","repeats"}:raise ValueError("측정 설정 형식을 확인하세요.")
+    cases=config.get("cases");repeats=config.get("repeats",2)
+    if type(repeats) is not int or not 1<=repeats<=3 or not isinstance(cases,list) or not 1<=len(cases)<=24:raise ValueError("조건1~24개·반복1~3회입니다.")
+    names=set();seconds=0
+    for c in cases:
+        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
+        name=c.get("name")
+        if not isinstance(name,str) or not 1<=len(name)<=60 or any(x in name for x in "|\r\n") or name in names:raise ValueError("조건 이름1~60자를 중복 없이 지정하세요.")
+        names.add(name)
+        for key,lo,hi in [("vehicles",1,20),("clients",1,20),("workers",1,4),("history_minutes",0,120)]:
+            value=c.get(key,0 if key=="history_minutes" else None)
+            if type(value) is not int or not lo<=value<=hi:raise ValueError("차량/Client1~20·Worker1/2/4·과거 운행0~120분입니다.")
+        if c["workers"] not in (1,2,4) or c["clients"]>c["vehicles"]:raise ValueError("Worker 수 또는 고정 Client 수를 확인하세요.")
+        if c.get("lifetime","always") not in ("always","while_driving") or c.get("fault","none") not in ("none","delay_ack"):raise ValueError("유지 방식·지연 조건을 확인하세요.")
+        seconds+=10  # 고정6초 실행과 프로세스·검사 여유
+    if seconds*repeats>900:raise ValueError("예상15분 이내의 측정 계획만 허용합니다.")
+    return cases,repeats
+
+
+def canonical(value):
+    if value is None:return b"n"
+    if type(value) is bool:return b"t" if value else b"f"
+    if isinstance(value,(int,float)):
+        return b"d"+struct.pack(">d",0.0 if value==0 else float(value))
+    if isinstance(value,str):
+        raw=value.encode();return b"s"+struct.pack(">I",len(raw))+raw
+    if isinstance(value,list):return b"a"+struct.pack(">I",len(value))+b"".join(canonical(v) for v in value)
+    if isinstance(value,dict):return b"o"+struct.pack(">I",len(value))+b"".join(canonical(k)+canonical(value[k]) for k in sorted(value))
+    raise ValueError("지문 값 형식을 확인하세요.")
+
+
+def local_profile(profile):
+    url=urlparse(profile.get("broker_url",""))
+    if url.scheme!="ssl" or url.hostname not in ("127.0.0.1","::1") or not url.port or url.username or url.password or url.path or url.query or url.fragment:
+        raise ValueError("계측은 직접 만든 루프백 mTLS 브로커만 사용합니다.")
+    # 기존 fixture의 확장 프로필을 일반 송신 상한으로 다시 제한한다.
+    normal=dict(profile,max_clients=20,max_messages=100,max_duration_seconds=30,
+                connect_per_second=5,publish_per_second=70,timeout_ms=1000,reconnect_attempts=2)
+    normal.pop("local_benchmark",None)
+    return normal
+
+
+class Resources:
+    def __init__(self,processes):
+        handle=int(ctypes.windll.kernel32.GetCurrentProcess()) if os.name=="nt" else 0
+        self.own=SimpleNamespace(pid=os.getpid(),_handle=handle,poll=lambda:None)
+        self.processes=processes;self.items={};self.stop_event=threading.Event()
+        self.peak=0;self.samples=0;self.cpu_baseline=0
+        self._sample();self.cpu_baseline=self.items[self.own.pid][1].cpu
+        self.thread=threading.Thread(target=self._run,daemon=True)
+        self.thread.start()
+
+    def _sample(self):
+        for role,p in [("control",self.own)]+list(self.processes):
+            if p.pid not in self.items:self.items[p.pid]=(role,ProcessResources(p),p)
+        current=0
+        for role,r,p in list(self.items.values()):
+            r.sample()
+            if p.poll() is None:current+=r.current_rss
+        self.peak=max(self.peak,current);self.samples+=1
+
+    def _run(self):
+        while not self.stop_event.wait(.1):self._sample()
+
+    def finish(self,elapsed):
+        self.stop_event.set();self.thread.join();self._sample()
+        roles={}
+        for role,r,p in self.items.values():
+            row=roles.setdefault(role,dict(processes=0,cpu_seconds=0,all_cpu_available=True,memory_samples=0))
+            row["processes"]+=1;row["cpu_seconds"]+=max(0,r.cpu-(self.cpu_baseline if role=="control" else 0))
+            row["all_cpu_available"] &= r.available;row["memory_samples"]+=r.samples
+        available=all(v["all_cpu_available"] for v in roles.values())
+        total=sum(v["cpu_seconds"] for v in roles.values()) if available else None
+        return dict(roles=roles,cpu_seconds=total,cpu_one_core_percent=100*total/elapsed if available else None,
+                    observed_peak_process_rss_sum_bytes=self.peak,samples=self.samples,sample_interval_ms=100,
+                    all_children_exited=all(p.poll() is not None for _,_,p in self.items.values() if p is not self.own))
+
+
+def child(case,profile_path,worker,temporary):
+    expected=(ROOT/".local").resolve()
+    folder=temporary.resolve()
+    suffix=".exe" if os.name=="nt" else ""
+    if folder.parent!=expected or not folder.name.startswith("schedule-measure-") or profile_path.resolve().parent!=folder or worker.resolve()!=expected/("schedule-measure-worker"+suffix):
+        raise ValueError("계측 명령이 만든 임시 경로와 Worker만 사용합니다.")
+    validate_config(dict(cases=[case],repeats=1))
+    deadline=time.monotonic()+5
+    while not (temporary/"ready").exists():
+        if time.monotonic()>deadline:raise RuntimeError("계측 수명 연결 대기 초과")
+        time.sleep(.01)
+    from fastapi.testclient import TestClient
+    from services.control import app as control,schedule_execution
+    profile=local_profile(json.loads(profile_path.read_text(encoding="utf-8")))
+    profile_path.write_text(json.dumps(profile),encoding="utf-8")
+    control.DB=temporary/"runs.sqlite3";control.CHECKPOINTS=control.CheckpointStore(temporary/"states.sqlite3")
+    control.MQTT_PROFILE=profile_path;control.WORKER=worker
+    processes=[];original_bridge=schedule_execution.MQTTBridge
+    class Bridge(original_bridge):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs);processes.append(("sender",self.process))
+    schedule_execution.MQTTBridge=Bridge
+    digest=0;accepted=0;original_validate=control.validate_message
+    def validate(message):
+        nonlocal digest,accepted
+        original_validate(message);digest=(digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256);accepted+=1
+    control.validate_message=validate
+    base=datetime(2026,11,18,13,tzinfo=timezone(timedelta(hours=9)))
+    source=dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=1000,
+                measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=6)).isoformat(),timezone="Asia/Seoul"),
+                vehicles=[dict(vehicle_id=f"v{i:06d}",trips=[dict(start=(base-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
+                          end=(base+timedelta(seconds=4)).isoformat(),road_profile="mixed")]) for i in range(1,case["vehicles"]+1)])
+    sampler=None
+    with TestClient(control.app) as client:
+        before=time.monotonic();plan=client.post("/api/workspace/plans",json={"title":"일정 통합 계측","schedule":source})
+        if plan.status_code!=201:raise RuntimeError("측정 일정 준비 실패")
+        preparation=time.monotonic()-before
+        sampler=Resources(processes);started=time.monotonic()
+        try:
+            response=client.post("/api/workspace/execute",json=dict(plan_key=plan.json()["key"],transport="mqtt",confirm_mqtt=True,
+                     generation_workers=case["workers"],mapping_mode="dedicated" if case["clients"]==case["vehicles"] else "shared",
+                     client_count=case["clients"],connection_lifetime=case.get("lifetime","always")))
+            if response.status_code!=202:raise RuntimeError("측정 실행 시작 실패")
+            run_id=response.json()["id"];job=control.JOBS.active
+            while True:
+                for p in list(job.processes):
+                    if not any(q.pid==p.pid for _,q in processes):processes.append(("generation",p))
+                result=client.get("/api/jobs/"+run_id).json()["result"]
+                if result["job_state"] not in control.ACTIVE:break
+                if time.monotonic()-started>40:raise RuntimeError("통합 계측 시간 초과")
+                time.sleep(.05)
+            elapsed=time.monotonic()-started;resources=sampler.finish(elapsed);sampler=None
+            keys=("job_state","planned_messages","processed_messages","publish_attempts","mqtt_published","puback_count","unconfirmed_messages",
+                  "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
+                  "generation_session","buffer_budget","transmission","execution_cleanup_confirmed","forced_termination")
+            return dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
+                        plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
+        finally:
+            if sampler:
+                active=control.JOBS.active
+                if active:control.JOBS.stop(active.id);active.finished.wait(5)
+                sampler.finish(time.monotonic()-started)
+
+
+def measure(case,fixture,worker):
+    with tempfile.TemporaryDirectory(prefix="schedule-measure-",dir=ROOT/".local") as folder:
+        temporary=Path(folder);profile=temporary/"profile.json"
+        env=os.environ.copy();env.update(DANGUBI_MEASURE_PROFILE=str(profile),DANGUBI_MEASURE_FAULT=case.get("fault","none"),DANGUBI_MEASURE_DIGEST="1")
+        with tempfile.TemporaryFile() as log:
+            broker=subprocess.Popen([str(fixture),"-test.run=^TestMQTTMeasurementFixture$"],env=env,stdout=log,stderr=log)
+            try:
+                deadline=time.monotonic()+10
+                while not profile.exists():
+                    if broker.poll() is not None or time.monotonic()>deadline:raise RuntimeError("측정 브로커 준비 실패")
+                    time.sleep(.02)
+                tree=ProcessTree()
+                try:
+                    with tempfile.TemporaryFile() as child_log:
+                        process=tree.start([sys.executable,str(Path(__file__).resolve()),"--child",json.dumps(case),str(profile),str(worker),str(temporary)],stdout=subprocess.PIPE,stderr=child_log)
+                        (temporary/"ready").touch()
+                        raw,_=process.communicate(timeout=50)
+                    if process.returncode:raise RuntimeError("격리 측정 프로세스 실패")
+                    row=json.loads(raw)
+                finally:tree.close()
+                Path(str(profile)+".done").touch();broker.wait(timeout=5)
+                if broker.returncode:raise RuntimeError("브로커 정리 실패")
+                observed=json.loads(Path(str(profile)+".report").read_text());row["local_broker"]=observed
+                r=row["result"]
+                row["integrity_passed"]=r["job_state"]=="completed" and r["puback_count"]==r["planned_messages"]==observed["received"]==row["accepted_messages"] and row["fingerprint"]==observed["fingerprint"] and observed["out_of_order"]==observed["invalid_messages"]==0 and observed["vehicle_topics"]==case["vehicles"] and observed["unique_client_ids"]==case["clients"]
+                row["cleanup_passed"]=r["execution_cleanup_confirmed"] is True and row["resources"]["all_children_exited"] and not r["forced_termination"] and r["buffer_budget"]["reserved_bytes"]==r["buffer_budget"]["reserved_messages"]==0
+                roles=row["resources"]["roles"]
+                row["resources_valid"]=row["resources"]["cpu_seconds"] is not None and all(roles.get(k,{}).get("processes")==n and roles[k]["memory_samples"]>0 for k,n in [("control",1),("sender",1),("generation",case["workers"])])
+                return row
+            finally:
+                if broker.poll() is None:
+                    Path(str(profile)+".done").touch()
+                    try:broker.wait(timeout=5)
+                    except subprocess.TimeoutExpired:broker.kill();broker.wait()
+
+
+def compare(report):
+    groups={};fingerprints={}
+    for row in report["results"]:
+        if "error" in row:continue
+        c=row["case"];groups.setdefault(c["name"],[]).append(row)
+        key=f"vehicles={c['vehicles']},history_minutes={c.get('history_minutes',0)}"
+        fingerprints.setdefault(key,set()).add((row["accepted_messages"],row["fingerprint"]))
+    comparison=[]
+    for name,rows in groups.items():
+        c=rows[0]["case"]
+        metrics={}
+        for key,values in {
+            "cpu_seconds":[r["resources"]["cpu_seconds"] for r in rows],
+            "rss_sum_mib":[r["resources"]["observed_peak_process_rss_sum_bytes"]/1048576 for r in rows],
+            "max_schedule_delay_ms":[r["result"]["schedule_delay_ms"] for r in rows],
+            "ack_mean_ms":[(r["result"].get("performance") or {}).get("ack",{}).get("mean_ms") for r in rows]
+        }.items():
+            available=[v for v in values if v is not None]
+            metrics[key]=dict(median=statistics.median(available),min=min(available),max=max(available)) if available else None
+        comparison.append(dict(case=c,repeats=len(rows),metrics=metrics,all_passed=all(r["integrity_passed"] and r["cleanup_passed"] for r in rows)))
+    return dict(cases=comparison,source_groups={k:len(v) for k,v in fingerprints.items()},
+                determinism_passed=bool(fingerprints) and all(len(v)==1 for v in fingerprints.values()),
+                scale_expansion_approved=False)
+
+
+def main():
+    if hasattr(sys.stdout,"reconfigure"):sys.stdout.reconfigure(encoding="utf-8")
+    if len(sys.argv)>1 and sys.argv[1]=="--child":
+        row=child(json.loads(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[4]),Path(sys.argv[5]))
+        print(json.dumps(row,ensure_ascii=True));return
+    parser=argparse.ArgumentParser(description="일반 상한 내 일정 생성·송신 통합 로컬 측정")
+    parser.add_argument("--config",type=Path,default=ROOT/"configs/schedule-measurement.example.json")
+    args=parser.parse_args()
+    try:cases,repeats=validate_config(json.loads(args.config.read_text(encoding="utf-8-sig")))
+    except (OSError,ValueError) as error:parser.error(str(error))
+    local=ROOT/".local";local.mkdir(exist_ok=True);suffix=".exe" if os.name=="nt" else ""
+    worker=local/("schedule-measure-worker"+suffix);fixture=local/("schedule-measure-fixture"+suffix)
+    env=os.environ.copy();env.update(GOCACHE=str(local/"go-cache"),GOMODCACHE=str(local/"go-mod"))
+    subprocess.run(["go","build","-o",str(worker),"."],cwd=ROOT/"services/worker",env=env,check=True)
+    subprocess.run(["go","test","-c","-o",str(fixture)],cwd=ROOT/"services/worker",env=env,check=True)
+    directory=local/"measurements"/("schedule-"+datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d-%H%M%S-")+uuid.uuid4().hex[:6]);directory.mkdir(parents=True)
+    report=dict(schema_version="schedule-measure-1",environment=dict(os=platform.platform(),processor=platform.processor(),logical_cpus=os.cpu_count(),python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),resource_scope="제어기+생성Worker+송신프로세스, 브로커 제외; 제어기 계측·TestClient 부하 포함",control_poll_ms=50,cpu_basis="100%=코어1개",memory_basis="100ms 동시 관측 RSS 합계의 최댓값; 공유 메모리 중복 가능"),results=[])
+    for repeat in range(repeats):
+        for case in cases:
+            print(f"측정 {repeat+1}/{repeats}: {case['name']}",flush=True)
+            try:row=measure(case,fixture,worker)
+            except Exception as error:row=dict(case=case,error=str(error) if isinstance(error,RuntimeError) else "측정 실행 또는 정리에 실패했습니다.",error_kind=type(error).__name__)
+            row["repeat"]=repeat+1;report["results"].append(row)
+            (directory/"summary.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+    lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 프로세스 RSS의 동시 관측 합계이며 전체 RAM의 고유 점유량과 다릅니다. 실시간6초 실행으로 최대 처리량·장기 안정성을 판정하지 않습니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
+    for row in report["results"]:
+        c=row["case"]
+        if "error" in row:lines.append(f"|{c['name']}|{c['workers']}|{c['clients']}|측정 오류|—|—|—|—|");continue
+        r=row["result"];s=row["resources"]
+        cpu=f"{s['cpu_seconds']:.3f}" if s['cpu_seconds'] is not None else "측정 불가"
+        ack=(r.get('performance') or {}).get('ack',{}).get('mean_ms')
+        ack_text=f"{ack:.3f}" if ack is not None else "—"
+        lines.append(f"|{c['name']}|{c['workers']}|{c['clients']}|{'통과' if row['integrity_passed'] and row['cleanup_passed'] else '미통과'}|{cpu}|{s['observed_peak_process_rss_sum_bytes']/1048576:.2f}|{r['schedule_delay_ms']}|{ack_text}|")
+    (directory/"summary.md").write_text("\n".join(lines)+"\n",encoding="utf-8")
+    comparison=compare(report)
+    (directory/"comparison.json").write_text(json.dumps(comparison,ensure_ascii=False,indent=2),encoding="utf-8")
+    print(str(directory))
+    if not comparison["determinism_passed"] or any("error" in r or not r["integrity_passed"] or not r["cleanup_passed"] or not r["resources_valid"] for r in report["results"]):raise SystemExit(1)
+
+
+if __name__=="__main__":main()

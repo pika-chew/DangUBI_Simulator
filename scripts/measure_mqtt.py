@@ -58,10 +58,11 @@ def validate_config(config):
 
 
 class ProcessResources:
-    """Worker만 측정. CPU100%=코어1개, RSS는250ms 관측 최댓값."""
+    """프로세스 CPU/RSS 표본. result()는 기존250ms 측정 형식을 유지한다."""
     def __init__(self, proc):
         self.proc = proc
         self.cpu = self.rss = self.samples = 0
+        self.current_rss = 0
         self.available = False
         if os.name == "nt":
             from ctypes import wintypes
@@ -86,6 +87,7 @@ class ProcessResources:
                 counters = self.Counters()
                 counters.cb = ctypes.sizeof(counters)
                 if self.kernel.K32GetProcessMemoryInfo(self.handle, ctypes.byref(counters), counters.cb):
+                    self.current_rss = counters.ws
                     self.rss = max(self.rss, counters.ws)
                     self.samples += 1
             elif platform.system() == "Linux":
@@ -93,6 +95,7 @@ class ProcessResources:
                 self.cpu = (int(stat[11]) + int(stat[12])) / os.sysconf("SC_CLK_TCK")
                 pages = int(Path(f"/proc/{self.proc.pid}/statm").read_text().split()[1])
                 self.rss = max(self.rss, pages * os.sysconf("SC_PAGE_SIZE"))
+                self.current_rss = pages * os.sysconf("SC_PAGE_SIZE")
                 self.samples += 1
                 self.available = True
         except (OSError, ValueError, IndexError):
