@@ -608,3 +608,17 @@ footer {
   .schedule-trip-edit, .schedule-slot { grid-template-columns: minmax(0, 1fr); }
   .schedule-panel .banner { flex-direction: column; gap: 6px; }
 }
+
+.trip-timeline-scroll { overflow-x:auto; padding-bottom:4px; }
+.trip-timeline-scale { min-width:640px; }
+.timeline-days { position:relative; height:22px; font-size:12px; color:var(--muted,#496576); }
+.timeline-days span { position:absolute; white-space:nowrap; transform:translateX(-50%); }
+.timeline-day-line { position:absolute; top:0; bottom:0; width:1px; background:var(--text,#496576); opacity:.25; pointer-events:none; z-index:2; }
+.timeline-cursor { position:absolute; top:0; bottom:0; width:2px; background:var(--text,#123d39); pointer-events:none; z-index:3; }
+.timeline-ticks { position:relative; height:32px; font-size:12px; color:var(--muted,#496576); }
+.timeline-ticks span { position:absolute; top:7px; white-space:nowrap; }
+.timeline-ticks span::before { content:"";position:absolute;top:-7px;left:50%;height:5px;border-left:1px solid currentColor; }
+.timeline-readout { min-height:40px; font-size:13px; line-height:1.6; color:var(--muted,#496576); overflow-wrap:anywhere; }
+
+.timeline-ticks span:first-child::before { left:0; }
+.timeline-ticks span:last-child::before { left:100%; }
