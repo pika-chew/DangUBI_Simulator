@@ -112,8 +112,11 @@ func TestMQTTMeasurementFixture(t *testing.T) {
 	b.mu.Lock()
 	b.discardPayload = true
 	b.measureDigest = os.Getenv("DANGUBI_MEASURE_DIGEST") == "1"
-	if os.Getenv("DANGUBI_MEASURE_PARKING") == "1" {
+	if os.Getenv("DANGUBI_MEASURE_PARKING") == "1" || os.Getenv("DANGUBI_MEASURE_COMPRESSED") == "1" {
 		b.connectionCounts = make(map[string]int)
+	}
+	if os.Getenv("DANGUBI_MEASURE_COMPRESSED") == "1" {
+		b.topicClients = make(map[string]string)
 	}
 	if fault == "delay_ack" {
 		b.ackDelay = 20 * time.Millisecond
@@ -142,6 +145,10 @@ func TestMQTTMeasurementFixture(t *testing.T) {
 		if _, err := os.Stat(path + ".done"); err == nil {
 			b.mu.Lock()
 			report := map[string]any{"received": b.published, "unique_client_ids": len(b.ids)}
+			if b.topicClients != nil {
+				report["checked_client_topics"] = len(b.topicClients)
+				report["client_changes"] = b.clientChanges
+			}
 			if b.connectionCounts != nil {
 				counts := make(map[string]int, len(b.connectionCounts))
 				for id, count := range b.connectionCounts {

@@ -31,6 +31,7 @@ def interval_boundaries(rows):
 class BoundedSchedule:
     def __init__(self,data,pool,gate,result,include_boundaries=False,on_account=None):
         self.data,self.pool,self.gate,self.result=data,pool,gate,result
+        self.due_offset=data.get("due_offset",lambda ts:ts-data["measurement_start_ms"])
         self.include_boundaries=include_boundaries;self.on_account=on_account
         self.boundaries=[];self.boundary_streams={}
         count=len(data["assignments"]);workers=len(pool.sessions)
@@ -126,7 +127,7 @@ class BoundedSchedule:
             head=self.peek(self.heads)
             candidates=sorted((s for owner,heap in enumerate(self.ready) if owner not in self.busy and (s:=self.peek(heap,True)) is not None),key=lambda s:(s["due"],s["vehicle"]))
             for s in candidates:
-                if self.data["realtime"] and s["due"]-self.data["measurement_start_ms"]>self.result.get("simulation_time_ms",0)+2000:continue
+                if self.data["realtime"] and self.due_offset(s["due"])>self.result.get("simulation_time_ms",0)+2000:continue
                 # 최악 응답의 원문과 디코딩 객체를 위한 바이트 credit을 먼저 예약한다.
                 # 가장 이른 미준비 차량을 위한 응답 공간을 남겨 순서 대기 교착을 막는다.
                 reserve=0 if s is head else 1
@@ -136,13 +137,13 @@ class BoundedSchedule:
                 self.busy[s["owner"]]=time.monotonic();s["future"]=self.pool.submit(s["owner"],lambda session,s=s:self.prepare(s,session));self.inflight[s["owner"]]=s;self.account()
             if self.boundaries and (head is None or self.boundaries[0]<(head["due"],1,head["vehicle"])):
                 timestamp,priority,vehicle=self.boundaries[0]
-                due=timestamp-self.data["measurement_start_ms"]
+                due=self.due_offset(timestamp)
                 wake=due
                 if self.data["realtime"]:
                     now=self.result.get("simulation_time_ms",0)
                     if self.busy:wake=min(wake,now+50)
                     for s in candidates:
-                        preparation=s["due"]-self.data["measurement_start_ms"]-2000
+                        preparation=self.due_offset(s["due"])-2000
                         if not s["queue"] and s["future"] is None and now<preparation<due:wake=min(wake,preparation)
                 if not self.gate(wake):return
                 if wake<due:continue
@@ -155,7 +156,7 @@ class BoundedSchedule:
             s=head
             if s["queue"]:
                 message,synthetic,size=s["queue"][0]
-                if not self.gate(message["ts"]-self.data["measurement_start_ms"]):return
+                if not self.gate(self.due_offset(message["ts"])):return
                 s["queue"].popleft();self.queued_count-=1;self.queued_bytes-=size;self.stats["emitted_messages"]+=1;self.consuming_bytes=size;self.consuming_count=1;self.account()
                 if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
                 elif not s["more"]:self.advance(s)
@@ -167,7 +168,7 @@ class BoundedSchedule:
                 del message
             elif not self.busy:
                 if self.data["realtime"]:
-                    if not self.gate(max(0,s["due"]-self.data["measurement_start_ms"]-2000)):return
+                    if not self.gate(max(0,self.due_offset(s["due"])-2000)):return
                 else:raise GenerationFailure("생성 대기열이 진행되지 않습니다.")
             else:
                 if any(time.monotonic()-started>30 for started in self.busy.values()):raise GenerationFailure("생성 Worker 작업 제한시간을 초과했습니다.")

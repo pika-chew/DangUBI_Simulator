@@ -26,6 +26,16 @@ from scripts.measurement_process import ProcessTree
 DEPARTURE_SPACING_SECONDS = 20
 PARKING_SECONDS = 1802
 PARKING_TIMEOUT_SECONDS = 1880
+REPLAY_ROUNDS = 3
+REPLAY_DRIVING_SECONDS = 4
+REPLAY_SPACING_SECONDS = 35
+
+
+def compressed_due_offset(start_ms, timestamp_ms):
+    original_offset = timestamp_ms-start_ms
+    original_spacing = (REPLAY_DRIVING_SECONDS+PARKING_SECONDS)*1000
+    round_index = min(REPLAY_ROUNDS-1, original_offset//original_spacing)
+    return original_offset-round_index*(original_spacing-REPLAY_SPACING_SECONDS*1000)
 
 
 def validate_config(config):
@@ -34,7 +44,7 @@ def validate_config(config):
     if type(repeats) is not int or not 1<=repeats<=3 or not isinstance(cases,list) or not 1<=len(cases)<=24:raise ValueError("조건1~24개·반복1~3회입니다.")
     names=set();seconds=0
     for c in cases:
-        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds","departure_groups","parking_replay"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
+        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds","departure_groups","parking_replay","compressed_replay"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
         if type(c.get("local_scale",False)) is not bool:raise ValueError("로컬 확장 플래그는 boolean입니다.")
         cap=1000 if c.get("local_scale") else 20
         name=c.get("name")
@@ -58,6 +68,14 @@ def validate_config(config):
         if c.get("parking_replay") and (not c.get("local_scale") or c["vehicles"]>8 or driving!=12 or
                 groups!=1 or c.get("history_minutes",0) or c.get("lifetime")!="while_driving" or c.get("fault","none")!="none"):
             raise ValueError("장시간 주차는 로컬 1~8대·12초 운행·운행 중 연결 전용입니다.")
+        compressed=c.get("compressed_replay",False)
+        if type(compressed) is not bool or compressed and (not c.get("local_scale") or
+                c.get("parking_replay") or groups!=1 or "driving_seconds" in c or c.get("history_minutes",0) or
+                c.get("lifetime")!="while_driving" or c.get("fault","none")!="none"):
+            raise ValueError("압축 반복 시험은 분산 출발·장시간 주차·장애 옵션과 함께 사용할 수 없습니다.")
+        if compressed:
+            seconds+=(REPLAY_ROUNDS-1)*REPLAY_SPACING_SECONDS+6
+            continue
         seconds+=max(60,(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2) if c.get("local_scale") else 10
     if seconds*repeats>900:raise ValueError("예상15분 이내의 측정 계획만 허용합니다.")
     if any(c.get("parking_replay") for c in cases) and (len(cases)>2 or repeats!=1 or not all(c.get("parking_replay") for c in cases)):
@@ -72,27 +90,31 @@ def schedule_source(case):
     count=case["vehicles"]
     duration=(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2
     parking=case.get("parking_replay",False)
-    if parking:duration+=driving+PARKING_SECONDS
+    compressed=case.get("compressed_replay",False)
+    if compressed:
+        driving=REPLAY_DRIVING_SECONDS
+        duration=(REPLAY_ROUNDS-1)*(driving+PARKING_SECONDS)+driving+2
+    elif parking:duration+=driving+PARKING_SECONDS
     vehicles=[]
     for index in range(count):
         departure=base+timedelta(seconds=(index*groups//count)*DEPARTURE_SPACING_SECONDS)
         vehicles.append(dict(vehicle_id=f"v{index+1:06d}",trips=[dict(
             start=(departure-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
             end=(departure+timedelta(seconds=driving)).isoformat(),road_profile="mixed")]))
-        if parking:
-            second=departure+timedelta(seconds=driving+PARKING_SECONDS)
+        for round_index in range(1, REPLAY_ROUNDS if compressed else 2 if parking else 1):
+            second=departure+timedelta(seconds=round_index*(driving+PARKING_SECONDS))
             vehicles[-1]["trips"].append(dict(start=second.isoformat(),end=(second+timedelta(seconds=driving)).isoformat(),road_profile="mixed"))
     return dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=2000 if case.get("local_scale") else 1000,
                 measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=duration)).isoformat(),timezone="Asia/Seoul"),
                 vehicles=vehicles)
 
 
-def verify_parking_continuity(source, trip_summaries, result):
+def verify_parking_continuity(source, trip_summaries, result=None):
     from services.control.schedule import instant
     from services.control.schedule_obd import key_for
 
-    sends=result["parking_first_sends"] or {}
-    connects=result["parking_connects"] or {}
+    sends=(result["parking_first_sends"] or {}) if result is not None else {}
+    connects=(result["parking_connects"] or {}) if result is not None else {}
     for vehicle in source["vehicles"]:
         vehicle_id=vehicle["vehicle_id"]
         trips=[]
@@ -105,16 +127,18 @@ def verify_parking_continuity(source, trip_summaries, result):
                 return False
             trips.append(summary)
             starts.append(start)
-        first,second=trips
+        for first,second in zip(trips,trips[1:]):
+            if ((first["edlat"],first["edlon"])!=(second["stlat"],second["stlon"]) or
+                    abs(first["tdis"]+second["dis"]-second["tdis"])>1e-7):
+                return False
+        if result is None:
+            continue
         messages=sends.get(vehicle_id,[])
         if len(messages)!=2 or [m["timestamp_ms"] for m in messages]!=starts:
             return False
         if messages[0]["client_id"]!=messages[1]["client_id"] or messages[0]["client_id"] not in connects:
             return False
-        if ((first["edlat"],first["edlon"])!=(second["stlat"],second["stlon"]) or
-                abs(first["tdis"]+second["dis"]-second["tdis"])>1e-7):
-            return False
-    return len(trip_summaries)==2*len(source["vehicles"])
+    return len(trip_summaries)==sum(len(vehicle["trips"]) for vehicle in source["vehicles"])
 
 
 def canonical(value):
@@ -236,11 +260,12 @@ def child(case,profile_path,worker,temporary):
             super().__init__(*args,**kwargs);processes.append(("sender",self.process))
     schedule_execution.MQTTBridge=Bridge
     digest=0;accepted=0;original_validate=control.validate_message
+    compressed=case.get("compressed_replay",False)
     trip_summaries={}
     def validate(message):
         nonlocal digest,accepted
         original_validate(message);digest=(digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256);accepted+=1
-        if parking and message["ty"]==3:
+        if (parking or compressed) and message["ty"]==3:
             payload=message["pld"]
             trip_summaries[payload["tid"]]={key:payload[key] for key in
                 ("stt","edt","stlat","stlon","edlat","edlon","dis","tdis")}
@@ -248,7 +273,10 @@ def child(case,profile_path,worker,temporary):
     source=schedule_source(case)
     groups=case.get("departure_groups",1)
     driving=case.get("driving_seconds",12)
-    idle_samples=[dict(samples=0,empty_queue_samples=0,disconnected_samples=0) for _ in range(groups-1)]
+    if compressed:
+        groups,driving=REPLAY_ROUNDS,REPLAY_DRIVING_SECONDS
+    spacing=REPLAY_SPACING_SECONDS if compressed else DEPARTURE_SPACING_SECONDS
+    idle_samples=[dict(samples=0,empty_queue_samples=0,disconnected_samples=0,ready_samples=0) for _ in range(groups-1)]
     parking_samples=dict(samples=0,empty_and_disconnected=0)
     sampler=None
     with TestClient(control.app) as client:
@@ -284,14 +312,15 @@ def child(case,profile_path,worker,temporary):
                     if parking_samples["samples"]==1 or parking_samples["samples"]%60==0:
                         (temporary/"progress.json").write_text(json.dumps(dict(elapsed_ms=elapsed_ms,
                             puback_count=result.get("puback_count"),**parking_samples)),encoding="utf8")
-                group,within_group=divmod(elapsed_ms,DEPARTURE_SPACING_SECONDS*1000)
+                group,within_group=divmod(elapsed_ms,spacing*1000)
                 # 종료 경계 처리와 다음 그룹의 2초 선행 생성을 피해 주차 중간을 관측한다.
-                if group<len(idle_samples) and driving*1000+500<=within_group<DEPARTURE_SPACING_SECONDS*1000-2500:
+                if group<len(idle_samples) and driving*1000+500<=within_group<spacing*1000-2500:
                     sample=idle_samples[group]
                     sample["samples"]+=1
                     budget=result.get("buffer_budget",{})
                     sample["empty_queue_samples"]+=budget.get("reserved_messages")==budget.get("reserved_bytes")==0
                     sample["disconnected_samples"]+=result.get("active_clients")==0
+                    sample["ready_samples"]+=(budget.get("reserved_messages")==budget.get("reserved_bytes")==result.get("active_clients")==0)
                 if time.monotonic()-started>(PARKING_TIMEOUT_SECONDS+10 if parking else 130 if case.get("local_scale") else 40):raise RuntimeError("통합 계측 시간 초과")
                 time.sleep(1 if parking else .5 if case.get("local_scale") else .05)
             elapsed=time.monotonic()-started;resources=sampler.finish(elapsed);sampler=None
@@ -303,6 +332,8 @@ def child(case,profile_path,worker,temporary):
                      plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
             if idle_samples:
                 row["idle_gaps"]=idle_samples
+            if compressed:
+                row["parking_continuity"]=verify_parking_continuity(source,trip_summaries)
             if parking:
                 row["parking_samples"]=parking_samples
                 row["result"].update(parking_connects=result.get("parking_connects"),parking_first_sends=result.get("parking_first_sends"))
@@ -326,6 +357,8 @@ def measure(case,fixture,worker):
         env=os.environ.copy();env.update(DANGUBI_MEASURE_PROFILE=str(profile),DANGUBI_MEASURE_FAULT=case.get("fault","none"),DANGUBI_MEASURE_DIGEST="1")
         if case.get("parking_replay"):
             env["DANGUBI_MEASURE_PARKING"]="1"
+        if case.get("compressed_replay"):
+            env["DANGUBI_MEASURE_COMPRESSED"]="1"
         with tempfile.TemporaryFile() as log:
             broker=subprocess.Popen([str(fixture),"-test.run=^TestMQTTMeasurementFixture$"],env=env,stdout=log,stderr=log)
             try:
@@ -352,7 +385,17 @@ def measure(case,fixture,worker):
                 r=row["result"]
                 row["integrity_passed"]=r["job_state"]=="completed" and r["puback_count"]==r["planned_messages"]==observed["received"]==row["accepted_messages"] and row["fingerprint"]==observed["fingerprint"] and observed["out_of_order"]==observed["invalid_messages"]==0 and observed["vehicle_topics"]==case["vehicles"] and observed["unique_client_ids"]==case["clients"]
                 row["cleanup_passed"]=r["execution_cleanup_confirmed"] is True and row["resources"]["all_children_exited"] and not r["forced_termination"] and r["buffer_budget"]["reserved_bytes"]==r["buffer_budget"]["reserved_messages"]==0
-                if "idle_gaps" in row:
+                if case.get("compressed_replay"):
+                    expected=case["clients"]*REPLAY_ROUNDS
+                    row["integrity_passed"] &= (r["connection_count"]==r["disconnect_count"]==expected and
+                        r["active_clients"]==r["reconnect_count"]==0 and
+                        r["trip_count"]==case["vehicles"]*REPLAY_ROUNDS and
+                        r["puback_count"]==case["vehicles"]*REPLAY_ROUNDS*3 and
+                        observed.get("checked_client_topics")==case["vehicles"] and observed.get("client_changes")==0 and
+                        observed.get("connections_by_client")=={client:REPLAY_ROUNDS for client in observed.get("connections_by_client",{})} and
+                        len(observed.get("connections_by_client",{}))==case["clients"] and
+                        all(gap["ready_samples"] for gap in row["idle_gaps"]) and row["parking_continuity"])
+                elif "idle_gaps" in row:
                     groups=case["departure_groups"]
                     assigned=[set() for _ in range(groups)]
                     for index in range(case["vehicles"]):
@@ -394,7 +437,7 @@ def compare(report):
         if "error" in row:continue
         c=row["case"];groups.setdefault(c["name"],[]).append(row)
         key=(c["vehicles"],c.get("history_minutes",0),c.get("local_scale",False),c.get("driving_seconds",12 if c.get("local_scale") else 4))
-        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]},departure_groups={c.get('departure_groups',1)},parking_replay={c.get('parking_replay',False)}"
+        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]},departure_groups={c.get('departure_groups',1)},parking_replay={c.get('parking_replay',False)},compressed_replay={c.get('compressed_replay',False)}"
         fingerprints.setdefault(key,set()).add((row["accepted_messages"],row["fingerprint"]))
     comparison=[]
     for name,rows in groups.items():

@@ -121,12 +121,14 @@ def execute(manager, job, data, worker, timeout):
                 return True
             time.sleep(min(.05,max(0,(due-elapsed*1000)/1000)))
 
+    due_offset=data.get("due_offset",lambda ts:ts-data["measurement_start_ms"])
+
     def consume(timestamp,vehicle,message,synthetic):
         if mqtt:
             if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
             data["validate_message"](message)
             if not publisher.enqueue("publish",gate,vehicle_id=vehicle,message=message):return
-        due=timestamp-data["measurement_start_ms"]
+        due=due_offset(timestamp)
         sequences[vehicle]=sequences.get(vehicle,0)+1
         result["processed_messages"]+=1
         result["payload_bytes"]+=len(json.dumps(message,separators=(",",":"),ensure_ascii=False).encode())
@@ -143,7 +145,7 @@ def execute(manager, job, data, worker, timeout):
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
-            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget)
+            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget,due_offset=due_offset)
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break

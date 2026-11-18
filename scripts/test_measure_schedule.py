@@ -81,6 +81,36 @@ class ScheduleMeasurementTest(unittest.TestCase):
             with self.subTest(changes=changes),self.assertRaises(ValueError):
                 measurement.validate_config(dict(cases=[dict(cases[0],**changes)]))
 
+    def test_compressed_replay_keeps_payload_dates_and_shortens_only_dispatch(self):
+        from services.control.schedule import instant
+        config=json.loads((measurement.ROOT/"configs/schedule-compressed.example.json").read_text(encoding="utf-8-sig"))
+        cases,_=measurement.validate_config(config)
+        source=measurement.schedule_source(cases[0])
+        self.assertEqual(source,measurement.schedule_source(cases[1]))
+        start=instant(source["measurement"]["start"])
+        trips=source["vehicles"][0]["trips"]
+        for index,trip in enumerate(trips):
+            departure,end=instant(trip["start"]),instant(trip["end"])
+            self.assertEqual(departure-start,index*1806000)
+            self.assertEqual(end-departure,4000)
+            self.assertEqual(measurement.compressed_due_offset(start,departure),index*35000)
+            self.assertEqual(measurement.compressed_due_offset(start,end),index*35000+4000)
+        for changes in (dict(local_scale=False),dict(lifetime="always"),dict(parking_replay=True),
+                        dict(departure_groups=2),dict(compressed_replay=1)):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                measurement.validate_config(dict(cases=[dict(cases[0],**changes)]))
+
+        from services.control.schedule_obd import key_for
+        vehicle=source["vehicles"][0]
+        summaries={}
+        for index,trip in enumerate(trips):
+            a,b=instant(trip["start"]),instant(trip["end"])
+            tid=int(key_for(vehicle["vehicle_id"],a,b,trip["road_profile"])[:12],16)
+            summaries[tid]=dict(stt=a,edt=b,stlat=index,stlon=0,edlat=index+1,edlon=0,tdis=index+1,dis=1)
+        self.assertTrue(measurement.verify_parking_continuity({"vehicles":[vehicle]},summaries))
+        summaries.pop(tid)
+        self.assertFalse(measurement.verify_parking_continuity({"vehicles":[vehicle]},summaries))
+
     def test_real_parking_case_bounds_and_same_vehicle_schedule(self):
         from services.control.schedule import instant
         config=json.loads((measurement.ROOT/"configs/schedule-parking.example.json").read_text())

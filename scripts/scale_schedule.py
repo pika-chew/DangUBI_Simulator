@@ -5,7 +5,7 @@ from uuid import uuid4
 
 
 def prepare(source,case,worker,profile,validate):
-    from scripts.measure_schedule import local_profile
+    from scripts.measure_schedule import local_profile, compressed_due_offset, REPLAY_SPACING_SECONDS, REPLAY_ROUNDS
     local_profile(profile) # 외부 주소는 확장 플래그와 무관하게 먼저 거절한다.
     from services.control.schedule import ScheduleRequest,plan,instant
     from services.control.schedule_cursor import provider_for
@@ -35,6 +35,9 @@ def prepare(source,case,worker,profile,validate):
               trip_provider=lambda v:providers[v](v),measurement_start_ms=start,duration_ms=end-start,realtime=True,
               validate_message=validate,mqtt=profile,generation_workers=case["workers"],generation_queue_messages=2000,
               generation_queue_bytes=8388608,execution_checkpoint_stats=states.stats)
+    if case.get("compressed_replay"):
+        data.update(due_offset=partial(compressed_due_offset,start),
+                    duration_ms=((REPLAY_ROUNDS-1)*REPLAY_SPACING_SECONDS+6)*1000)
     def start_run(manager):
         return manager.start(run_id,dict(local_scale=True,config=config),data,worker,profile["max_duration_seconds"],runner=partial(execute,manager))
     return start_run

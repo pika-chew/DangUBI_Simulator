@@ -32,6 +32,8 @@ type testBroker struct {
 	sockets          []net.Conn
 	ids              map[string]bool
 	connectionCounts map[string]int
+	topicClients     map[string]string
+	clientChanges    int
 	published        int
 	messages         []map[string]any
 	noAck            bool
@@ -137,6 +139,15 @@ func (b *testBroker) handle(conn net.Conn) {
 			ack.Write(conn)
 		case *packets.PublishPacket:
 			b.mu.Lock()
+			if b.topicClients != nil {
+				if previous, ok := b.topicClients[p.TopicName]; ok {
+					if previous != clientID {
+						b.clientChanges++
+					}
+				} else if len(b.topicClients) < 1000 {
+					b.topicClients[p.TopicName] = clientID
+				}
+			}
 			b.published++
 			b.handling++
 			b.peakHandling = max(b.peakHandling, b.handling)

@@ -7,10 +7,10 @@ from services.control.mqtt_bridge import MQTTFailure
 
 
 class SchedulePublisher:
-    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None):
+    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None):
         self.bridge=bridge
         self.on_account=on_account
-        self.measurement_start_ms=measurement_start_ms
+        self.due_offset=due_offset or (lambda ts:ts-measurement_start_ms)
         self.clients=client_by_vehicle
         self.queues={client:deque() for client in sorted(set(self.clients.values()))}
         self.active={}
@@ -65,7 +65,7 @@ class SchedulePublisher:
             if not queue or client in self.busy:continue
             command,fields,size=queue[0]
             if command=="publish":
-                fields=dict(fields,due_at_ms=int(time.time()*1000+fields["message"]["ts"]-self.measurement_start_ms-elapsed_ms))
+                fields=dict(fields,due_at_ms=int(time.time()*1000+self.due_offset(fields["message"]["ts"])-elapsed_ms))
             identifier=self.bridge.submit(command,**fields)
             queue.popleft()
             self.active[identifier]=(client,command,size)

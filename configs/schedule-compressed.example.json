@@ -1,0 +1,7 @@
+{
+  "repeats": 1,
+  "cases": [
+    {"name":"compressed-pool","vehicles":1000,"clients":10,"workers":2,"local_scale":true,"lifetime":"while_driving","compressed_replay":true},
+    {"name":"compressed-dedicated","vehicles":1000,"clients":1000,"workers":2,"local_scale":true,"lifetime":"while_driving","compressed_replay":true}
+  ]
+}
