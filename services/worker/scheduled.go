@@ -88,7 +88,7 @@ func scheduledOBD(input Request) (Result, error) {
 	for seq := first + int64(s.Offset); seq <= last && len(out.Messages) < s.Limit; seq++ {
 		out.Messages = append(out.Messages, message(int(seq)))
 	}
-	stride := max(int64(1), (last-first+119)/120)
+	stride := max(int64(1), (last-first+120)/120)
 	for seq := first; seq <= last; seq += stride {
 		m := message(int(seq))
 		p := m["pld"].(map[string]any)
