@@ -64,6 +64,23 @@ class ScheduleMeasurementTest(unittest.TestCase):
             with self.subTest(changes=changes),self.assertRaises(ValueError):
                 measurement.validate_config(dict(cases=[dict(case,**changes)]))
 
+    def test_staggered_plan_preserves_one_trip_per_vehicle_and_observation_tail(self):
+        cases,_=measurement.validate_config(json.loads(
+            (measurement.ROOT/"configs/schedule-staggered.example.json").read_text()))
+        pooled,dedicated=map(measurement.schedule_source,cases)
+        self.assertEqual(pooled,dedicated)
+        starts=[v["trips"][0]["start"] for v in pooled["vehicles"]]
+        self.assertEqual([starts.count(start) for start in sorted(set(starts))],[40]*4)
+        from services.control.schedule import instant
+        base=instant(pooled["measurement"]["start"])
+        self.assertEqual([instant(at)-base for at in sorted(set(starts))],[0,20000,40000,60000])
+        self.assertEqual(instant(pooled["measurement"]["end"])-base,74000)
+        rejected=(dict(departure_groups=True),dict(departure_groups=6),dict(driving_seconds=16),
+                  dict(history_minutes=1),dict(vehicles=10,clients=10,local_scale=False))
+        for changes in rejected:
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                measurement.validate_config(dict(cases=[dict(cases[0],**changes)]))
+
     def test_fingerprint_is_numeric_and_key_order_independent(self):
         m=dict(ty=4,ts=1,pld=dict(sp=1.5,flags=[True,None,"한"]))
         self.assertEqual(hashlib.sha256(measurement.canonical(m)).hexdigest(),"bd88e197fcbbc651353e7db126e41c922dd7544b86a08c0082f45eda8aae25ce")

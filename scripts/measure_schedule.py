@@ -23,6 +23,8 @@ sys.path.insert(0,str(ROOT))
 from scripts.measure_mqtt import ProcessResources
 from scripts.measurement_process import ProcessTree
 
+DEPARTURE_SPACING_SECONDS = 20
+
 
 def validate_config(config):
     if not isinstance(config,dict) or set(config)-{"cases","repeats"}:raise ValueError("측정 설정 형식을 확인하세요.")
@@ -30,7 +32,7 @@ def validate_config(config):
     if type(repeats) is not int or not 1<=repeats<=3 or not isinstance(cases,list) or not 1<=len(cases)<=24:raise ValueError("조건1~24개·반복1~3회입니다.")
     names=set();seconds=0
     for c in cases:
-        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
+        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds","departure_groups"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
         if type(c.get("local_scale",False)) is not bool:raise ValueError("로컬 확장 플래그는 boolean입니다.")
         cap=1000 if c.get("local_scale") else 20
         name=c.get("name")
@@ -45,9 +47,30 @@ def validate_config(config):
         if "driving_seconds" in c and (not c.get("local_scale") or type(driving) is not int or not 12<=driving<=90
                                        or c["vehicles"]*((driving+1)//2+1)>10000):
             raise ValueError("확장 계측의 운행은 12~90초, 전체 메시지는 10,000건 이하여야 합니다.")
-        seconds+=max(60,driving+2) if c.get("local_scale") else 10
+        groups=c.get("departure_groups",1)
+        if "departure_groups" in c and (not c.get("local_scale") or type(groups) is not int
+                or not 2<=groups<=min(5,c["vehicles"]) or driving>15 or c.get("history_minutes",0)):
+            raise ValueError("분산 출발은 로컬 확장 전용이며 출발 그룹 2~5개, 운행 12~15초, 사전 운행 0분입니다.")
+        seconds+=max(60,(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2) if c.get("local_scale") else 10
     if seconds*repeats>900:raise ValueError("예상15분 이내의 측정 계획만 허용합니다.")
     return cases,repeats
+
+
+def schedule_source(case):
+    base=datetime(2026,11,18,13,tzinfo=timezone(timedelta(hours=9)))
+    driving=case.get("driving_seconds",12 if case.get("local_scale") else 4)
+    groups=case.get("departure_groups",1)
+    count=case["vehicles"]
+    duration=(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2
+    vehicles=[]
+    for index in range(count):
+        departure=base+timedelta(seconds=(index*groups//count)*DEPARTURE_SPACING_SECONDS)
+        vehicles.append(dict(vehicle_id=f"v{index+1:06d}",trips=[dict(
+            start=(departure-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
+            end=(departure+timedelta(seconds=driving)).isoformat(),road_profile="mixed")]))
+    return dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=2000 if case.get("local_scale") else 1000,
+                measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=duration)).isoformat(),timezone="Asia/Seoul"),
+                vehicles=vehicles)
 
 
 def canonical(value):
@@ -168,12 +191,10 @@ def child(case,profile_path,worker,temporary):
         nonlocal digest,accepted
         original_validate(message);digest=(digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256);accepted+=1
     control.validate_message=validate
-    base=datetime(2026,11,18,13,tzinfo=timezone(timedelta(hours=9)))
-    driving=case.get("driving_seconds",12 if case.get("local_scale") else 4)
-    source=dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=2000 if case.get("local_scale") else 1000,
-                measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=driving+2)).isoformat(),timezone="Asia/Seoul"),
-                vehicles=[dict(vehicle_id=f"v{i:06d}",trips=[dict(start=(base-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
-                          end=(base+timedelta(seconds=driving)).isoformat(),road_profile="mixed")]) for i in range(1,case["vehicles"]+1)])
+    source=schedule_source(case)
+    groups=case.get("departure_groups",1)
+    driving=case.get("driving_seconds",12)
+    idle_samples=[dict(samples=0,empty_queue_samples=0,disconnected_samples=0) for _ in range(groups-1)]
     sampler=None
     with TestClient(control.app) as client:
         before=time.monotonic()
@@ -199,15 +220,26 @@ def child(case,profile_path,worker,temporary):
                     if not any(q.pid==p.pid for _,q in processes):processes.append(("generation",p))
                 result=client.get("/api/jobs/"+run_id).json()["result"]
                 if result["job_state"] not in control.ACTIVE:break
+                elapsed_ms=result.get("elapsed_ms",0)
+                group,within_group=divmod(elapsed_ms,DEPARTURE_SPACING_SECONDS*1000)
+                # 종료 경계 처리와 다음 그룹의 2초 선행 생성을 피해 주차 중간을 관측한다.
+                if group<len(idle_samples) and driving*1000+500<=within_group<DEPARTURE_SPACING_SECONDS*1000-2500:
+                    sample=idle_samples[group]
+                    sample["samples"]+=1
+                    budget=result.get("buffer_budget",{})
+                    sample["empty_queue_samples"]+=budget.get("reserved_messages")==budget.get("reserved_bytes")==0
+                    sample["disconnected_samples"]+=result.get("active_clients")==0
                 if time.monotonic()-started>(130 if case.get("local_scale") else 40):raise RuntimeError("통합 계측 시간 초과")
                 time.sleep(.5 if case.get("local_scale") else .05)
             elapsed=time.monotonic()-started;resources=sampler.finish(elapsed);sampler=None
             keys=("job_state","planned_messages","processed_messages","publish_attempts","mqtt_published","puback_count","unconfirmed_messages",
                   "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
                   "generation_session","buffer_budget","transmission","execution_cleanup_confirmed","forced_termination")
-            keys+= ("initial_connect_ms","post_connect_schedule","execution_timing","publish_windows")
+            keys+= ("initial_connect_ms","post_connect_schedule","execution_timing","publish_windows","microtrip_count","trip_count","reconnect_count")
             row=dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
                      plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
+            if idle_samples:
+                row["idle_gaps"]=idle_samples
             if profile_thread:
                 job.thread.join(timeout=5)
                 if job.thread.is_alive():raise RuntimeError("프로파일 종료를 확인하지 못했습니다.")
@@ -251,6 +283,20 @@ def measure(case,fixture,worker):
                 r=row["result"]
                 row["integrity_passed"]=r["job_state"]=="completed" and r["puback_count"]==r["planned_messages"]==observed["received"]==row["accepted_messages"] and row["fingerprint"]==observed["fingerprint"] and observed["out_of_order"]==observed["invalid_messages"]==0 and observed["vehicle_topics"]==case["vehicles"] and observed["unique_client_ids"]==case["clients"]
                 row["cleanup_passed"]=r["execution_cleanup_confirmed"] is True and row["resources"]["all_children_exited"] and not r["forced_termination"] and r["buffer_budget"]["reserved_bytes"]==r["buffer_budget"]["reserved_messages"]==0
+                if "idle_gaps" in row:
+                    groups=case["departure_groups"]
+                    assigned=[set() for _ in range(groups)]
+                    for index in range(case["vehicles"]):
+                        assigned[index*groups//case["vehicles"]].add(index%case["clients"])
+                    while_driving=case.get("lifetime","always")=="while_driving"
+                    expected_connections=sum(map(len,assigned)) if while_driving else case["clients"]
+                    row["expected_connections"]=expected_connections
+                    row["integrity_passed"] &= (
+                        r["connection_count"]==r["disconnect_count"]==expected_connections and
+                        r["trip_count"]==case["vehicles"] and
+                        r["microtrip_count"]==r["planned_messages"]-case["vehicles"] and
+                        all(gap["empty_queue_samples"] and (not while_driving or gap["disconnected_samples"])
+                            for gap in row["idle_gaps"]))
                 roles=row["resources"]["roles"]
                 row["resources_valid"]=row["resources"]["cpu_seconds"] is not None and all(roles.get(k,{}).get("processes")==n and roles[k]["memory_samples"]>0 for k,n in [("control",1),("sender",1),("generation",case["workers"])])
                 return row
@@ -267,7 +313,7 @@ def compare(report):
         if "error" in row:continue
         c=row["case"];groups.setdefault(c["name"],[]).append(row)
         key=(c["vehicles"],c.get("history_minutes",0),c.get("local_scale",False),c.get("driving_seconds",12 if c.get("local_scale") else 4))
-        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]}"
+        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]},departure_groups={c.get('departure_groups',1)}"
         fingerprints.setdefault(key,set()).add((row["accepted_messages"],row["fingerprint"]))
     comparison=[]
     for name,rows in groups.items():
@@ -316,7 +362,7 @@ def main():
             except Exception as error:row=dict(case=case,error=str(error) if isinstance(error,RuntimeError) else "측정 실행 또는 정리에 실패했습니다.",error_kind=type(error).__name__)
             row["repeat"]=repeat+1;report["results"].append(row)
             (directory/"summary.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 동시 관측 RSS 합계입니다. 관측 기간은 운행 시간에 2초를 더한 값입니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
+    lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 동시 관측 RSS 합계입니다. 관측은 마지막 운행 종료 2초 후까지입니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
     for row in report["results"]:
         c=row["case"]
         if "error" in row:lines.append(f"|{c['name']}|{c['workers']}|{c['clients']}|측정 오류|—|—|—|—|");continue

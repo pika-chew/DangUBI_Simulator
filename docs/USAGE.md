@@ -600,3 +600,7 @@ Go가 기록하는 `worker_compute_ms`는 공통 생성 함수, `worker_serializ
 지속 전송 예시는 `.venv/Scripts/python.exe scripts/measure_schedule.py --config configs/schedule-sustained.example.json`으로 실행합니다. 로컬 확장 설정에서 `driving_seconds`를 12~90초로 정하며 차량 전체 메시지는 10,000건 이하입니다. 예시는 160대가 90초 동안 2초마다 Microtrip을 보내고 종료 Trip을 한 건씩 보내는 설정입니다. 연결 방식별로 7,360건을 확인합니다.
 
 `publish_windows`는 송신 Worker 시작을 기준으로 10초마다 발행 건수·평균·최대·P95 상한을 집계합니다. `rss_windows`는 자원 수집 시작을 기준으로 10초마다 제어기와 Worker의 동시 RSS 합계 최솟값·최댓값을 기록합니다. 두 지표의 시간 원점은 다릅니다. 마지막 메모리 구간은 종료 정리도 포함할 수 있습니다.
+
+분산 출발은 `.venv/Scripts/python.exe scripts/measure_schedule.py --config configs/schedule-staggered.example.json`으로 확인합니다. `departure_groups`를 지정하면 로컬 확장 시험에서 차량을 2~5개 그룹으로 나눠 20초 간격으로 출발시킵니다. 각 차량은 12~15초 동안 한 번 운행합니다. 예시는 40대씩 네 그룹과 운행 중 연결 설정으로 구성됩니다.
+
+`idle_gaps`에는 그룹 사이의 진행 상태 표본 수와 대기열 예약이 0이었던 표본 수를 기록합니다. 운행 중에만 연결하는 예시에서는 활성 Client가 0이었던 표본도 확인합니다. 연결 풀은 다음 그룹을 위해 같은 Client ID를 다시 연결할 수 있습니다. 같은 차량이 30분 주차 후 재출발하는 경계와 운행 상태 연속성은 `test_parked_vehicles_replay_four_trips_with_continuous_state`에서 가상 시간으로 검증합니다.

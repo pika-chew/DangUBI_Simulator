@@ -97,6 +97,79 @@ def test_real_workers_match_every_legacy_message_and_clean_up():
         if workers>1:assert pool.peak_active_workers>1
 
 
+def test_parked_vehicles_replay_four_trips_with_continuous_state():
+    from datetime import datetime, timedelta
+    import os
+    from services.control.schedule import instant
+    from services.control.schedule_obd import ScheduledOBDRequest, generate
+
+    worker=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")
+    start=datetime.fromisoformat("2026-11-17T13:00:00+09:00")
+    vehicles=[]
+    for index in range(72):
+        departures=[start+timedelta(seconds=(index%4)*2+1830*round_index) for round_index in range(4)]
+        vehicles.append({"vehicle_id":f"v{index:06d}","trips":[
+            {"start":at.isoformat(),"end":(at+timedelta(seconds=30)).isoformat(),"road_profile":"urban"}
+            for at in departures]})
+    req=ScheduleRequest(mode="manual",interval_ms=2000,vehicles=vehicles,measurement={
+        "start":start.isoformat(),"end":(start+timedelta(seconds=5532)).isoformat(),"timezone":"Asia/Seoul"})
+    body=ScheduledOBDRequest(schedule=req,checkpoint_epoch=0)
+    provider=provider_for(SimpleNamespace(fleet=None,schedule=req))
+    checkpoints=ExecutionCheckpoints()
+    job=SimpleNamespace(stop_requested=False,pause_requested=False,processes=[])
+    pool=GenerationPool(worker,job,SimpleNamespace(lock=threading.RLock()),2)
+
+    def page(vehicle,key,offset,session,limit):
+        return generate(body,vehicle,key,worker,None,None,offset,limit,
+                        checkpoint_store=checkpoints,session=session)
+
+    data=dict(assignments=[{"vehicle_id":v.vehicle_id} for v in req.vehicles],trip_provider=provider,
+              generate=page,config={"interval_ms":2000},measurement_start_ms=instant(start.isoformat()),
+              realtime=False,generation_queue_messages=256,generation_queue_bytes=4194304)
+    queue=BoundedSchedule(data,pool,lambda due=None:True,{},include_boundaries=True)
+    expected={}
+    for vehicle in vehicles:
+        events=[]
+        for trip in vehicle["trips"]:
+            departure,arrival=instant(trip["start"]),instant(trip["end"])
+            events.extend([(departure,0,None),*((at,1,4) for at in range(departure,arrival,2000)),
+                           (arrival,1,3),(arrival,2,None)])
+        expected[vehicle["vehicle_id"]]=events
+    seen={v:[] for v in expected}
+    last_trip={}
+    last_order=None
+    virtual_gaps=set()
+    try:
+        for timestamp,priority,vehicle,message,_ in queue:
+            order=(timestamp,priority,vehicle)
+            if last_order is not None:
+                assert order>=last_order
+                if timestamp-last_order[0]>=1_800_000-6_000:
+                    virtual_gaps.add(timestamp)
+            last_order=order
+            kind=message["ty"] if message else None
+            seen[vehicle].append((timestamp,priority,kind))
+            if kind==3:
+                trip=message["pld"]
+                previous=last_trip.get(vehicle)
+                if previous is not None:
+                    assert trip["stt"]-previous["edt"]==1_800_000
+                    assert (trip["stlat"],trip["stlon"])==(previous["edlat"],previous["edlon"])
+                    assert trip["tdis"]==pytest.approx(previous["tdis"]+trip["dis"],abs=1e-7,rel=0)
+                last_trip[vehicle]=trip
+        assert seen==expected
+        assert len(virtual_gaps)==3
+        assert queue.stats["emitted_messages"]==4608
+        assert queue.stats["peak_reserved_messages"]<=256
+        assert queue.stats["peak_reserved_bytes"]<=4194304
+        assert checkpoints.stats()["entries"]==256
+    finally:
+        pool.close()
+        queue.close()
+    assert pool.cleaned and pool.close_acknowledged
+    assert queue.stats["reserved_bytes"]==queue.stats["reserved_messages"]==0
+
+
 def test_worker_failure_stops_all_processes():
     import os
     worker=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")

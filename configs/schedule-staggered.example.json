@@ -1,0 +1,23 @@
+{
+  "repeats": 1,
+  "cases": [
+    {
+      "name": "pooled-departures",
+      "vehicles": 160,
+      "clients": 10,
+      "workers": 2,
+      "local_scale": true,
+      "lifetime": "while_driving",
+      "departure_groups": 4
+    },
+    {
+      "name": "dedicated-departures",
+      "vehicles": 160,
+      "clients": 160,
+      "workers": 2,
+      "local_scale": true,
+      "lifetime": "while_driving",
+      "departure_groups": 4
+    }
+  ]
+}
