@@ -72,3 +72,23 @@ def test_session_eof_and_unresponsive_stop_cleanup(monkeypatch):
     monkeypatch.setattr(s,"_write",lambda command:None)
     s.close(abort=True)
     assert s.cleaned and s.forced and s.process.poll() is not None and not s.reader.is_alive()
+
+
+def test_byte_limited_pages_keep_every_message_and_final_trip():
+    s=GenerationSession(WORKER)
+    try:
+        p=payload();observed=[];sizes=[]
+        while True:
+            page=s.page(p,byte_limit=16384);sizes.append(len(page["messages"]))
+            observed.extend(page["messages"]);p["offset"]+=len(page["messages"])
+            if p["offset"]>=page["microtrip_count"]:
+                final=page["trip"];break
+        assert len(sizes)>3 and max(sizes)<100
+        expected=[];p=payload()
+        for offset in range(0,300,100):
+            p["offset"]=offset
+            old=json.loads(subprocess.run([str(WORKER)],input=json.dumps(dict(operation="schedule_obd",scheduled=p)).encode(),stdout=subprocess.PIPE,check=True).stdout)["scheduled"]
+            expected.extend(old["messages"])
+        assert observed==expected and final==old["trip"]
+    finally:s.close()
+    assert s.cleaned and s.close_acknowledged

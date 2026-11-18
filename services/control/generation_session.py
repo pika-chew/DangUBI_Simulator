@@ -35,6 +35,7 @@ class GenerationSession:
             while line:=self.process.stdout.readline(1048577):
                 if len(line.encode("utf-8"))>1048576: break
                 self.responses.put(json.loads(line),timeout=1)
+                line=None
         except (ValueError,OSError,queue.Full):
             pass
         finally:
@@ -68,10 +69,10 @@ class GenerationSession:
             return reply
         raise GenerationFailure("생성 세션의 응답 제한시간을 초과했습니다.")
 
-    def page(self,payload,timeout=15):
+    def page(self,payload,timeout=15,byte_limit=1048576):
         if self.closed:raise GenerationFailure("종료된 생성 세션입니다.")
         self.sequence+=1
-        self._write({"id":self.sequence,"command":"page","scheduled":payload})
+        self._write({"id":self.sequence,"command":"page","scheduled":payload,"byte_limit":byte_limit})
         reply=self._receive(self.sequence,timeout)
         result=reply.get("scheduled")
         if not isinstance(result,dict) or not isinstance(result.get("messages"),list) or reply.get("next_offset")!=payload["offset"]+len(result["messages"]):

@@ -1137,3 +1137,80 @@ def test_workspace_dry_run_reuses_generation_session(client):
     assert stats["process_starts"]==1 and stats["page_requests"]==3
     assert stats["plan_builds"]==1 and stats["cache_hits"]==2
     assert stats["cleanup_confirmed"] and stats["close_acknowledged"] and not stats["forced_termination"]
+
+
+def test_workspace_worker_pool_counts_limits_and_determinism(client):
+    schedule=scheduled_obd_body()["schedule"]
+    schedule["measurement"]={"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:04:00+09:00"}
+    schedule["vehicles"]=[{"vehicle_id":f"v{i:06d}","trips":[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:04:00+09:00","road_profile":"mixed"}]} for i in range(1,9)]
+    saved=client.post("/api/workspace/plans",json={"title":"병렬 생성","schedule":schedule}).json()
+    reference=None
+    for workers in [1,2,4]:
+        r=client.post("/api/workspace/execute",json={"plan_key":saved["key"],"realtime":False,"generation_workers":workers,"generation_queue_messages":256,"generation_queue_bytes":4194304})
+        assert r.status_code==202,r.text
+        result=wait_workspace_job(client,r.json()["id"])["result"]
+        assert result["job_state"]=="completed",result
+        assert result["processed_messages"]==968 and result["trip_count"]==8
+        stats=result["generation_session"];q=result["generation_pool"]["queue"]
+        assert stats["process_starts"]==workers and stats["cleanup_confirmed"] and stats["close_acknowledged"]
+        if workers>1:assert stats["peak_active_workers"]>1
+        assert q["peak_reserved_messages"]<=256 and q["peak_reserved_bytes"]<=4194304
+        samples=[dict(vehicle_id=s["vehicle_id"],sequence=s["sequence"],message=s["message"]) for s in result["samples"]]
+        if reference is None:reference=samples
+        assert samples==reference
+    for fields in [dict(generation_workers=3),dict(generation_workers=True),dict(generation_workers=2.0),dict(generation_queue_messages=200),dict(generation_queue_bytes=1000)]:
+        assert client.post("/api/workspace/execute",json={"plan_key":saved["key"],**fields}).status_code==422
+
+
+def test_workspace_pool_pause_stop_and_ui_cache_clear(client):
+    import time
+    schedule=scheduled_obd_body()["schedule"]
+    schedule["interval_ms"]=100
+    schedule["measurement"]["end"]="2026-11-17T13:00:10+09:00"
+    schedule["vehicles"]=[{"vehicle_id":f"v{i:06d}","trips":[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:00:10+09:00","road_profile":"urban"}]} for i in range(1,9)]
+    saved=client.post("/api/workspace/plans",json={"title":"풀 제어","schedule":schedule}).json()
+    r=client.post("/api/workspace/execute",json={"plan_key":saved["key"],"generation_workers":4,"generation_queue_messages":256})
+    assert r.status_code==202,r.text
+    job=control.JOBS.active
+    deadline=time.monotonic()+3
+    while len(job.processes)<4 and time.monotonic()<deadline:time.sleep(.01)
+    assert len(job.processes)==4
+    client.post("/api/jobs/"+r.json()["id"]+"/pause")
+    deadline=time.monotonic()+3
+    while job.result["job_state"]!="paused" and time.monotonic()<deadline:time.sleep(.01)
+    assert job.result["job_state"]=="paused"
+    count=job.result["processed_messages"];time.sleep(.05)
+    assert job.result["processed_messages"]==count
+    assert client.delete("/api/checkpoints").status_code==200
+    client.post("/api/jobs/"+r.json()["id"]+"/resume")
+    deadline=time.monotonic()+4
+    while sum(w.get("page_requests",0) for w in job.result.get("generation_pool",{}).get("workers",[]))<=8 and time.monotonic()<deadline:time.sleep(.01)
+    assert sum(w.get("page_requests",0) for w in job.result["generation_pool"]["workers"])>8
+    assert job.result["job_state"]!="failed"
+    client.post("/api/jobs/"+r.json()["id"]+"/stop")
+    result=wait_workspace_job(client,r.json()["id"])["result"]
+    assert result["job_state"]=="stopped",result
+    assert result["generation_session"]["cleanup_confirmed"]
+    assert all(p.poll() is not None for p in job.processes)
+    assert result["generation_pool"]["queue"]["queued_messages"]==0
+    assert result["generation_pool"]["queue"]["reserved_bytes"]==0
+
+
+def test_fleet_pool_matches_single_worker_with_execution_state(client):
+    import json
+    body=json.loads((Path(__file__).resolve().parents[2]/"configs/fleet-bounded.example.json").read_text(encoding="utf-8"))
+    body.update(vehicle_count=8,day_off_probability=0,weekend_activity_probability=1,trip_min_minutes=3,trip_max_minutes=10,measurement={"start":"2026-11-17T08:00:00+09:00","end":"2026-11-17T09:00:00+09:00","timezone":"Asia/Seoul"})
+    saved=client.post("/api/workspace/plans",json={"title":"자동 배정 병렬","fleet":body}).json()
+    assert saved["planned_messages"]>0
+    reference=None
+    for workers in [1,4]:
+        started=client.post("/api/workspace/execute",json={"plan_key":saved["key"],"realtime":False,"generation_workers":workers})
+        assert started.status_code==202,started.text
+        result=wait_workspace_job(client,started.json()["id"])["result"]
+        assert result["job_state"]=="completed",result
+        assert result["processed_messages"]==saved["planned_messages"]
+        samples=[(s["vehicle_id"],s["sequence"],s["message"]) for s in result["samples"]]
+        if reference is None:reference=samples
+        assert samples==reference
+        assert result["generation_session"]["cleanup_confirmed"]
+        assert result["generation_pool"]["execution_checkpoints"]["entries"]<=256

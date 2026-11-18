@@ -106,6 +106,7 @@ func serveScheduleStream(input io.Reader, w io.Writer) {
 			ID        int             `json:"id"`
 			Command   string          `json:"command"`
 			Scheduled *ScheduledInput `json:"scheduled,omitempty"`
+			ByteLimit int             `json:"byte_limit,omitempty"`
 		}
 		if dec.Decode(&cmd) != nil {
 			return
@@ -143,9 +144,43 @@ func serveScheduleStream(input io.Reader, w io.Writer) {
 			return
 		}
 		page := result.Scheduled
+		budget := cmd.ByteLimit
+		if budget == 0 {
+			budget = 1048576
+		}
+		if budget < 16384 || budget > 1048576 {
+			fail("생성 응답 바이트 예산을 확인하세요.")
+			return
+		}
+		used, keep := 4096, 0
+		for _, message := range page.Messages {
+			raw, e := json.Marshal(message)
+			if e != nil {
+				return
+			}
+			if used+len(raw)+1 > budget {
+				break
+			}
+			used += len(raw) + 1
+			keep++
+		}
+		if len(page.Messages) > 0 && keep == 0 {
+			fail("메시지 한 건이 응답 예산을 초과했습니다.")
+			return
+		}
+		page.Messages = page.Messages[:keep]
+		if int64(cmd.Scheduled.Offset+keep) < page.MicroCount {
+			page.Trip = nil
+		}
 		// 실행 응답에는 그래프와 중간 이벤트 설명을 싣지 않는다. OBD 본문은 조회와 공유한다.
 		value := map[string]any{"model": page.Model, "messages": page.Messages, "microtrip_count": page.MicroCount, "trip": page.Trip, "synthetic_trip": page.Synthetic, "final_lat": page.FinalLat, "final_lon": page.FinalLon, "final_odometer_m": page.FinalOdometer, "final_coolant_c": page.FinalCoolant, "final_heading_rad": page.FinalHeading}
-		if enc.Encode(map[string]any{"id": cmd.ID, "ok": true, "scheduled": value, "next_offset": cmd.Scheduled.Offset + len(page.Messages), "stats": cache.stats()}) != nil {
+		reply := map[string]any{"id": cmd.ID, "ok": true, "scheduled": value, "next_offset": cmd.Scheduled.Offset + len(page.Messages), "stats": cache.stats()}
+		raw, err := json.Marshal(reply)
+		if err != nil || len(raw)+1 > budget {
+			fail("응답 바이트 예산을 초과했습니다.")
+			return
+		}
+		if _, err = w.Write(append(raw, '\n')); err != nil {
 			return
 		}
 	}

@@ -149,3 +149,31 @@ func TestScheduleSessionRealPlanByteBudget(t *testing.T) {
 		t.Fatal("긴 운행의 바이트 예산으로 축출되지 않음", len(c.entries), c.bytes)
 	}
 }
+
+func TestScheduleSessionResponseByteBudget(t *testing.T) {
+	var in, out bytes.Buffer
+	enc := json.NewEncoder(&in)
+	s := sessionInput(600)
+	enc.Encode(map[string]any{"id": 1, "command": "page", "scheduled": s, "byte_limit": 16384})
+	enc.Encode(map[string]any{"id": 2, "command": "close"})
+	serveScheduleStream(&in, &out)
+	dec := json.NewDecoder(&out)
+	var ready, reply map[string]any
+	dec.Decode(&ready)
+	dec.Decode(&reply)
+	raw, _ := json.Marshal(reply)
+	if len(raw)+1 > 16384 || reply["ok"] != true {
+		t.Fatal("바이트 응답 상한")
+	}
+	page := reply["scheduled"].(map[string]any)
+	messages := page["messages"].([]any)
+	if len(messages) == 0 || len(messages) >= 100 || reply["next_offset"] != float64(len(messages)) {
+		t.Fatal("바이트 기준 페이지 분할")
+	}
+	legacy, _ := scheduledOBD(Request{Scheduled: &s})
+	expected, _ := json.Marshal(legacy.Scheduled.Messages[:len(messages)])
+	actual, _ := json.Marshal(messages)
+	if !bytes.Equal(expected, actual) {
+		t.Fatal("작은 페이지 원본 불일치")
+	}
+}

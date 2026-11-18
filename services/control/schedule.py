@@ -116,28 +116,45 @@ def rng_for(req, *parts):
     return random.Random(int.from_bytes(digest, "big"))
 
 
-def vehicle_trips(req, vehicle):
+def iter_vehicle_trips(req, vehicle):
     if req.mode == "manual":
-        return [(instant(t.start), instant(t.end), t.road_profile) for t in vehicle.trips]
-    pattern = vehicle.pattern
-    first = datetime.fromtimestamp(instant(req.measurement.start)/1000, KST).date()-timedelta(days=2)
-    last = datetime.fromtimestamp(instant(req.measurement.end)/1000, KST).date()+timedelta(days=1)
-    baseline = rng_for(req, vehicle.vehicle_id, "baseline").randint(-pattern.baseline_jitter_minutes, pattern.baseline_jitter_minutes)
-    trips = []
+        for t in sorted(vehicle.trips,key=lambda t:(instant(t.start),instant(t.end),t.road_profile)):
+            yield instant(t.start),instant(t.end),t.road_profile
+        return
+    import heapq
+    pattern=vehicle.pattern
+    first=datetime.fromtimestamp(instant(req.measurement.start)/1000,KST).date()-timedelta(days=2)
+    last=datetime.fromtimestamp(instant(req.measurement.end)/1000,KST).date()+timedelta(days=1)
+    baseline=rng_for(req,vehicle.vehicle_id,"baseline").randint(-pattern.baseline_jitter_minutes,pattern.baseline_jitter_minutes)
+    pending=[]
     for n in range((last-first).days+1):
-        day = first+timedelta(days=n)
+        day=first+timedelta(days=n)
         if day.isoformat() in vehicle.overrides:
-            trips.extend((instant(t.start), instant(t.end), t.road_profile) for t in vehicle.overrides[day.isoformat()])
-            continue
-        if day.isoweekday() not in pattern.weekdays or rng_for(req, vehicle.vehicle_id, day.isoformat(), "off").random() < pattern.day_off_probability:
-            continue
-        for index, slot in enumerate(pattern.slots):
-            rng = rng_for(req, vehicle.vehicle_id, day.isoformat(), str(index))
-            hour, minute = map(int, slot.start_time.split(":"))
-            a = datetime(day.year, day.month, day.day, hour, minute, tzinfo=KST)+timedelta(minutes=baseline+rng.randint(-slot.departure_jitter_minutes, slot.departure_jitter_minutes))
-            duration = rng.randint(slot.duration_min_minutes, slot.duration_max_minutes)
-            trips.append((round(a.timestamp()*1000), round(a.timestamp()*1000)+duration*60000, slot.road_profile))
-    return trips
+            for t in vehicle.overrides[day.isoformat()]:heapq.heappush(pending,(instant(t.start),instant(t.end),t.road_profile))
+        elif day.isoweekday() in pattern.weekdays and rng_for(req,vehicle.vehicle_id,day.isoformat(),"off").random()>=pattern.day_off_probability:
+            for index,slot in enumerate(pattern.slots):
+                rng=rng_for(req,vehicle.vehicle_id,day.isoformat(),str(index))
+                hour,minute=map(int,slot.start_time.split(":"))
+                a=datetime(day.year,day.month,day.day,hour,minute,tzinfo=KST)+timedelta(minutes=baseline+rng.randint(-slot.departure_jitter_minutes,slot.departure_jitter_minutes))
+                duration=rng.randint(slot.duration_min_minutes,slot.duration_max_minutes)
+                start=round(a.timestamp()*1000)
+                heapq.heappush(pending,(start,start+duration*60000,slot.road_profile))
+        # 다음 날짜의 가장 이른 출발 이전만 출력한다. 기준/날짜별 편차 각각 최대120분을 고려한다.
+        boundary=round((datetime(day.year,day.month,day.day,tzinfo=KST)+timedelta(days=1,hours=-4)).timestamp()*1000)
+        while pending and pending[0][0]<boundary:yield heapq.heappop(pending)
+    while pending:yield heapq.heappop(pending)
+
+
+def vehicle_trips(req,vehicle):
+    return list(iter_vehicle_trips(req,vehicle))
+
+
+def observed_row(vehicle,a,b,profile,start,end,interval,version="schedule-plan-1"):
+    if b<start or a>end:return None
+    key=hashlib.sha256(f"{version}|{vehicle}|{a}|{b}|{profile}".encode()).hexdigest()
+    first=max(0,(start-a+interval-1)//interval)
+    last=(min(end,b-1)-a)//interval
+    return {"vehicle_id":vehicle,"trip_key":key,"tid":int(key[:12],16),"start_ms":a,"end_ms":b,"road_profile":profile,"observed_start_ms":max(a,start),"observed_end_ms":min(b,end),"started_before_window":a<start,"continues_after_window":b>end,"microtrip_count":max(0,last-first+1),"trip_count":int(start<=b<=end)}
 
 
 def plan(req: ScheduleRequest, offset=0, limit=100, vehicle_id=None, trip_provider=None):

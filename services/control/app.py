@@ -505,6 +505,15 @@ class ScheduleExecutionRequest(BaseModel):
     transport: Literal["dry_run", "mqtt"] = "dry_run"
     confirm_mqtt: bool = False
     connection_lifetime: Literal["always", "while_driving"] = "always"
+    generation_workers: int = Field(default=1,ge=1,le=4,strict=True)
+    generation_queue_messages: int = Field(default=2000,ge=256,le=2000)
+    generation_queue_bytes: int = Field(default=8388608,ge=4194304,le=16777216)
+
+    @model_validator(mode="after")
+    def worker_count(self):
+        if self.generation_workers not in (1,2,4):
+            raise ValueError("생성 Worker 수는1·2·4개만 지원합니다.")
+        return self
 
 
 @app.post("/api/workspace/execute", status_code=202)
@@ -525,20 +534,26 @@ def workspace_execute(body: ScheduleExecutionRequest):
     if clients > len(vehicle_ids):
         raise HTTPException(422, detail="연결 풀 Client 수는 차량 수 이하여야 합니다.")
     preview = preview_fleet if source.fleet else plan_schedule
-    trips={}
-    planned=0
+    trips={};planned=0;trip_provider=None
+    if body.transport=="dry_run":
+        from services.control.schedule_cursor import provider_for
+        trip_provider=provider_for(source)
+    elif body.generation_workers!=1 or body.generation_queue_messages!=2000 or body.generation_queue_bytes!=8388608:
+        raise HTTPException(422,detail="생성 Worker·대기열 설정은 송신 없는 일정 실행에만 적용합니다.")
     for vehicle in vehicle_ids:
-        rows=[]
-        for offset in range(0,10001,100):
-            page=preview(req,offset=offset,limit=100,vehicle_id=vehicle)
-            rows.extend(page["trips"])
-            if not page["has_more"]:
-                break
-        trips[vehicle]=rows
+        if trip_provider is not None:
+            rows=trip_provider(vehicle)
+        else:
+            collected=[]
+            for offset in range(0,10001,100):
+                page=preview(req,offset=offset,limit=100,vehicle_id=vehicle)
+                collected.extend(page["trips"])
+                if not page["has_more"]:break
+            trips[vehicle]=collected;rows=collected
         for row in rows:
             count=row["microtrip_count"]+row["trip_count"]
             if body.force_end_trip and row["continues_after_window"]:
-                count += 0 if (end-row["start_ms"]) % req.interval_ms == 0 else 1
+                count+=0 if (end-row["start_ms"])%req.interval_ms==0 else 1
             planned+=count
     if planned>10000:
         raise HTTPException(422,detail="시험용 Trip을 포함한 실행은10,000메시지 이하여야 합니다.")
@@ -557,13 +572,20 @@ def workspace_execute(body: ScheduleExecutionRequest):
     assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}"} for i,v in enumerate(vehicle_ids)]
     config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
     request={"config":config,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
-    checkpoint_epoch=CHECKPOINTS.stats()["epoch"]
-    def generate(vehicle,key,offset,session=None):
+    if profile is None:
+        from services.control.execution_checkpoints import ExecutionCheckpoints
+        execution_checkpoints=ExecutionCheckpoints();checkpoint_epoch=0
+    else:
+        execution_checkpoints=CHECKPOINTS;checkpoint_epoch=CHECKPOINTS.stats()["epoch"]
+    def generate(vehicle,key,offset,session=None,limit=100):
         if source.fleet:
-            return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS,session=session)
-        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,100,checkpoint_store=CHECKPOINTS,session=session)
+            return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
+        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"trips_by_vehicle":trips,"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if profile:data["mqtt"]=profile
+    else:
+        request["generation"]={"workers":body.generation_workers,"queue_messages":body.generation_queue_messages,"queue_bytes":body.generation_queue_bytes}
+        data.update(trip_provider=trip_provider,generation_workers=body.generation_workers,generation_queue_messages=body.generation_queue_messages,generation_queue_bytes=body.generation_queue_bytes,execution_checkpoint_stats=execution_checkpoints.stats)
     timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+30 if body.realtime else 120
     return JOBS.start(run_id,request,data,WORKER,timeout,runner=partial(execute,JOBS))
 

@@ -20,6 +20,7 @@ class Job:
     result: dict
     mqtt: bool
     process: subprocess.Popen | None = None
+    processes: list = field(default_factory=list)
     stop_requested: bool = False
     pause_requested: bool = False
     wall_limit_seconds: float = 0
@@ -89,17 +90,17 @@ class JobManager:
 
     def force(self, job):
         with self.lock:
-            if not job.finished.is_set() and job.process and job.process.poll() is None:
-                job.forced = True
-                job.process.kill()
+            if not job.finished.is_set():
+                for process in set(job.processes+([job.process] if job.process else [])):
+                    if process.poll() is None:
+                        job.forced=True;process.kill()
 
     def send_command(self, job, command):
-        if job.process and job.process.poll() is None:
-            try:
-                job.process.stdin.write(json.dumps({"command": command}) + "\n")
-                job.process.stdin.flush()
-            except (OSError, ValueError):
-                pass
+        for process in set(job.processes+([job.process] if job.process else [])):
+            if process.poll() is None:
+                try:
+                    process.stdin.write(json.dumps({"command":command})+"\n");process.stdin.flush()
+                except (OSError,ValueError):pass
 
     def signal_stop(self, job):
         self.send_command(job, "stop")
