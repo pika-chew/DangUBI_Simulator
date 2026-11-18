@@ -24,6 +24,8 @@ from scripts.measure_mqtt import ProcessResources
 from scripts.measurement_process import ProcessTree
 
 DEPARTURE_SPACING_SECONDS = 20
+PARKING_SECONDS = 1802
+PARKING_TIMEOUT_SECONDS = 1880
 
 
 def validate_config(config):
@@ -32,7 +34,7 @@ def validate_config(config):
     if type(repeats) is not int or not 1<=repeats<=3 or not isinstance(cases,list) or not 1<=len(cases)<=24:raise ValueError("조건1~24개·반복1~3회입니다.")
     names=set();seconds=0
     for c in cases:
-        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds","departure_groups"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
+        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds","departure_groups","parking_replay"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
         if type(c.get("local_scale",False)) is not bool:raise ValueError("로컬 확장 플래그는 boolean입니다.")
         cap=1000 if c.get("local_scale") else 20
         name=c.get("name")
@@ -51,8 +53,15 @@ def validate_config(config):
         if "departure_groups" in c and (not c.get("local_scale") or type(groups) is not int
                 or not 2<=groups<=min(5,c["vehicles"]) or driving>15 or c.get("history_minutes",0)):
             raise ValueError("분산 출발은 로컬 확장 전용이며 출발 그룹 2~5개, 운행 12~15초, 사전 운행 0분입니다.")
+        if type(c.get("parking_replay",False)) is not bool:
+            raise ValueError("parking_replay는 boolean입니다.")
+        if c.get("parking_replay") and (not c.get("local_scale") or c["vehicles"]>8 or driving!=12 or
+                groups!=1 or c.get("history_minutes",0) or c.get("lifetime")!="while_driving" or c.get("fault","none")!="none"):
+            raise ValueError("장시간 주차는 로컬 1~8대·12초 운행·운행 중 연결 전용입니다.")
         seconds+=max(60,(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2) if c.get("local_scale") else 10
     if seconds*repeats>900:raise ValueError("예상15분 이내의 측정 계획만 허용합니다.")
+    if any(c.get("parking_replay") for c in cases) and (len(cases)>2 or repeats!=1 or not all(c.get("parking_replay") for c in cases)):
+        raise ValueError("장시간 주차 조건만 최대 2개, 반복 1회로 실행하세요.")
     return cases,repeats
 
 
@@ -62,15 +71,50 @@ def schedule_source(case):
     groups=case.get("departure_groups",1)
     count=case["vehicles"]
     duration=(groups-1)*DEPARTURE_SPACING_SECONDS+driving+2
+    parking=case.get("parking_replay",False)
+    if parking:duration+=driving+PARKING_SECONDS
     vehicles=[]
     for index in range(count):
         departure=base+timedelta(seconds=(index*groups//count)*DEPARTURE_SPACING_SECONDS)
         vehicles.append(dict(vehicle_id=f"v{index+1:06d}",trips=[dict(
             start=(departure-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
             end=(departure+timedelta(seconds=driving)).isoformat(),road_profile="mixed")]))
+        if parking:
+            second=departure+timedelta(seconds=driving+PARKING_SECONDS)
+            vehicles[-1]["trips"].append(dict(start=second.isoformat(),end=(second+timedelta(seconds=driving)).isoformat(),road_profile="mixed"))
     return dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=2000 if case.get("local_scale") else 1000,
                 measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=duration)).isoformat(),timezone="Asia/Seoul"),
                 vehicles=vehicles)
+
+
+def verify_parking_continuity(source, trip_summaries, result):
+    from services.control.schedule import instant
+    from services.control.schedule_obd import key_for
+
+    sends=result["parking_first_sends"] or {}
+    connects=result["parking_connects"] or {}
+    for vehicle in source["vehicles"]:
+        vehicle_id=vehicle["vehicle_id"]
+        trips=[]
+        starts=[]
+        for trip in vehicle["trips"]:
+            start,end=instant(trip["start"]),instant(trip["end"])
+            tid=int(key_for(vehicle_id,start,end,trip["road_profile"])[:12],16)
+            summary=trip_summaries.get(tid)
+            if not summary or (summary["stt"],summary["edt"])!=(start,end):
+                return False
+            trips.append(summary)
+            starts.append(start)
+        first,second=trips
+        messages=sends.get(vehicle_id,[])
+        if len(messages)!=2 or [m["timestamp_ms"] for m in messages]!=starts:
+            return False
+        if messages[0]["client_id"]!=messages[1]["client_id"] or messages[0]["client_id"] not in connects:
+            return False
+        if ((first["edlat"],first["edlon"])!=(second["stlat"],second["stlon"]) or
+                abs(first["tdis"]+second["dis"]-second["tdis"])>1e-7):
+            return False
+    return len(trip_summaries)==2*len(source["vehicles"])
 
 
 def canonical(value):
@@ -97,10 +141,11 @@ def local_profile(profile):
 
 
 class Resources:
-    def __init__(self,processes):
+    def __init__(self,processes,interval=.1):
         handle=int(ctypes.windll.kernel32.GetCurrentProcess()) if os.name=="nt" else 0
         self.own=SimpleNamespace(pid=os.getpid(),_handle=handle,poll=lambda:None)
         self.processes=processes;self.items={};self.stop_event=threading.Event()
+        self.interval=interval
         self.peak=0;self.samples=0;self.cpu_baseline=0
         self.started=time.monotonic()
         self.rss_windows={}
@@ -123,7 +168,7 @@ class Resources:
         bucket["samples"]+=1
 
     def _run(self):
-        while not self.stop_event.wait(.1):self._sample()
+        while not self.stop_event.wait(self.interval):self._sample()
 
     def finish(self,elapsed):
         self.stop_event.set();self.thread.join();self._sample()
@@ -135,7 +180,7 @@ class Resources:
         available=all(v["all_cpu_available"] for v in roles.values())
         total=sum(v["cpu_seconds"] for v in roles.values()) if available else None
         return dict(roles=roles,cpu_seconds=total,cpu_one_core_percent=100*total/elapsed if available else None,
-                    observed_peak_process_rss_sum_bytes=self.peak,samples=self.samples,sample_interval_ms=100,rss_windows=self.rss_windows,
+                    observed_peak_process_rss_sum_bytes=self.peak,samples=self.samples,sample_interval_ms=int(self.interval*1000),rss_windows=self.rss_windows,
                     all_children_exited=all(p.poll() is not None for _,_,p in self.items.values() if p is not self.own))
 
 
@@ -143,7 +188,9 @@ def child(case,profile_path,worker,temporary):
     expected=(ROOT/".local").resolve()
     folder=temporary.resolve()
     suffix=".exe" if os.name=="nt" else ""
-    if folder.parent!=expected or not folder.name.startswith("schedule-measure-") or profile_path.resolve().parent!=folder or worker.resolve()!=expected/("schedule-measure-worker"+suffix):
+    parking=case.get("parking_replay") is True
+    worker_name="schedule-parking-worker" if parking else "schedule-measure-worker"
+    if folder.parent!=expected or not folder.name.startswith("schedule-measure-") or profile_path.resolve().parent!=folder or worker.resolve()!=expected/(worker_name+suffix):
         raise ValueError("계측 명령이 만든 임시 경로와 Worker만 사용합니다.")
     validate_config(dict(cases=[case],repeats=1))
     if os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1":
@@ -178,6 +225,8 @@ def child(case,profile_path,worker,temporary):
     profile=local_profile(json.loads(profile_path.read_text(encoding="utf-8")))
     if case.get("local_scale"):
         profile.update(local_benchmark=True,max_clients=1000,max_messages=10000,max_duration_seconds=120,connect_per_second=200,publish_per_second=5000)
+    if parking:
+        profile.update(max_clients=8,max_messages=128,max_duration_seconds=PARKING_TIMEOUT_SECONDS,connect_per_second=5,publish_per_second=70)
     profile_path.write_text(json.dumps(profile),encoding="utf-8")
     control.DB=temporary/"runs.sqlite3";control.CHECKPOINTS=control.CheckpointStore(temporary/"states.sqlite3")
     control.MQTT_PROFILE=profile_path;control.WORKER=worker
@@ -187,14 +236,20 @@ def child(case,profile_path,worker,temporary):
             super().__init__(*args,**kwargs);processes.append(("sender",self.process))
     schedule_execution.MQTTBridge=Bridge
     digest=0;accepted=0;original_validate=control.validate_message
+    trip_summaries={}
     def validate(message):
         nonlocal digest,accepted
         original_validate(message);digest=(digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256);accepted+=1
+        if parking and message["ty"]==3:
+            payload=message["pld"]
+            trip_summaries[payload["tid"]]={key:payload[key] for key in
+                ("stt","edt","stlat","stlon","edlat","edlon","dis","tdis")}
     control.validate_message=validate
     source=schedule_source(case)
     groups=case.get("departure_groups",1)
     driving=case.get("driving_seconds",12)
     idle_samples=[dict(samples=0,empty_queue_samples=0,disconnected_samples=0) for _ in range(groups-1)]
+    parking_samples=dict(samples=0,empty_and_disconnected=0)
     sampler=None
     with TestClient(control.app) as client:
         before=time.monotonic()
@@ -205,7 +260,7 @@ def child(case,profile_path,worker,temporary):
             plan=client.post("/api/workspace/plans",json={"title":"일정 통합 계측","schedule":source})
             if plan.status_code!=201:raise RuntimeError("측정 일정 준비 실패")
         preparation=time.monotonic()-before
-        sampler=Resources(processes);started=time.monotonic()
+        sampler=Resources(processes,interval=1 if parking else .1);started=time.monotonic()
         try:
             if case.get("local_scale"):run_id=start_scale(control.JOBS)["id"]
             else:
@@ -221,6 +276,14 @@ def child(case,profile_path,worker,temporary):
                 result=client.get("/api/jobs/"+run_id).json()["result"]
                 if result["job_state"] not in control.ACTIVE:break
                 elapsed_ms=result.get("elapsed_ms",0)
+                if parking and (driving+2)*1000<=elapsed_ms<(driving+PARKING_SECONDS-2)*1000:
+                    parking_samples["samples"]+=1
+                    budget=result.get("buffer_budget",{})
+                    parking_samples["empty_and_disconnected"]+=(
+                        budget.get("reserved_messages")==budget.get("reserved_bytes")==result.get("active_clients")==0)
+                    if parking_samples["samples"]==1 or parking_samples["samples"]%60==0:
+                        (temporary/"progress.json").write_text(json.dumps(dict(elapsed_ms=elapsed_ms,
+                            puback_count=result.get("puback_count"),**parking_samples)),encoding="utf8")
                 group,within_group=divmod(elapsed_ms,DEPARTURE_SPACING_SECONDS*1000)
                 # 종료 경계 처리와 다음 그룹의 2초 선행 생성을 피해 주차 중간을 관측한다.
                 if group<len(idle_samples) and driving*1000+500<=within_group<DEPARTURE_SPACING_SECONDS*1000-2500:
@@ -229,8 +292,8 @@ def child(case,profile_path,worker,temporary):
                     budget=result.get("buffer_budget",{})
                     sample["empty_queue_samples"]+=budget.get("reserved_messages")==budget.get("reserved_bytes")==0
                     sample["disconnected_samples"]+=result.get("active_clients")==0
-                if time.monotonic()-started>(130 if case.get("local_scale") else 40):raise RuntimeError("통합 계측 시간 초과")
-                time.sleep(.5 if case.get("local_scale") else .05)
+                if time.monotonic()-started>(PARKING_TIMEOUT_SECONDS+10 if parking else 130 if case.get("local_scale") else 40):raise RuntimeError("통합 계측 시간 초과")
+                time.sleep(1 if parking else .5 if case.get("local_scale") else .05)
             elapsed=time.monotonic()-started;resources=sampler.finish(elapsed);sampler=None
             keys=("job_state","planned_messages","processed_messages","publish_attempts","mqtt_published","puback_count","unconfirmed_messages",
                   "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
@@ -240,6 +303,10 @@ def child(case,profile_path,worker,temporary):
                      plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
             if idle_samples:
                 row["idle_gaps"]=idle_samples
+            if parking:
+                row["parking_samples"]=parking_samples
+                row["result"].update(parking_connects=result.get("parking_connects"),parking_first_sends=result.get("parking_first_sends"))
+                row["parking_continuity"]=verify_parking_continuity(source,trip_summaries,row["result"])
             if profile_thread:
                 job.thread.join(timeout=5)
                 if job.thread.is_alive():raise RuntimeError("프로파일 종료를 확인하지 못했습니다.")
@@ -257,6 +324,8 @@ def measure(case,fixture,worker):
     with tempfile.TemporaryDirectory(prefix="schedule-measure-",dir=ROOT/".local") as folder:
         temporary=Path(folder);profile=temporary/"profile.json"
         env=os.environ.copy();env.update(DANGUBI_MEASURE_PROFILE=str(profile),DANGUBI_MEASURE_FAULT=case.get("fault","none"),DANGUBI_MEASURE_DIGEST="1")
+        if case.get("parking_replay"):
+            env["DANGUBI_MEASURE_PARKING"]="1"
         with tempfile.TemporaryFile() as log:
             broker=subprocess.Popen([str(fixture),"-test.run=^TestMQTTMeasurementFixture$"],env=env,stdout=log,stderr=log)
             try:
@@ -269,7 +338,7 @@ def measure(case,fixture,worker):
                     with tempfile.TemporaryFile() as child_log:
                         process=tree.start([sys.executable,str(Path(__file__).resolve()),"--child",json.dumps(case),str(profile),str(worker),str(temporary)],stdout=subprocess.PIPE,stderr=child_log)
                         (temporary/"ready").touch()
-                        try:raw,_=process.communicate(timeout=145 if case.get("local_scale") else 50)
+                        try:raw,_=process.communicate(timeout=PARKING_TIMEOUT_SECONDS+20 if case.get("parking_replay") else 145 if case.get("local_scale") else 50)
                         except subprocess.TimeoutExpired:
                             if os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1":
                                 child_log.seek(0);(ROOT/".local/schedule-profile-timeout.log").write_bytes(child_log.read())
@@ -297,6 +366,18 @@ def measure(case,fixture,worker):
                         r["microtrip_count"]==r["planned_messages"]-case["vehicles"] and
                         all(gap["empty_queue_samples"] and (not while_driving or gap["disconnected_samples"])
                             for gap in row["idle_gaps"]))
+                if case.get("parking_replay"):
+                    connects=r["parking_connects"] or {}
+                    samples=row["parking_samples"]
+                    row["integrity_passed"] &= (
+                        r["connection_count"]==r["disconnect_count"]==case["clients"]*2 and
+                        r["active_clients"]==r["reconnect_count"]==0 and
+                        r["trip_count"]==case["vehicles"]*2 and r["microtrip_count"]==case["vehicles"]*12 and
+                        observed.get("connections_by_client")=={client:2 for client in connects} and
+                        len(connects)==case["clients"] and
+                        all(len(attempts)==2 and attempts[1]["offline_ms"]>=1800000 for attempts in connects.values()) and
+                        samples["samples"]>=1700 and samples["samples"]==samples["empty_and_disconnected"] and
+                        row["parking_continuity"])
                 roles=row["resources"]["roles"]
                 row["resources_valid"]=row["resources"]["cpu_seconds"] is not None and all(roles.get(k,{}).get("processes")==n and roles[k]["memory_samples"]>0 for k,n in [("control",1),("sender",1),("generation",case["workers"])])
                 return row
@@ -313,7 +394,7 @@ def compare(report):
         if "error" in row:continue
         c=row["case"];groups.setdefault(c["name"],[]).append(row)
         key=(c["vehicles"],c.get("history_minutes",0),c.get("local_scale",False),c.get("driving_seconds",12 if c.get("local_scale") else 4))
-        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]},departure_groups={c.get('departure_groups',1)}"
+        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]},departure_groups={c.get('departure_groups',1)},parking_replay={c.get('parking_replay',False)}"
         fingerprints.setdefault(key,set()).add((row["accepted_messages"],row["fingerprint"]))
     comparison=[]
     for name,rows in groups.items():
@@ -348,20 +429,37 @@ def main():
     try:cases,repeats=validate_config(json.loads(args.config.read_text(encoding="utf-8-sig")))
     except (OSError,ValueError) as error:parser.error(str(error))
     local=ROOT/".local";local.mkdir(exist_ok=True);suffix=".exe" if os.name=="nt" else ""
-    worker=local/("schedule-measure-worker"+suffix);fixture=local/("schedule-measure-fixture"+suffix)
+    parking=cases[0].get("parking_replay",False)
+    worker=local/(("schedule-parking-worker" if parking else "schedule-measure-worker")+suffix);fixture=local/("schedule-measure-fixture"+suffix)
     env=os.environ.copy();env.update(GOCACHE=str(local/"go-cache"),GOMODCACHE=str(local/"go-mod"))
-    subprocess.run(["go","build","-o",str(worker),"."],cwd=ROOT/"services/worker",env=env,check=True)
+    tags=["-tags","parking_benchmark"] if parking else []
+    subprocess.run(["go","build",*tags,"-o",str(worker),"."],cwd=ROOT/"services/worker",env=env,check=True)
     subprocess.run(["go","test","-c","-o",str(fixture)],cwd=ROOT/"services/worker",env=env,check=True)
     directory=local/"measurements"/("schedule-"+datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d-%H%M%S-")+uuid.uuid4().hex[:6]);directory.mkdir(parents=True)
     report=dict(schema_version="schedule-measure-2",environment=dict(os=platform.platform(),processor=platform.processor(),logical_cpus=os.cpu_count(),python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),resource_scope="제어기+생성Worker+송신프로세스, 브로커 제외; 제어기 계측·TestClient 부하 포함",control_poll_ms={"normal":50,"local_scale":500},cpu_basis="100%=코어1개",memory_basis="100ms 동시 관측 RSS 합계의 최댓값; 공유 메모리 중복 가능"),results=[])
     report["environment"]["control_stack_sampling"]=os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1"
-    for repeat in range(repeats):
-        for case in cases:
-            print(f"측정 {repeat+1}/{repeats}: {case['name']}",flush=True)
-            try:row=measure(case,fixture,worker)
-            except Exception as error:row=dict(case=case,error=str(error) if isinstance(error,RuntimeError) else "측정 실행 또는 정리에 실패했습니다.",error_kind=type(error).__name__)
+    if parking:
+        report["environment"].update(control_poll_ms={"parking":1000},
+            memory_basis="1000ms 동시 관측 RSS 합계; 공유 메모리 중복 가능")
+    def run_case(case):
+        try:return measure(case,fixture,worker)
+        except Exception as error:
+            return dict(case=case,error=str(error) if isinstance(error,RuntimeError) else "측정 실행 또는 정리에 실패했습니다.",error_kind=type(error).__name__)
+
+    def save_rows(rows,repeat):
+        for row in rows:
             row["repeat"]=repeat+1;report["results"].append(row)
             (directory/"summary.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+    if parking:
+        from concurrent.futures import ThreadPoolExecutor
+        print("실제 30분 주차 시험 시작: "+", ".join(c["name"] for c in cases),flush=True)
+        with ThreadPoolExecutor(max_workers=len(cases)) as executor:
+            save_rows(executor.map(run_case,cases),0)
+    else:
+        for repeat in range(repeats):
+            for case in cases:
+                print(f"측정 {repeat+1}/{repeats}: {case['name']}",flush=True)
+                save_rows([run_case(case)],repeat)
     lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 동시 관측 RSS 합계입니다. 관측은 마지막 운행 종료 2초 후까지입니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
     for row in report["results"]:
         c=row["case"]

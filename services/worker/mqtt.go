@@ -48,6 +48,9 @@ func (p *MQTTProfile) validate() error {
 			return errors.New("로컬 측정은 루프백 IP에만 연결할 수 있습니다.")
 		}
 		maxClients, maxMessages, maxSeconds, maxConnect, maxPublish = 1000, 10000, 120, 200, 5000
+		if parkingBenchmarkEnabled && p.MaxDurationSeconds > 120 {
+			maxClients, maxMessages, maxSeconds, maxConnect, maxPublish = 8, 128, 1880, 5, 70
+		}
 	}
 	if p.MaxClients < 1 || p.MaxClients > maxClients || p.MaxMessages < 1 || p.MaxMessages > maxMessages || p.MaxDurationSeconds < 1 || p.MaxDurationSeconds > maxSeconds || p.ConnectPerSecond < 1 || p.ConnectPerSecond > maxConnect || p.PublishPerSecond < 1 || p.PublishPerSecond > maxPublish || p.TimeoutMS < 100 || p.TimeoutMS > 5000 || p.ReconnectAttempts < 0 || p.ReconnectAttempts > 3 {
 		return errors.New("소량 MQTT 시험의 연결·건수·시간·속도 상한을 확인하세요.")

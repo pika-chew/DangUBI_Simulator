@@ -81,6 +81,23 @@ class ScheduleMeasurementTest(unittest.TestCase):
             with self.subTest(changes=changes),self.assertRaises(ValueError):
                 measurement.validate_config(dict(cases=[dict(cases[0],**changes)]))
 
+    def test_real_parking_case_bounds_and_same_vehicle_schedule(self):
+        from services.control.schedule import instant
+        config=json.loads((measurement.ROOT/"configs/schedule-parking.example.json").read_text())
+        cases,_=measurement.validate_config(config)
+        first,second=map(measurement.schedule_source,cases)
+        self.assertEqual(first,second)
+        for vehicle in first["vehicles"]:
+            morning,afternoon=vehicle["trips"]
+            self.assertEqual(instant(afternoon["start"])-instant(morning["end"]),1802000)
+        self.assertEqual(instant(first["measurement"]["end"])-instant(first["measurement"]["start"]),1828000)
+        rejected=(dict(vehicles=9),dict(local_scale=False),dict(parking_replay=1),dict(lifetime="always"),
+                  dict(history_minutes=1),dict(departure_groups=2),dict(driving_seconds=13),dict(fault="delay_ack"))
+        for changes in rejected:
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                measurement.validate_config(dict(cases=[dict(cases[0],**changes)],repeats=1))
+        with self.assertRaises(ValueError):measurement.validate_config(dict(cases=cases,repeats=2))
+
     def test_fingerprint_is_numeric_and_key_order_independent(self):
         m=dict(ty=4,ts=1,pld=dict(sp=1.5,flags=[True,None,"한"]))
         self.assertEqual(hashlib.sha256(measurement.canonical(m)).hexdigest(),"bd88e197fcbbc651353e7db126e41c922dd7544b86a08c0082f45eda8aae25ce")

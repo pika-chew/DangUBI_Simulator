@@ -27,29 +27,30 @@ import (
 )
 
 type testBroker struct {
-	listener        net.Listener
-	mu              sync.Mutex
-	sockets         []net.Conn
-	ids             map[string]bool
-	published       int
-	messages        []map[string]any
-	noAck           bool
-	closeOnce       bool
-	closed          bool
-	ackDelay        time.Duration
-	slowSuffix      string
-	discardPayload  bool
-	handling        int
-	peakHandling    int
-	receivedAt      []time.Time
-	receivedIDs     []string
-	receivedTopics  []string
-	measureDigest   bool
-	fingerprint     [32]byte
-	lastTimestamp   map[string]float64
-	lastKind        map[string]float64
-	invalidMeasured int
-	outOfOrder      int
+	listener         net.Listener
+	mu               sync.Mutex
+	sockets          []net.Conn
+	ids              map[string]bool
+	connectionCounts map[string]int
+	published        int
+	messages         []map[string]any
+	noAck            bool
+	closeOnce        bool
+	closed           bool
+	ackDelay         time.Duration
+	slowSuffix       string
+	discardPayload   bool
+	handling         int
+	peakHandling     int
+	receivedAt       []time.Time
+	receivedIDs      []string
+	receivedTopics   []string
+	measureDigest    bool
+	fingerprint      [32]byte
+	lastTimestamp    map[string]float64
+	lastKind         map[string]float64
+	invalidMeasured  int
+	outOfOrder       int
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -127,6 +128,9 @@ func (b *testBroker) handle(conn net.Conn) {
 			clientID = p.ClientIdentifier
 			b.mu.Lock()
 			b.ids[p.ClientIdentifier] = true
+			if b.connectionCounts != nil {
+				b.connectionCounts[p.ClientIdentifier]++
+			}
 			b.mu.Unlock()
 			ack := packets.NewControlPacket(packets.Connack).(*packets.ConnackPacket)
 			ack.ReturnCode = 0
@@ -237,8 +241,12 @@ func (b *testBroker) measureMessage(topic string, m map[string]any) {
 		b.invalidMeasured++
 		return
 	}
-	if previous, ok := b.lastTimestamp[topic]; ok && (ts < previous || b.lastKind[topic] == 3) {
-		b.outOfOrder++
+	if previous, ok := b.lastTimestamp[topic]; ok {
+		afterTrip := b.lastKind[topic] == 3
+		newParkingTrip := b.connectionCounts != nil && ty == 4 && ts-previous >= 1800000
+		if ts < previous || (afterTrip && !newParkingTrip) {
+			b.outOfOrder++
+		}
 	}
 	b.lastTimestamp[topic] = ts
 	b.lastKind[topic] = ty

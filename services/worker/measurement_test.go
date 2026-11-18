@@ -36,6 +36,33 @@ func TestMeasurementFingerprintMatchesPythonAndDetectsOrder(t *testing.T) {
 	}
 }
 
+func TestParkingMeasurementAllowsNextTripAndRejectsEarlyOrReversedMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		next float64
+		kind float64
+		bad  int
+	}{
+		{"next trip", 1802000, 4, 0},
+		{"premature", 1799999, 4, 1},
+		{"reversed", -1, 4, 1},
+		{"second summary", 1802000, 3, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testBroker{connectionCounts: make(map[string]int)}
+			msg := func(ts, kind float64) map[string]any {
+				return map[string]any{"ts": ts, "ty": kind, "pld": map[string]any{}}
+			}
+			b.measureMessage("v1", msg(1000, 4))
+			b.measureMessage("v1", msg(2000, 3))
+			b.measureMessage("v1", msg(2000+tc.next, tc.kind))
+			if b.outOfOrder != tc.bad {
+				t.Fatalf("순서 오류 수: %d, 기대값: %d", b.outOfOrder, tc.bad)
+			}
+		})
+	}
+}
+
 func TestDurationSummary(t *testing.T) {
 	m := durationMetric{}
 	if m.summary().Count != 0 {
@@ -85,6 +112,9 @@ func TestMQTTMeasurementFixture(t *testing.T) {
 	b.mu.Lock()
 	b.discardPayload = true
 	b.measureDigest = os.Getenv("DANGUBI_MEASURE_DIGEST") == "1"
+	if os.Getenv("DANGUBI_MEASURE_PARKING") == "1" {
+		b.connectionCounts = make(map[string]int)
+	}
 	if fault == "delay_ack" {
 		b.ackDelay = 20 * time.Millisecond
 	}
@@ -104,10 +134,21 @@ func TestMQTTMeasurementFixture(t *testing.T) {
 	if err := os.Rename(path+".tmp", path); err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(150 * time.Second); time.Now().Before(deadline); {
+	timeout := 150 * time.Second
+	if os.Getenv("DANGUBI_MEASURE_PARKING") == "1" {
+		timeout = 1910 * time.Second
+	}
+	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); {
 		if _, err := os.Stat(path + ".done"); err == nil {
 			b.mu.Lock()
 			report := map[string]any{"received": b.published, "unique_client_ids": len(b.ids)}
+			if b.connectionCounts != nil {
+				counts := make(map[string]int, len(b.connectionCounts))
+				for id, count := range b.connectionCounts {
+					counts[id] = count
+				}
+				report["connections_by_client"] = counts
+			}
 			if b.measureDigest {
 				report["fingerprint"] = hex.EncodeToString(b.fingerprint[:])
 				report["out_of_order"] = b.outOfOrder

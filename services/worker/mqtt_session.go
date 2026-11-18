@@ -33,24 +33,27 @@ type streamCommand struct {
 }
 
 type streamStats struct {
-	Connected           int                     `json:"connected_clients"`
-	Active              int                     `json:"active_clients"`
-	Peak                int                     `json:"peak_active_clients"`
-	Attempts            int                     `json:"publish_attempts"`
-	Published           int                     `json:"mqtt_published"`
-	Puback              int                     `json:"puback_count"`
-	Unconfirmed         int                     `json:"unconfirmed_messages"`
-	Reconnects          int                     `json:"reconnect_count"`
-	Connections         int                     `json:"connection_count"`
-	Disconnections      int                     `json:"disconnect_count"`
-	ScheduleDelay       int64                   `json:"schedule_delay_ms"`
-	InitialConnectMS    *int64                  `json:"initial_connect_ms,omitempty"`
-	PostConnectSchedule DurationSummary         `json:"post_connect_schedule"`
-	PublishWindows      map[int]DurationSummary `json:"publish_windows,omitempty"`
-	Performance         *PerformanceSummary     `json:"performance"`
+	Connected           int                         `json:"connected_clients"`
+	Active              int                         `json:"active_clients"`
+	Peak                int                         `json:"peak_active_clients"`
+	Attempts            int                         `json:"publish_attempts"`
+	Published           int                         `json:"mqtt_published"`
+	Puback              int                         `json:"puback_count"`
+	Unconfirmed         int                         `json:"unconfirmed_messages"`
+	Reconnects          int                         `json:"reconnect_count"`
+	Connections         int                         `json:"connection_count"`
+	Disconnections      int                         `json:"disconnect_count"`
+	ScheduleDelay       int64                       `json:"schedule_delay_ms"`
+	InitialConnectMS    *int64                      `json:"initial_connect_ms,omitempty"`
+	PostConnectSchedule DurationSummary             `json:"post_connect_schedule"`
+	PublishWindows      map[int]DurationSummary     `json:"publish_windows,omitempty"`
+	ParkingConnects     map[string][]parkingConnect `json:"parking_connects,omitempty"`
+	ParkingFirstSends   map[string][]parkingSend    `json:"parking_first_sends,omitempty"`
+	Performance         *PerformanceSummary         `json:"performance"`
 }
 
 type mqttSession struct {
+	parkingTrace               *parkingTrace
 	connectedAt                time.Time
 	postConnect                durationMetric
 	publishWindows             [12]durationMetric
@@ -64,6 +67,33 @@ type mqttSession struct {
 	metrics                    performanceMetrics
 	connectPacer, publishPacer pacer
 	started                    time.Time
+}
+
+type parkingConnect struct {
+	StartedMS  int64   `json:"started_ms"`
+	DurationMS float64 `json:"duration_ms"`
+	OfflineMS  int64   `json:"offline_ms"`
+}
+
+type parkingSend struct {
+	ClientID    string  `json:"client_id"`
+	TimestampMS float64 `json:"timestamp_ms"`
+	DelayMS     int64   `json:"delay_ms"`
+}
+
+type parkingTrace struct {
+	connects   map[string][]parkingConnect
+	firstSends map[string][]parkingSend
+	closedAt   map[string]time.Time
+	lastTrip   map[string]float64
+}
+
+func copyParkingRecords[T any](records map[string][]T) map[string][]T {
+	out := make(map[string][]T, len(records))
+	for key, items := range records {
+		out[key] = append([]T(nil), items...)
+	}
+	return out
 }
 
 func newMQTTSession(req Request) (*mqttSession, error) {
@@ -85,6 +115,9 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 	}
 	s := &mqttSession{profile: p, clients: map[string]mqtt.Client{}, vehicles: map[string]string{}, seen: map[string]bool{}, parked: map[string]bool{}, started: time.Now()}
 	s.connectPacer.step = time.Second / time.Duration(p.ConnectPerSecond)
+	if parkingBenchmarkEnabled && p.LocalBenchmark && p.MaxDurationSeconds > 120 {
+		s.parkingTrace = &parkingTrace{make(map[string][]parkingConnect), make(map[string][]parkingSend), make(map[string]time.Time), make(map[string]float64)}
+	}
 	s.publishPacer.step = time.Second / time.Duration(p.PublishPerSecond)
 	for _, a := range req.Assignments {
 		if !validID.MatchString(a.VehicleID) || !validID.MatchString(a.ClientID) || s.vehicles[a.VehicleID] != "" {
@@ -113,6 +146,10 @@ func (s *mqttSession) snapshot() streamStats {
 	s.stats.Peak = max(s.stats.Peak, s.stats.Active)
 	s.stats.Performance = s.metrics.summary(s.stats.Puback, time.Since(s.started))
 	s.stats.PostConnectSchedule = s.postConnect.summary()
+	if s.parkingTrace != nil {
+		s.stats.ParkingConnects = copyParkingRecords(s.parkingTrace.connects)
+		s.stats.ParkingFirstSends = copyParkingRecords(s.parkingTrace.firstSends)
+	}
 	if s.profile.LocalBenchmark {
 		s.stats.PublishWindows = make(map[int]DurationSummary)
 		for i := range s.publishWindows {
@@ -128,7 +165,8 @@ func (s *mqttSession) disconnect(id string) {
 	if c := s.clients[id]; c != nil {
 		s.mu.Lock()
 		s.parked[id] = true
-		if c.IsConnectionOpen() {
+		wasOpen := c.IsConnectionOpen()
+		if wasOpen {
 			s.stats.Disconnections++
 		}
 		s.mu.Unlock()
@@ -137,6 +175,11 @@ func (s *mqttSession) disconnect(id string) {
 		until := time.Now().Add(time.Duration(s.profile.TimeoutMS) * time.Millisecond)
 		for c.IsConnectionOpen() && time.Now().Before(until) {
 			time.Sleep(time.Millisecond)
+		}
+		if s.parkingTrace != nil && wasOpen && !c.IsConnectionOpen() {
+			s.mu.Lock()
+			s.parkingTrace.closedAt[id] = time.Now()
+			s.mu.Unlock()
 		}
 	}
 }
@@ -170,6 +213,7 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		s.parked[id] = false
 		return nil
 	}
+	connectStarted := time.Now()
 	if err := connectMQTT(ctx, c, s.profile, before, func(d time.Duration) { s.mu.Lock(); s.metrics.connect.add(d); s.mu.Unlock() }); err != nil {
 		return err
 	}
@@ -179,6 +223,15 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		s.seen[id] = true
 	}
 	s.stats.Connections++
+	if trace := s.parkingTrace; trace != nil && len(trace.connects[id]) < 2 {
+		offline := int64(0)
+		if closed := trace.closedAt[id]; !closed.IsZero() {
+			offline = connectStarted.Sub(closed).Milliseconds()
+		}
+		trace.connects[id] = append(trace.connects[id], parkingConnect{
+			connectStarted.Sub(s.started).Milliseconds(), float64(time.Since(connectStarted)) / float64(time.Millisecond), offline,
+		})
+	}
 	if len(s.seen) == len(s.clients) && s.connectedAt.IsZero() {
 		s.connectedAt = time.Now()
 		elapsed := time.Since(s.started).Milliseconds()
@@ -230,7 +283,14 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		s.stats.Attempts++
 		if c.DueAtMS > 0 {
 			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
-			if s.profile.LocalBenchmark {
+			if trace := s.parkingTrace; trace != nil && ty == 4 && len(trace.firstSends[c.VehicleID]) < 2 {
+				tid, _ := m["pld"].(map[string]any)["tid"].(float64)
+				if tid != trace.lastTrip[c.VehicleID] {
+					trace.lastTrip[c.VehicleID] = tid
+					trace.firstSends[c.VehicleID] = append(trace.firstSends[c.VehicleID], parkingSend{id, m["ts"].(float64), delay})
+				}
+			}
+			if s.profile.LocalBenchmark && s.parkingTrace == nil {
 				window := min(len(s.publishWindows)-1, int(time.Since(s.started)/(10*time.Second)))
 				s.publishWindows[window].add(time.Duration(delay) * time.Millisecond)
 			}

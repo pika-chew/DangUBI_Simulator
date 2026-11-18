@@ -50,6 +50,76 @@ func TestScaleSessionIsLoopbackOnlyAndNormalAssignmentsStayLimited(t *testing.T)
 	}
 }
 
+func TestParkingProfileRequiresTaggedLoopbackAndSmallLimits(t *testing.T) {
+	_, profile := localBroker(t, false, false)
+	profile.LocalBenchmark = true
+	profile.MaxDurationSeconds = 1880
+	profile.MaxClients = 8
+	profile.MaxMessages = 128
+	if valid := profile.validate() == nil; valid != parkingBenchmarkEnabled {
+		t.Fatalf("빌드별 장시간 허용 불일치: %v", valid)
+	}
+	for name, change := range map[string]func(*MQTTProfile){
+		"no flag":      func(p *MQTTProfile) { p.LocalBenchmark = false },
+		"external":     func(p *MQTTProfile) { p.BrokerURL = "ssl://example.com:8883" },
+		"duration":     func(p *MQTTProfile) { p.MaxDurationSeconds++ },
+		"clients":      func(p *MQTTProfile) { p.MaxClients++ },
+		"messages":     func(p *MQTTProfile) { p.MaxMessages++ },
+		"connect rate": func(p *MQTTProfile) { p.ConnectPerSecond++ },
+		"publish rate": func(p *MQTTProfile) { p.PublishPerSecond++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := *profile
+			change(&p)
+			if p.validate() == nil {
+				t.Fatal("시험 프로필 범위 초과 허용")
+			}
+		})
+	}
+}
+
+func TestParkingTraceKeepsBothSessionsAndFirstMicrotrips(t *testing.T) {
+	if !parkingBenchmarkEnabled {
+		t.Skip("장시간 시험 전용 Worker")
+	}
+	_, profile := localBroker(t, false, false)
+	profile.LocalBenchmark = true
+	profile.MaxDurationSeconds = 1880
+	req := request("dedicated", 1)
+	req.MQTT = profile
+	req.Assignments = []Assignment{{"v000001", "park-c1"}}
+	s, err := newMQTTSession(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for trip := 1; trip <= 2; trip++ {
+		if err := s.connect(ctx, "park-c1"); err != nil {
+			t.Fatal(err)
+		}
+		for seq := 0; seq < 2; seq++ {
+			message := map[string]any{"ty": float64(4), "ts": float64(100*trip + seq), "pld": map[string]any{"tid": float64(trip)}}
+			if err := s.command(ctx, "parking-run", streamCommand{Command: "publish", VehicleID: "v000001", Message: message, DueAtMS: time.Now().UnixMilli()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.disconnect("park-c1")
+		time.Sleep(5 * time.Millisecond)
+	}
+	stats := s.snapshot()
+	connects := stats.ParkingConnects["park-c1"]
+	sends := stats.ParkingFirstSends["v000001"]
+	if len(connects) != 2 || connects[1].OfflineMS < 5 || stats.Reconnects != 0 {
+		t.Fatalf("주차 연결 기록 불일치: %+v", stats)
+	}
+	if len(sends) != 2 || sends[0].TimestampMS != 100 || sends[1].TimestampMS != 200 ||
+		sends[0].ClientID != "park-c1" || sends[1].ClientID != "park-c1" {
+		t.Fatalf("운행별 첫 발행 기록 불일치: %+v", sends)
+	}
+}
+
 func TestMQTTStreamParallelCancellation(t *testing.T) {
 	for _, mode := range []string{"stop", "eof", "duplicate_client", "oversized"} {
 		t.Run(mode, func(t *testing.T) {

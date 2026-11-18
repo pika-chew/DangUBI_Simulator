@@ -36,5 +36,5 @@ def prepare(source,case,worker,profile,validate):
               validate_message=validate,mqtt=profile,generation_workers=case["workers"],generation_queue_messages=2000,
               generation_queue_bytes=8388608,execution_checkpoint_stats=states.stats)
     def start_run(manager):
-        return manager.start(run_id,dict(local_scale=True,config=config),data,worker,120,runner=partial(execute,manager))
+        return manager.start(run_id,dict(local_scale=True,config=config),data,worker,profile["max_duration_seconds"],runner=partial(execute,manager))
     return start_run
