@@ -6,6 +6,7 @@ from services.control.mqtt_bridge import MQTTBridge, MQTTFailure
 from services.control.generation_session import GenerationFailure
 from services.control.generation_pool import GenerationPool
 from services.control.bounded_schedule import BoundedSchedule
+from services.control.schedule_publisher import SchedulePublisher
 
 
 def execute(manager, job, data, worker, timeout):
@@ -17,14 +18,14 @@ def execute(manager, job, data, worker, timeout):
     last_save = 0.0
     mqtt=data["operation"]=="mqtt"
     bridge=None
+    publisher=None
     generation=None
     bounded=None
     sequences={}
     cleanup=True
     result["transport"]="mqtt" if mqtt else "dry_run"
     if mqtt:
-        result.update(unsent_messages=result["planned_messages"], connection_count=0, disconnect_count=0,
-                      transmission={"mode":"serial","max_in_flight":1,"queue_capacity":1,"queued_messages":0,"in_flight":0,"peak_queued":0,"peak_in_flight":0,"backpressure_count":0,"discarded_queued":0})
+        result.update(unsent_messages=result["planned_messages"], connection_count=0, disconnect_count=0)
 
     def sync_mqtt():
         if bridge:
@@ -34,13 +35,13 @@ def execute(manager, job, data, worker, timeout):
     def finish(state):
         nonlocal cleanup
         if bridge:
-            bridge.close()
+            bridge.close(abort=job.stop_requested or state!="completed")
             sync_mqtt()
             cleanup=bridge.cleaned
-            result["transmission"]["in_flight"]=0
-            if not cleanup and state=="completed":
+            if publisher:publisher.discard()
+            if (not cleanup or not bridge.close_acknowledged) and state=="completed":
                 state="failed"
-                result["errors"]=["MQTT 연결 정리의 최종 상태를 확인하지 못했습니다."]
+                result["errors"]=["MQTT 정상 종료 응답 또는 연결 정리의 최종 상태를 확인하지 못했습니다."]
         if generation:
             generation.close(abort=job.stop_requested or state!="completed")
             result["generation_session"]=dict(generation.stats,cleanup_confirmed=generation.cleaned,forced_termination=generation.forced or job.forced)
@@ -75,10 +76,14 @@ def execute(manager, job, data, worker, timeout):
                 job.stop_requested=True
             if job.stop_requested:
                 return False
+            if publisher:
+                publisher.pump(allow_start=not job.pause_requested,elapsed_ms=(now-started-paused_seconds)*1000)
+                sync_mqtt()
             if job.pause_requested:
                 before=time.monotonic()
-                if result.get("job_state") != "paused" or before-last_save >= .5:
-                    report("paused")
+                state="pausing" if publisher and publisher.active else "paused"
+                if result.get("job_state") != state or before-last_save >= .5:
+                    report(state)
                 time.sleep(.05)
                 paused_seconds += time.monotonic()-before
                 continue
@@ -106,6 +111,10 @@ def execute(manager, job, data, worker, timeout):
                 offset += len(output["messages"])
 
     def consume(timestamp,vehicle,message,synthetic):
+        if mqtt:
+            if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
+            data["validate_message"](message)
+            if not publisher.enqueue("publish",gate,vehicle_id=vehicle,message=message):return
         due=timestamp-data["measurement_start_ms"]
         sequences[vehicle]=sequences.get(vehicle,0)+1
         result["processed_messages"]+=1
@@ -116,28 +125,17 @@ def execute(manager, job, data, worker, timeout):
             result["schedule_delay_ms"]=max(result["schedule_delay_ms"],int((time.monotonic()-started-paused_seconds)*1000-due))
         if len(result["samples"])<10:
             result["samples"].append(dict(vehicle_id=vehicle,client_id=data["client_by_vehicle"][vehicle],topic=f"{data["mqtt"]["topic_prefix"]}/{job.id}/{vehicle}/obd" if mqtt else "",sequence=sequences[vehicle],message=message,synthetic_trip=synthetic))
-        if mqtt:
-            if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
-            data["validate_message"](message)
-            result["transmission"].update(in_flight=1,peak_in_flight=1)
-            report()
-            publish_started=time.monotonic()
-            bridge.command("publish",vehicle_id=vehicle,message=message)
-            sync_mqtt()
-            result["transmission"]["in_flight"]=0
-            if time.monotonic()-publish_started > max(data["config"]["interval_ms"]/1000,1/data["mqtt"]["publish_per_second"]):
-                result["transmission"]["backpressure_count"]+=1
-            report()
 
     try:
         report()
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
+            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"])
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break
-                    bridge.command("connect",client_id=client)
+                    publisher.enqueue("connect",gate,client_id=client)
                     sync_mqtt();report()
         else:
             generation=GenerationPool(worker,job,manager,data.get("generation_workers",1))
@@ -184,9 +182,9 @@ def execute(manager, job, data, worker, timeout):
                     before=driving.get(client,0)
                     driving[client]=before+(message if priority==0 else -message)
                     if priority==0 and before==0:
-                        bridge.command("connect",client_id=client)
+                        publisher.enqueue("connect",gate,client_id=client)
                     elif priority==2 and driving[client]==0:
-                        bridge.command("disconnect",client_id=client)
+                        publisher.enqueue("disconnect",gate,client_id=client)
                     sync_mqtt();report()
                     continue
                 consume(timestamp,vehicle,message,synthetic)
@@ -194,6 +192,8 @@ def execute(manager, job, data, worker, timeout):
         # 마지막 운행 뒤에도 측정 종료까지 주차 시간을 진행한다.
         if not job.stop_requested:
             gate(data["duration_ms"])
+        if publisher and not job.stop_requested:
+            publisher.drain(gate)
         if not job.stop_requested:
             result["simulation_time_ms"]=data["duration_ms"]
         if job.timed_out:

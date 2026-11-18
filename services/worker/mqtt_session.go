@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -8,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -21,10 +24,12 @@ func newMQTTClient(p *MQTTProfile, id string, config *tls.Config) mqtt.Client {
 }
 
 type streamCommand struct {
+	ID        int64          `json:"id"`
 	Command   string         `json:"command"`
 	ClientID  string         `json:"client_id,omitempty"`
 	VehicleID string         `json:"vehicle_id,omitempty"`
 	Message   map[string]any `json:"message,omitempty"`
+	DueAtMS   int64          `json:"due_at_ms,omitempty"`
 }
 
 type streamStats struct {
@@ -38,10 +43,12 @@ type streamStats struct {
 	Reconnects     int                 `json:"reconnect_count"`
 	Connections    int                 `json:"connection_count"`
 	Disconnections int                 `json:"disconnect_count"`
+	ScheduleDelay  int64               `json:"schedule_delay_ms"`
 	Performance    *PerformanceSummary `json:"performance"`
 }
 
 type mqttSession struct {
+	mu, connectMu, publishMu   sync.Mutex
 	parked                     map[string]bool
 	profile                    *MQTTProfile
 	clients                    map[string]mqtt.Client
@@ -85,6 +92,8 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 }
 
 func (s *mqttSession) snapshot() streamStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stats.Active = 0
 	for _, c := range s.clients {
 		if c.IsConnectionOpen() {
@@ -98,10 +107,12 @@ func (s *mqttSession) snapshot() streamStats {
 
 func (s *mqttSession) disconnect(id string) {
 	if c := s.clients[id]; c != nil {
+		s.mu.Lock()
 		s.parked[id] = true
 		if c.IsConnectionOpen() {
 			s.stats.Disconnections++
 		}
+		s.mu.Unlock()
 		c.Disconnect(0)
 		// Paho의 해제 처리가 비동기로 끝날 수 있으므로 실제 닫힘을 확인한다.
 		until := time.Now().Add(time.Duration(s.profile.TimeoutMS) * time.Millisecond)
@@ -125,9 +136,14 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		return nil
 	}
 	before := func() error {
-		if err := s.connectPacer.wait(ctx); err != nil {
+		s.connectMu.Lock()
+		err := s.connectPacer.wait(ctx)
+		s.connectMu.Unlock()
+		if err != nil {
 			return err
 		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if s.seen[id] && !s.parked[id] {
 			s.stats.Reconnects++
 		}
@@ -135,14 +151,16 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		s.parked[id] = false
 		return nil
 	}
-	if err := connectMQTT(ctx, c, s.profile, before, s.metrics.connect.add); err != nil {
+	if err := connectMQTT(ctx, c, s.profile, before, func(d time.Duration) { s.mu.Lock(); s.metrics.connect.add(d); s.mu.Unlock() }); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	if !s.seen[id] {
 		s.stats.Connected++
 		s.seen[id] = true
 	}
 	s.stats.Connections++
+	s.mu.Unlock()
 	s.snapshot()
 	return nil
 }
@@ -159,7 +177,7 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		return nil
 	case "publish":
 		id := s.vehicles[c.VehicleID]
-		if id == "" || s.stats.Attempts >= s.profile.MaxMessages {
+		if id == "" {
 			return errors.New("차량 또는 발행 상한을 확인하세요.")
 		}
 		m := c.Message
@@ -173,12 +191,31 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		if err = s.connect(ctx, id); err != nil {
 			return err
 		}
+		// 모든 Client가 같은 속도 제한을 공유한다. 토큰 대기는 잠금 밖이다.
+		s.publishMu.Lock()
 		if err = s.publishPacer.wait(ctx); err != nil {
+			s.publishMu.Unlock()
 			return err
 		}
+		s.mu.Lock()
+		if s.stats.Attempts >= s.profile.MaxMessages {
+			s.mu.Unlock()
+			s.publishMu.Unlock()
+			return errors.New("발행 상한을 초과했습니다.")
+		}
 		s.stats.Attempts++
+		if c.DueAtMS > 0 {
+			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
+			s.stats.ScheduleDelay = max(s.stats.ScheduleDelay, delay)
+			s.metrics.schedule.add(time.Duration(delay) * time.Millisecond)
+		}
+		s.mu.Unlock()
 		started := time.Now()
-		err = waitToken(ctx, s.clients[id].Publish(fmt.Sprintf("%s/%s/%s/obd", s.profile.TopicPrefix, runID, c.VehicleID), 1, false, encoded), time.Duration(s.profile.TimeoutMS)*time.Millisecond)
+		token := s.clients[id].Publish(fmt.Sprintf("%s/%s/%s/obd", s.profile.TopicPrefix, runID, c.VehicleID), 1, false, encoded)
+		s.publishMu.Unlock()
+		err = waitToken(ctx, token, time.Duration(s.profile.TimeoutMS)*time.Millisecond)
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.metrics.ack.add(time.Since(started))
 		if err != nil {
 			s.stats.Unconfirmed++
@@ -192,8 +229,9 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 	}
 }
 
-// 한 명령·한 응답, 발행은 PUBACK까지 한 건만 처리한다. stdin EOF도 연결을 정리한다.
-func serveMQTTStream(req Request, dec *json.Decoder, w io.Writer) {
+// 고정 Client마다 한 명령만 실행한다. 서로 다른 Client의 응답은 ID로 구분한다.
+// 실패·EOF·중단 시 모든 진행 명령을 집계한 뒤 연결을 정리한다.
+func serveMQTTStream(req Request, input io.Reader, w io.Writer) {
 	encoder := json.NewEncoder(w)
 	s, err := newMQTTSession(req)
 	if err != nil {
@@ -203,19 +241,35 @@ func serveMQTTStream(req Request, dec *json.Decoder, w io.Writer) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.MQTT.MaxDurationSeconds)*time.Second)
 	defer cancel()
 	defer s.close()
-	respond := func(err error) {
-		reply := map[string]any{"ok": err == nil, "stats": s.snapshot()}
+	respond := func(id int64, err error, closed ...bool) {
+		reply := map[string]any{"id": id, "ok": err == nil, "stats": s.snapshot()}
+		if len(closed) > 0 {
+			reply["closed"] = closed[0]
+		}
 		if err != nil {
 			reply["error"] = err.Error()
 		}
-		encoder.Encode(reply)
+		if encoder.Encode(reply) != nil {
+			cancel()
+		}
 	}
 	commands := make(chan streamCommand)
 	go func() {
 		defer close(commands)
-		for {
+		scanner := bufio.NewScanner(input)
+		scanner.Buffer(make([]byte, 4096), 262145)
+		for scanner.Scan() {
+			if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+				continue
+			}
 			var c streamCommand
+			dec := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+			dec.DisallowUnknownFields()
 			if dec.Decode(&c) != nil {
+				cancel()
+				return
+			}
+			if dec.Decode(&struct{}{}) != io.EOF {
 				cancel()
 				return
 			}
@@ -229,31 +283,66 @@ func serveMQTTStream(req Request, dec *json.Decoder, w io.Writer) {
 				return
 			}
 		}
+		cancel()
 	}()
-	respond(nil)
+	type completion struct {
+		id     int64
+		client string
+		err    error
+	}
+	completed := make(chan completion, len(s.clients))
+	busy := map[string]bool{}
+	active := 0
+	lastID := int64(0)
+	shutdown := func(id int64, err error) {
+		cancel()
+		for active > 0 {
+			done := <-completed
+			active--
+			respond(done.id, done.err)
+		}
+		s.close()
+		respond(id, err, true)
+	}
+	respond(0, nil)
 	for {
 		select {
 		case <-ctx.Done():
-			s.close()
-			respond(errors.New("MQTT 실행이 중단되거나 제한시간이 끝났습니다."))
+			shutdown(0, errors.New("MQTT 실행이 중단되거나 제한시간이 끝났습니다."))
 			return
+		case done := <-completed:
+			active--
+			delete(busy, done.client)
+			if done.err != nil {
+				shutdown(done.id, done.err)
+				return
+			}
+			respond(done.id, nil)
 		case c, ok := <-commands:
 			if !ok {
+				shutdown(0, errors.New("MQTT 명령 입력이 종료되었습니다."))
 				return
 			}
+			if c.ID <= lastID {
+				shutdown(c.ID, errors.New("MQTT 명령 ID 순서를 확인하세요."))
+				return
+			}
+			lastID = c.ID
 			if c.Command == "close" {
-				s.close()
-				respond(nil)
+				shutdown(c.ID, nil)
 				return
 			}
-			err := s.command(ctx, req.RunID, c)
-			if err != nil {
-				s.close()
+			id := c.ClientID
+			if c.Command == "publish" {
+				id = s.vehicles[c.VehicleID]
 			}
-			respond(err)
-			if err != nil {
+			if s.clients[id] == nil || busy[id] || (c.Command != "publish" && c.Command != "connect" && c.Command != "disconnect") {
+				shutdown(c.ID, errors.New("Client별 명령 순서 또는 고정 배정을 확인하세요."))
 				return
 			}
+			busy[id] = true
+			active++
+			go func(c streamCommand, id string) { completed <- completion{c.ID, id, s.command(ctx, req.RunID, c)} }(c, id)
 		}
 	}
 }

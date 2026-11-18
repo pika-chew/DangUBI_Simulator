@@ -89,6 +89,12 @@ type TimingSummary = {
 };
 export type Result = {
   transmission?: {
+    per_client_in_flight?: number;
+    queue_byte_capacity?: number;
+    reserved_bytes?: number;
+    peak_reserved_bytes?: number;
+    reserved_commands?: number;
+    peak_reserved_commands?: number;
     mode: string;
     max_in_flight: number;
     queue_capacity: number;

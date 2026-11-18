@@ -262,7 +262,7 @@ func main() {
 		return
 	}
 	if req.Operation == "mqtt_stream" {
-		serveMQTTStream(req, dec, os.Stdout)
+		serveMQTTStream(req, io.MultiReader(dec.Buffered(), reader), os.Stdout)
 		return
 	}
 	managed := os.Getenv("DANGUBI_MANAGED") == "1"

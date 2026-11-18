@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -67,6 +68,15 @@ def finished(client,run_id):
     raise AssertionError("MQTT 실행 종료 대기 초과")
 
 
+def broker_report(profile):
+    Path(str(profile)+".done").touch()
+    report=Path(str(profile)+".report")
+    for _ in range(200):
+        if report.is_file():return json.loads(report.read_text())
+        time.sleep(.02)
+    raise AssertionError("브로커 결과 대기 초과")
+
+
 @pytest.mark.parametrize("mode,lifetime",[("shared","always"),("shared","while_driving"),("dedicated","always"),("dedicated","while_driving")])
 def test_schedule_mqtt_mapping_lifetimes_and_payload(mqtt_client,mode,lifetime):
     client,profile=mqtt_client
@@ -80,6 +90,11 @@ def test_schedule_mqtt_mapping_lifetimes_and_payload(mqtt_client,mode,lifetime):
     assert r["connected_clients"]==(1 if mode=="shared" else 3)
     assert r["connection_count"]==(2 if mode=="shared" and lifetime=="while_driving" else 1 if mode=="shared" else 3)
     assert r["disconnect_count"]==r["connection_count"]
+    tx=r["transmission"]
+    assert tx["mode"]=="parallel" and tx["per_client_in_flight"]==1
+    assert tx["in_flight"]==tx["queued_messages"]==tx["reserved_bytes"]==tx["reserved_commands"]==0
+    assert tx["peak_in_flight"]<=r["allocated_clients"]
+    assert tx["peak_reserved_bytes"]<=tx["queue_byte_capacity"] and tx["peak_reserved_commands"]<=tx["queue_capacity"]
     expected=[]
     for row in client.post("/api/schedules/preview",json=source).json()["trips"]:
         output=client.post(f'/api/schedules/obd/{row["vehicle_id"]}/{row["trip_key"]}',json={"schedule":source}).json()
@@ -120,7 +135,7 @@ def test_schedule_mqtt_slow_ack_backpressure(mqtt_client):
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="completed",r
     assert r["puback_count"]==11 and r["transmission"]["peak_in_flight"]==1
-    assert r["transmission"]["backpressure_count"]>0 and r["schedule_delay_ms"]>100
+    assert r["transmission"]["peak_queued"]>0 and r["schedule_delay_ms"]>100
 
 
 def test_schedule_mqtt_rejects_virtual_synthetic_and_missing_confirmation(mqtt_client):
@@ -170,3 +185,70 @@ def test_schedule_mqtt_pause_resume_preserves_schedule(mqtt_client):
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="completed" and r["puback_count"]==6,r
     assert r["paused_ms"]>=200 and r["connection_count"]==2
+
+
+@pytest.mark.parametrize("mqtt_client",["split_ack"],indirect=True)
+@pytest.mark.parametrize("mode,lifetime",[("dedicated","always"),("shared","while_driving")])
+def test_schedule_mqtt_slow_client_does_not_block_other_and_global_pacing(mqtt_client,mode,lifetime):
+    client,profile=mqtt_client
+    source=schedule([{"vehicle_id":vehicle,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
+                     for vehicle in ["v000001","v000002","v000003"]],end="03",interval=200)
+    run_id,_=start(client,source,mapping_mode=mode,client_count=2,connection_lifetime=lifetime)
+    r=finished(client,run_id)["result"]
+    assert r["job_state"]=="completed" and r["puback_count"]==18,r
+    assert r["transmission"]["peak_in_flight"]>=2 and r["connection_cleanup_confirmed"]
+    assert r["schedule_delay_ms"]>500
+    report=broker_report(profile)
+    times=[datetime.fromisoformat(t.replace("Z","+00:00")).timestamp() for t in report["received_at"]]
+    slow=next(i for i,c in enumerate(report["client_ids"]) if c.endswith("-c001"))
+    fast=next(i for i,c in enumerate(report["client_ids"]) if c.endswith("-c002"))
+    assert times[fast]<times[slow]+.35,report
+    # 전체 10건/초 제한이며 Client별 10건/초로 곱해지지 않는다.
+    assert all(b-a>.075 for a,b in zip(times,times[1:])),times
+    assert report["received"]==18 and report["unique_clients"]==(3 if mode=="dedicated" else 2)
+    for vehicle in ["v000001","v000002","v000003"]:
+        received=[m for topic,m in zip(report["topics"],report["messages"]) if topic.endswith(f"/{vehicle}/obd")]
+        assert len(received)==6 and [m["ty"] for m in received]==[4]*5+[3]
+        assert [m["ts"] for m in received]==sorted(m["ts"] for m in received)
+        assert all(set(m)=={"ty","ts","pld"} for m in received)
+
+
+@pytest.mark.parametrize("mqtt_client",["no_ack"],indirect=True)
+def test_schedule_mqtt_parallel_failure_accounts_all_attempts_and_queue(mqtt_client):
+    client,profile=mqtt_client
+    source=schedule([{"vehicle_id":v,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
+                     for v in ["v000001","v000002"]],end="03",interval=100)
+    run_id,_=start(client,source,mapping_mode="dedicated",connection_lifetime="while_driving")
+    r=finished(client,run_id)["result"]
+    assert r["job_state"]=="failed" and r["connection_cleanup_confirmed"],r
+    assert r["publish_attempts"]==r["unconfirmed_messages"]==2 and r["puback_count"]==0
+    assert r["processed_messages"]==r["publish_attempts"]+r["transmission"]["discarded_queued"]
+    assert r["transmission"]["reserved_bytes"]==r["transmission"]["in_flight"]==0
+    assert broker_report(profile)["received"]==2
+
+
+@pytest.mark.parametrize("mqtt_client",["delay_ack"],indirect=True)
+def test_schedule_mqtt_parallel_pause_drains_active_and_retains_queue(mqtt_client):
+    client,_=mqtt_client
+    source=schedule([{"vehicle_id":v,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
+                     for v in ["v000001","v000002"]],end="03",interval=100)
+    run_id,_=start(client,source,mapping_mode="dedicated")
+    for _ in range(200):
+        r=client.get("/api/jobs/"+run_id).json()["result"]
+        if r.get("transmission",{}).get("peak_in_flight",0)>=2:break
+        time.sleep(.01)
+    assert r["transmission"]["peak_in_flight"]==2
+    client.post("/api/jobs/"+run_id+"/pause")
+    for _ in range(200):
+        r=client.get("/api/jobs/"+run_id).json()["result"]
+        if r["job_state"]=="paused":break
+        time.sleep(.01)
+    assert r["job_state"]=="paused" and r["transmission"]["in_flight"]==0,r
+    before=(r["puback_count"],r["processed_messages"],r["transmission"]["reserved_commands"])
+    assert before[2]>0
+    time.sleep(.25)
+    r=client.get("/api/jobs/"+run_id).json()["result"]
+    assert (r["puback_count"],r["processed_messages"],r["transmission"]["reserved_commands"])==before
+    client.post("/api/jobs/"+run_id+"/resume")
+    r=finished(client,run_id)["result"]
+    assert r["job_state"]=="completed" and r["puback_count"]==22 and r["connection_cleanup_confirmed"],r

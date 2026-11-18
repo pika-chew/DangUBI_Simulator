@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,11 +32,13 @@ type testBroker struct {
 	closeOnce      bool
 	closed         bool
 	ackDelay       time.Duration
+	slowSuffix     string
 	discardPayload bool
 	handling       int
 	peakHandling   int
 	receivedAt     []time.Time
 	receivedIDs    []string
+	receivedTopics []string
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -125,6 +128,7 @@ func (b *testBroker) handle(conn net.Conn) {
 			if !b.discardPayload {
 				b.receivedAt = append(b.receivedAt, time.Now())
 				b.receivedIDs = append(b.receivedIDs, clientID)
+				b.receivedTopics = append(b.receivedTopics, p.TopicName)
 			}
 			var message map[string]any
 			if !b.discardPayload && json.Unmarshal(p.Payload, &message) == nil {
@@ -132,6 +136,9 @@ func (b *testBroker) handle(conn net.Conn) {
 			}
 			closeNow := b.closeOnce
 			ackDelay := b.ackDelay
+			if b.slowSuffix != "" && !strings.HasSuffix(clientID, b.slowSuffix) {
+				ackDelay = 0
+			}
 			noAck := b.noAck
 			b.closeOnce = false
 			b.mu.Unlock()
