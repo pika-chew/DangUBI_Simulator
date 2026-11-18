@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"runtime"
+	"time"
 	"unsafe"
 )
 
-const scheduleCacheLimit = 8
+// 짧은 운행을 차량 수만큼 재사용하되 보유량은 별도의 바이트 예산으로 제한한다.
+const scheduleCacheLimit = 1024
 const scheduleCacheBytes = 32 * 1024 * 1024
 
 type cachedSchedule struct {
@@ -18,10 +20,11 @@ type cachedSchedule struct {
 	used    uint64
 }
 type scheduledCache struct {
-	entries                 map[ScheduledInput]cachedSchedule
-	clock                   uint64
-	hits, misses, evictions int
-	bytes                   int
+	entries                         map[ScheduledInput]cachedSchedule
+	clock                           uint64
+	hits, misses, evictions         int
+	bytes                           int
+	computeNS, serializeNS, statsNS int64
 }
 
 func scheduleKey(s ScheduledInput) ScheduledInput {
@@ -83,9 +86,12 @@ func (c *scheduledCache) retain(s ScheduledInput, r Request) {
 	c.bytes += size
 }
 func (c *scheduledCache) stats() map[string]any {
+	started := time.Now()
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	return map[string]any{"cache_hits": c.hits, "plan_builds": c.misses, "cache_evictions": c.evictions, "cache_entries": len(c.entries), "cache_estimated_bytes": c.bytes, "cache_max_entries": scheduleCacheLimit, "cache_max_estimated_bytes": scheduleCacheBytes, "heap_alloc_bytes": m.HeapAlloc, "heap_sys_bytes": m.HeapSys}
+	c.statsNS += time.Since(started).Nanoseconds()
+	return map[string]any{"cache_hits": c.hits, "plan_builds": c.misses, "cache_evictions": c.evictions, "cache_entries": len(c.entries), "cache_estimated_bytes": c.bytes, "cache_max_entries": scheduleCacheLimit, "cache_max_estimated_bytes": scheduleCacheBytes, "heap_alloc_bytes": m.HeapAlloc, "heap_sys_bytes": m.HeapSys,
+		"worker_compute_ms": float64(c.computeNS) / 1e6, "worker_serialize_ms": float64(c.serializeNS) / 1e6, "worker_stats_ms": float64(c.statsNS) / 1e6}
 }
 func serveScheduleStream(input io.Reader, w io.Writer) {
 	enc := json.NewEncoder(w)
@@ -138,7 +144,9 @@ func serveScheduleStream(input io.Reader, w io.Writer) {
 			fail("생성 페이지 명령을 확인하세요.")
 			return
 		}
+		started := time.Now()
 		result, err := scheduledPage(Request{Scheduled: cmd.Scheduled}, &cache, true)
+		cache.computeNS += time.Since(started).Nanoseconds()
 		if err != nil {
 			fail(err.Error())
 			return
@@ -152,6 +160,7 @@ func serveScheduleStream(input io.Reader, w io.Writer) {
 			fail("생성 응답 바이트 예산을 확인하세요.")
 			return
 		}
+		started = time.Now()
 		used, keep := 4096, 0
 		for _, message := range page.Messages {
 			raw, e := json.Marshal(message)
@@ -174,8 +183,11 @@ func serveScheduleStream(input io.Reader, w io.Writer) {
 		}
 		// 실행 응답에는 그래프와 중간 이벤트 설명을 싣지 않는다. OBD 본문은 조회와 공유한다.
 		value := map[string]any{"model": page.Model, "messages": page.Messages, "microtrip_count": page.MicroCount, "trip": page.Trip, "synthetic_trip": page.Synthetic, "final_lat": page.FinalLat, "final_lon": page.FinalLon, "final_odometer_m": page.FinalOdometer, "final_coolant_c": page.FinalCoolant, "final_heading_rad": page.FinalHeading}
+		cache.serializeNS += time.Since(started).Nanoseconds()
 		reply := map[string]any{"id": cmd.ID, "ok": true, "scheduled": value, "next_offset": cmd.Scheduled.Offset + len(page.Messages), "stats": cache.stats()}
+		started = time.Now()
 		raw, err := json.Marshal(reply)
+		cache.serializeNS += time.Since(started).Nanoseconds()
 		if err != nil || len(raw)+1 > budget {
 			fail("응답 바이트 예산을 초과했습니다.")
 			return

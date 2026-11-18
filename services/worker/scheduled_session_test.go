@@ -64,8 +64,8 @@ func TestScheduleSessionPagesMatchLegacyAndReuse(t *testing.T) {
 }
 func TestScheduleSessionCacheIsolationAndEviction(t *testing.T) {
 	c := scheduledCache{}
-	for i := int64(0); i < 12; i++ {
-		s := sessionInput(600)
+	for i := int64(0); i < scheduleCacheLimit+4; i++ {
+		s := sessionInput(1)
 		s.Seed += i
 		if _, e := scheduledPage(Request{Scheduled: &s}, &c, true); e != nil {
 			t.Fatal(e)
@@ -77,17 +77,46 @@ func TestScheduleSessionCacheIsolationAndEviction(t *testing.T) {
 	if c.evictions != 4 {
 		t.Fatal("캐시 정리 누락")
 	}
-	s := sessionInput(600)
+	s := sessionInput(1)
 	a, _ := scheduledPage(Request{Scheduled: &s}, &c, true)
 	b, _ := scheduledOBD(Request{Scheduled: &s})
-	if !reflect.DeepEqual(a.Scheduled.Messages, b.Scheduled.Messages) || c.misses != 13 {
+	if !reflect.DeepEqual(a.Scheduled.Messages, b.Scheduled.Messages) || c.misses != scheduleCacheLimit+5 {
 		t.Fatal("축출 후 동일 생성")
 	}
 	s.Odometer++
 	a, _ = scheduledPage(Request{Scheduled: &s}, &c, true)
 	b, _ = scheduledOBD(Request{Scheduled: &s})
-	if !reflect.DeepEqual(a.Scheduled.Messages, b.Scheduled.Messages) || c.misses != 14 {
+	if !reflect.DeepEqual(a.Scheduled.Messages, b.Scheduled.Messages) || c.misses != scheduleCacheLimit+6 {
 		t.Fatal("초기 상태 캐시 충돌")
+	}
+}
+
+func TestScheduleSessionThousandVehiclesReuseAndMatchOriginal(t *testing.T) {
+	c := scheduledCache{}
+	for pass := 0; pass < 2; pass++ {
+		for vehicle := int64(0); vehicle < 1000; vehicle++ {
+			s := sessionInput(12)
+			s.Seed += vehicle
+			s.TID += vehicle
+			s.Limit = 1
+			s.Offset = pass
+			got, err := scheduledPage(Request{Scheduled: &s}, &c, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if vehicle%97 == 0 {
+				old, err := scheduledOBD(Request{Scheduled: &s})
+				if err != nil || !reflect.DeepEqual(got.Scheduled.Messages, old.Scheduled.Messages) || got.Scheduled.FinalOdometer != old.Scheduled.FinalOdometer {
+					t.Fatal("차량별 페이지 원문/상태 불일치", vehicle, pass)
+				}
+			}
+			if c.bytes > scheduleCacheBytes || len(c.entries) > scheduleCacheLimit {
+				t.Fatal("캐시 예산 초과")
+			}
+		}
+	}
+	if c.misses != 1000 || c.hits != 1000 || c.evictions != 0 {
+		t.Fatal("다수 차량 운행 재사용 실패", c.misses, c.hits, c.evictions)
 	}
 }
 func TestScheduleSessionProtocolIDsAndClose(t *testing.T) {

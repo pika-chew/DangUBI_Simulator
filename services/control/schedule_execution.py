@@ -15,6 +15,7 @@ def execute(manager, job, data, worker, timeout):
     result.update(assignments=data["assignments"], model_version="schedule-obd-3/journey-8",
                   microtrip_count=0, trip_count=0, schedule_delay_ms=0)
     last_save = 0.0
+    result["execution_timing"]={}
     mqtt=data["operation"]=="mqtt"
     bridge=None
     publisher=None
@@ -49,6 +50,7 @@ def execute(manager, job, data, worker, timeout):
 
     def finish(state):
         nonlocal cleanup
+        cleanup_started=time.monotonic()
         if bridge:
             bridge.close(abort=job.stop_requested or state!="completed")
             sync_mqtt()
@@ -66,6 +68,7 @@ def execute(manager, job, data, worker, timeout):
             if state=="completed" and (not generation.cleaned or not generation.close_acknowledged):
                 state="failed"
                 result["errors"]=["생성 세션 종료 응답 또는 프로세스 정리를 확인하지 못했습니다."]
+        result["execution_timing"]["cleanup_ms"]=(time.monotonic()-cleanup_started)*1000
         report(state,True)
 
     def report(state="running", final=False, throttle=False):
@@ -147,6 +150,8 @@ def execute(manager, job, data, worker, timeout):
                     publisher.enqueue("connect",gate,client_id=client)
                     sync_mqtt();report(throttle=True)
         bounded=BoundedSchedule(data,generation,gate,result,include_boundaries=mqtt and data["config"]["connection_lifetime"]=="while_driving",on_account=budget)
+        replay_started=time.monotonic()
+        result["execution_timing"]["preparation_ms"]=(replay_started-started)*1000
         if not mqtt:
             for timestamp,vehicle,message,synthetic in bounded:consume(timestamp,vehicle,message,synthetic)
         else:
@@ -164,11 +169,16 @@ def execute(manager, job, data, worker, timeout):
                     sync_mqtt();report(throttle=True)
                     continue
                 consume(timestamp,vehicle,message,synthetic)
+        result["execution_timing"]["replay_ms"]=(time.monotonic()-replay_started)*1000
+        wait_started=time.monotonic()
         # 마지막 운행 뒤에도 측정 종료까지 주차 시간을 진행한다.
         if not job.stop_requested:
             gate(data["duration_ms"])
+        result["execution_timing"]["measurement_wait_ms"]=(time.monotonic()-wait_started)*1000
+        drain_started=time.monotonic()
         if publisher and not job.stop_requested:
             publisher.drain(gate)
+        result["execution_timing"]["drain_ms"]=(time.monotonic()-drain_started)*1000
         if not job.stop_requested:
             result["simulation_time_ms"]=data["duration_ms"]
         if job.timed_out:

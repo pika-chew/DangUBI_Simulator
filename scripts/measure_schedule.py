@@ -194,7 +194,7 @@ def child(case,profile_path,worker,temporary):
             keys=("job_state","planned_messages","processed_messages","publish_attempts","mqtt_published","puback_count","unconfirmed_messages",
                   "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
                   "generation_session","buffer_budget","transmission","execution_cleanup_confirmed","forced_termination")
-            keys+= ("initial_connect_ms","post_connect_schedule",)
+            keys+= ("initial_connect_ms","post_connect_schedule","execution_timing",)
             row=dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
                      plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
             if profile_thread:

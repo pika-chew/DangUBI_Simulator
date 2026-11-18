@@ -19,7 +19,8 @@ class GenerationSession:
         self.worker_hash=hashlib.sha256(self.worker_path.read_bytes()).hexdigest()
         self.job=job
         self.sequence=0
-        self.stats={"process_starts":1,"page_requests":0,"peak_cache_estimated_bytes":0,"peak_heap_alloc_bytes":0}
+        self.stats={"process_starts":1,"page_requests":0,"peak_cache_estimated_bytes":0,"peak_heap_alloc_bytes":0,
+                    "page_roundtrip_ms":0.0,"request_write_ms":0.0,"response_wait_ms":0.0,"response_decode_ms":0.0,"worker_identity_ms":0.0}
         self.cleaned=False
         self.forced=False
         self.closed=False
@@ -40,15 +41,26 @@ class GenerationSession:
         return s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns
 
     def worker_digest(self,worker):
-        if Path(worker).resolve()!=self.worker_path or self._signature()!=self.worker_signature:
-            raise GenerationFailure("생성 엔진 파일이 변경되었습니다. 실행을 다시 준비하세요.")
-        return self.worker_hash
+        before=time.perf_counter()
+        try:
+            candidate=Path(worker)
+            # 이미 정규화한 동일 절대 경로는 다시 resolve하지 않는다.
+            # 매번 stat으로 실제 파일 식별/크기/수정 시각을 검사한다. 다른 표기는 기존 resolve 검사를 거친다.
+            if (candidate!=self.worker_path and candidate.resolve()!=self.worker_path) or self._signature()!=self.worker_signature:
+                raise GenerationFailure("생성 엔진 파일이 변경되었습니다. 실행을 다시 준비하세요.")
+            return self.worker_hash
+        finally:
+            self.stats["worker_identity_ms"]=self.stats.get("worker_identity_ms",0)+(time.perf_counter()-before)*1000
 
     def _read(self):
         try:
             while line:=self.process.stdout.readline(1048577):
                 if len(line.encode("utf-8"))>1048576: break
-                self.responses.put(json.loads(line),timeout=1)
+                before=time.perf_counter()
+                reply=json.loads(line)
+                self.stats["response_decode_ms"]+=(time.perf_counter()-before)*1000
+                self.responses.put(reply,timeout=1)
+                reply=None
                 line=None
         except (ValueError,OSError,queue.Full):
             pass
@@ -85,13 +97,18 @@ class GenerationSession:
 
     def page(self,payload,timeout=15,byte_limit=1048576):
         if self.closed:raise GenerationFailure("종료된 생성 세션입니다.")
+        before=time.perf_counter()
         self.sequence+=1
         self._write({"id":self.sequence,"command":"page","scheduled":payload,"byte_limit":byte_limit})
+        written=time.perf_counter()
+        self.stats["request_write_ms"]+=(written-before)*1000
         reply=self._receive(self.sequence,timeout)
+        self.stats["response_wait_ms"]+=(time.perf_counter()-written)*1000
         result=reply.get("scheduled")
         if not isinstance(result,dict) or not isinstance(result.get("messages"),list) or reply.get("next_offset")!=payload["offset"]+len(result["messages"]):
             raise GenerationFailure("생성 페이지의 진행 위치를 확인하지 못했습니다.")
         self.stats["page_requests"]+=1
+        self.stats["page_roundtrip_ms"]+=(time.perf_counter()-before)*1000
         return result
 
     def close(self,abort=False):

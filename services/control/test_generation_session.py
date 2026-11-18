@@ -19,10 +19,21 @@ def test_worker_identity_is_cached_but_rejects_file_changes(tmp_path):
     import hashlib
     p=tmp_path/"worker";p.write_bytes(b"original")
     s=GenerationSession.__new__(GenerationSession)
-    s.worker_path=p.resolve();s.worker_signature=s._signature();s.worker_hash=hashlib.sha256(p.read_bytes()).hexdigest()
+    s.worker_path=p.resolve();s.worker_signature=s._signature();s.worker_hash=hashlib.sha256(p.read_bytes()).hexdigest();s.stats={}
     assert s.worker_digest(p)==s.worker_hash
     p.write_bytes(b"modified-longer")
     with pytest.raises(GenerationFailure,match="변경"):s.worker_digest(p)
+
+
+def test_identity_fast_path_checks_file_without_resolving_again(tmp_path,monkeypatch):
+    p=tmp_path/"engine";p.write_bytes(b"engine")
+    s=GenerationSession.__new__(GenerationSession)
+    s.worker_path=p.resolve();s.worker_signature=s._signature();s.worker_hash="trusted";s.stats={}
+    def unexpected(*args,**kwargs):raise AssertionError("동일 절대 경로를 재해석함")
+    monkeypatch.setattr(Path,"resolve",unexpected)
+    assert s.worker_digest(s.worker_path)=="trusted"
+    p.write_bytes(b"changed-engine")
+    with pytest.raises(GenerationFailure,match="변경"):s.worker_digest(s.worker_path)
 
 
 def test_session_matches_all_pages_and_closes():
