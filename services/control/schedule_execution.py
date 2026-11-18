@@ -68,8 +68,11 @@ def execute(manager, job, data, worker, timeout):
                 result["errors"]=["생성 세션 종료 응답 또는 프로세스 정리를 확인하지 못했습니다."]
         report(state,True)
 
-    def report(state="running", final=False):
+    def report(state="running", final=False, throttle=False):
         nonlocal last_save
+        # 연결 경계가 몰려도 DB에 차량 수만큼 연속 저장하지 않는다.
+        # 최종 상태와 상태 전환은 제한하지 않으며 gate의 중단/일시정지 확인도 유지한다.
+        if throttle and not final and result.get("job_state")==state and time.monotonic()-last_save<.1:return
         if bounded:result["generation_pool"]={"assignments":bounded.assignments,"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
         budget()
         elapsed = time.monotonic()-started
@@ -142,7 +145,7 @@ def execute(manager, job, data, worker, timeout):
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break
                     publisher.enqueue("connect",gate,client_id=client)
-                    sync_mqtt();report()
+                    sync_mqtt();report(throttle=True)
         bounded=BoundedSchedule(data,generation,gate,result,include_boundaries=mqtt and data["config"]["connection_lifetime"]=="while_driving",on_account=budget)
         if not mqtt:
             for timestamp,vehicle,message,synthetic in bounded:consume(timestamp,vehicle,message,synthetic)
@@ -158,7 +161,7 @@ def execute(manager, job, data, worker, timeout):
                         publisher.enqueue("connect",gate,client_id=client)
                     elif priority==2 and driving[client]==0:
                         publisher.enqueue("disconnect",gate,client_id=client)
-                    sync_mqtt();report()
+                    sync_mqtt();report(throttle=True)
                     continue
                 consume(timestamp,vehicle,message,synthetic)
         # 마지막 운행 뒤에도 측정 종료까지 주차 시간을 진행한다.

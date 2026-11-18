@@ -144,3 +144,38 @@ def test_thousand_vehicle_queue_with_large_pages_keeps_headroom():
         assert len(keys)==2000 and keys==sorted(keys)
         assert q.stats["peak_reserved_bytes"]<=8388608 and q.stats["peak_reserved_messages"]<=2000
     finally:pool.close();q.close()
+
+
+def test_time_index_handles_shifted_heads_many_pages_and_empty_observation():
+    """늦게 준비된 응답·페이지 전환·운행 교체에도 전역 시각순과 색인 메모리 경계를 유지한다."""
+    pool=FakePool(4,SimpleNamespace(stop_requested=False,pause_requested=False))
+    expected=[]
+    def provide(v):
+        for i in range(3):
+            yield dict(trip_key=f"{v}-{i}",start_ms=i*100000,end_ms=i*100000+40000,
+                       observed_start_ms=i*100000,observed_end_ms=i*100000+40000)
+    def generate(v,key,offset,session,limit):
+        i=int(key.rsplit("-",1)[1]);shift=int(v[1:])%7
+        # 가운데 운행은 조회 구간 내 메시지가 없는 응답도 허용한다.
+        messages=[] if i==1 else [dict(ty=4,ts=i*100000+n*1000+shift,pld={}) for n in range(40)]
+        page=messages[offset:offset+limit]
+        if v=="v000000":time.sleep(.001)
+        return dict(status="generated",messages=page,has_more=offset+len(page)<len(messages),trip=None)
+    vehicles=[f"v{i:06d}" for i in range(30)]
+    for v in vehicles:
+        for i in (0,2):
+            expected.extend((i*100000+n*1000+int(v[1:])%7,v) for n in range(40))
+    data=dict(assignments=[dict(vehicle_id=v) for v in vehicles],trip_provider=provide,generate=generate,
+              config={"interval_ms":1000},measurement_start_ms=0,realtime=False,
+              generation_queue_messages=80,generation_queue_bytes=262144)
+    q=BoundedSchedule(data,pool,lambda due=None:True,{})
+    try:
+        observed=[]
+        for t,v,_,_ in q:
+            observed.append((t,v))
+            assert len(q.heads)<=2*len(vehicles)+1
+            assert all(len(heap)<=2*count+1 for heap,count in zip(q.ready,q.owner_counts))
+        assert observed==sorted(expected)
+        assert q.stats["peak_reserved_messages"]<=80 and q.stats["peak_reserved_bytes"]<=262144
+    finally:pool.close();q.close()
+    assert not q.heads and not any(q.ready) and not q.inflight

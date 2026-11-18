@@ -112,12 +112,35 @@ def child(case,profile_path,worker,temporary):
     if folder.parent!=expected or not folder.name.startswith("schedule-measure-") or profile_path.resolve().parent!=folder or worker.resolve()!=expected/("schedule-measure-worker"+suffix):
         raise ValueError("계측 명령이 만든 임시 경로와 Worker만 사용합니다.")
     validate_config(dict(cases=[case],repeats=1))
+    if os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1":
+        import faulthandler
+        faulthandler.dump_traceback_later(30,repeat=True)
     deadline=time.monotonic()+5
     while not (temporary/"ready").exists():
         if time.monotonic()>deadline:raise RuntimeError("계측 수명 연결 대기 초과")
         time.sleep(.01)
     from fastapi.testclient import TestClient
     from services.control import app as control,schedule_execution
+    profile_samples={};profile_stop=threading.Event();profile_thread=None
+    if os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1":
+        original_execute=schedule_execution.execute
+        def profiled_execute(*args,**kwargs):
+            nonlocal profile_thread
+            identifier=threading.get_ident()
+            def sample():
+                while not profile_stop.wait(.02):
+                    frame=sys._current_frames().get(identifier)
+                    if frame is None:continue
+                    stack=[]
+                    while frame is not None:
+                        stack.append(f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}")
+                        frame=frame.f_back
+                    key=" <- ".join(stack)
+                    profile_samples[key]=profile_samples.get(key,0)+1
+            profile_thread=threading.Thread(target=sample,daemon=True);profile_thread.start()
+            try:return original_execute(*args,**kwargs)
+            finally:profile_stop.set();profile_thread.join(timeout=2)
+        schedule_execution.execute=profiled_execute
     profile=local_profile(json.loads(profile_path.read_text(encoding="utf-8")))
     if case.get("local_scale"):
         profile.update(local_benchmark=True,max_clients=1000,max_messages=10000,max_duration_seconds=120,connect_per_second=200,publish_per_second=5000)
@@ -172,8 +195,14 @@ def child(case,profile_path,worker,temporary):
                   "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
                   "generation_session","buffer_budget","transmission","execution_cleanup_confirmed","forced_termination")
             keys+= ("initial_connect_ms","post_connect_schedule",)
-            return dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
-                        plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
+            row=dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
+                     plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
+            if profile_thread:
+                job.thread.join(timeout=5)
+                if job.thread.is_alive():raise RuntimeError("프로파일 종료를 확인하지 못했습니다.")
+                row["control_profile"]=dict(interval_ms=20,samples=sum(profile_samples.values()),basis="실행 스레드의 대기를 포함한 벽시계 스택 표본; CPU 시간 비율이 아님",
+                    stacks=[dict(stack=k,samples=v) for k,v in sorted(profile_samples.items(),key=lambda item:item[1],reverse=True)[:100]])
+            return row
         finally:
             if sampler:
                 active=control.JOBS.active
@@ -197,7 +226,11 @@ def measure(case,fixture,worker):
                     with tempfile.TemporaryFile() as child_log:
                         process=tree.start([sys.executable,str(Path(__file__).resolve()),"--child",json.dumps(case),str(profile),str(worker),str(temporary)],stdout=subprocess.PIPE,stderr=child_log)
                         (temporary/"ready").touch()
-                        raw,_=process.communicate(timeout=145 if case.get("local_scale") else 50)
+                        try:raw,_=process.communicate(timeout=145 if case.get("local_scale") else 50)
+                        except subprocess.TimeoutExpired:
+                            if os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1":
+                                child_log.seek(0);(ROOT/".local/schedule-profile-timeout.log").write_bytes(child_log.read())
+                            raise
                     if process.returncode:raise RuntimeError("격리 측정 프로세스 실패")
                     row=json.loads(raw)
                 finally:tree.close()
@@ -249,9 +282,11 @@ def main():
     if len(sys.argv)>1 and sys.argv[1]=="--child":
         row=child(json.loads(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[4]),Path(sys.argv[5]))
         print(json.dumps(row,ensure_ascii=True));return
-    parser=argparse.ArgumentParser(description="일반 상한 내 일정 생성·송신 통합 로컬 측정")
+    parser=argparse.ArgumentParser(description="일정 생성·송신 통합 로컬 측정")
     parser.add_argument("--config",type=Path,default=ROOT/"configs/schedule-measurement.example.json")
+    parser.add_argument("--profile",action="store_true",help="제어 실행 스레드의 대기 포함 스택 표본을 추가 수집합니다. 계측 부하가 포함됩니다.")
     args=parser.parse_args()
+    if args.profile:os.environ["DANGUBI_PROFILE_SCHEDULE"]="1"
     try:cases,repeats=validate_config(json.loads(args.config.read_text(encoding="utf-8-sig")))
     except (OSError,ValueError) as error:parser.error(str(error))
     local=ROOT/".local";local.mkdir(exist_ok=True);suffix=".exe" if os.name=="nt" else ""
@@ -261,6 +296,7 @@ def main():
     subprocess.run(["go","test","-c","-o",str(fixture)],cwd=ROOT/"services/worker",env=env,check=True)
     directory=local/"measurements"/("schedule-"+datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d-%H%M%S-")+uuid.uuid4().hex[:6]);directory.mkdir(parents=True)
     report=dict(schema_version="schedule-measure-2",environment=dict(os=platform.platform(),processor=platform.processor(),logical_cpus=os.cpu_count(),python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),resource_scope="제어기+생성Worker+송신프로세스, 브로커 제외; 제어기 계측·TestClient 부하 포함",control_poll_ms={"normal":50,"local_scale":500},cpu_basis="100%=코어1개",memory_basis="100ms 동시 관측 RSS 합계의 최댓값; 공유 메모리 중복 가능"),results=[])
+    report["environment"]["control_stack_sampling"]=os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1"
     for repeat in range(repeats):
         for case in cases:
             print(f"측정 {repeat+1}/{repeats}: {case['name']}",flush=True)
