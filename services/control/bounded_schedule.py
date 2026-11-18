@@ -1,5 +1,6 @@
 """시각순 처리와 고정 Worker 배정을 유지하는 건수·UTF-8 바이트 한정 대기열."""
 from collections import deque
+import heapq
 import json
 import time
 from services.control.generation_pool import owner_for
@@ -11,9 +12,23 @@ class PageSession:
     def page(self,payload,timeout=15):return self.session.page(payload,timeout,byte_limit=self.byte_limit)
 
 
+def interval_boundaries(rows):
+    """같은 차량의 맞닿은 운행은 연결 구간 하나로 합친다. 다음 행 하나만 보관한다."""
+    rows=iter(rows);row=next(rows,None)
+    while row is not None:
+        start,end=row["observed_start_ms"],row["observed_end_ms"]
+        yield start,0
+        row=next(rows,None)
+        while row is not None and row["observed_start_ms"]<=end:
+            end=max(end,row["observed_end_ms"]);row=next(rows,None)
+        yield end,2
+
+
 class BoundedSchedule:
-    def __init__(self,data,pool,gate,result):
+    def __init__(self,data,pool,gate,result,include_boundaries=False,on_account=None):
         self.data,self.pool,self.gate,self.result=data,pool,gate,result
+        self.include_boundaries=include_boundaries;self.on_account=on_account
+        self.boundaries=[];self.boundary_streams={}
         count=len(data["assignments"]);workers=len(pool.sessions)
         self.byte_cap=data.get("generation_queue_bytes",8*1024*1024)
         self.count_cap=data.get("generation_queue_messages",2000)
@@ -26,6 +41,11 @@ class BoundedSchedule:
         for a in data["assignments"]:
             v=a["vehicle_id"];s={"vehicle":v,"owner":owner_for(v,workers),"trips":iter(data["trip_provider"](v)),"queue":deque(),"future":None}
             self.advance(s);self.states[v]=s
+            if include_boundaries:
+                stream=iter(interval_boundaries(data["trip_provider"](v)))
+                self.boundary_streams[v]=stream
+                boundary=next(stream,None)
+                if boundary is not None:heapq.heappush(self.boundaries,(*boundary,v))
         self.assignments=[{"vehicle_id":v,"worker_index":s["owner"]} for v,s in sorted(self.states.items())]
     def advance(self,s):
         s["trip"]=next(s["trips"],None);s["offset"]=0;s["more"]=True
@@ -39,6 +59,7 @@ class BoundedSchedule:
         if count>self.count_cap or size>self.byte_cap:raise GenerationFailure("생성 대기열 예산을 초과했습니다.")
         self.stats.update(queued_messages=self.queued_count,queued_bytes=self.queued_bytes,reserved_messages=count,reserved_bytes=size)
         for key,value in [("peak_messages",self.queued_count),("peak_bytes",self.queued_bytes),("peak_reserved_messages",count),("peak_reserved_bytes",size)]:self.stats[key]=max(self.stats[key],value)
+        if self.on_account:self.on_account()
     def prepare(self,s,session):
         wrapped=PageSession(session,self.frame)
         previous=-1
@@ -52,7 +73,7 @@ class BoundedSchedule:
             previous=completed
         raise GenerationFailure("실행 중간 상태 복원 상한을 초과했습니다.")
     def __iter__(self):
-        while any(s["trip"] is not None for s in self.states.values()):
+        while self.boundaries or any(s["trip"] is not None for s in self.states.values()):
             if not self.gate():return
             for s in self.states.values():
                 f=s["future"]
@@ -73,7 +94,6 @@ class BoundedSchedule:
                 m=None
                 del out,items,f
             candidates=sorted((s for s in self.states.values() if s["trip"] is not None),key=lambda s:(s["due"],s["vehicle"]))
-            if not candidates:break
             for s in candidates:
                 if s["queue"] or s["future"] is not None or s["owner"] in self.busy:continue
                 if self.data["realtime"] and s["due"]-self.data["measurement_start_ms"]>self.result.get("simulation_time_ms",0)+2000:continue
@@ -81,6 +101,24 @@ class BoundedSchedule:
                 if self.queued_bytes+self.consuming_bytes+(len(self.busy)+1)*self.frame*2>self.byte_cap or self.queued_count+self.consuming_count+(len(self.busy)+1)*(self.limit+1)>self.count_cap:
                     self.stats["backpressure_count"]+=1;continue
                 self.busy[s["owner"]]=time.monotonic();s["future"]=self.pool.submit(s["owner"],lambda session,s=s:self.prepare(s,session));self.account()
+            if self.boundaries and (not candidates or self.boundaries[0]<(candidates[0]["due"],1,candidates[0]["vehicle"])):
+                timestamp,priority,vehicle=self.boundaries[0]
+                due=timestamp-self.data["measurement_start_ms"]
+                wake=due
+                if self.data["realtime"]:
+                    now=self.result.get("simulation_time_ms",0)
+                    if self.busy:wake=min(wake,now+50)
+                    for s in candidates:
+                        preparation=s["due"]-self.data["measurement_start_ms"]-2000
+                        if not s["queue"] and s["future"] is None and now<preparation<due:wake=min(wake,preparation)
+                if not self.gate(wake):return
+                if wake<due:continue
+                heapq.heappop(self.boundaries)
+                boundary=next(self.boundary_streams[vehicle],None)
+                if boundary is not None:heapq.heappush(self.boundaries,(*boundary,vehicle))
+                yield timestamp,priority,vehicle,None,False
+                continue
+            if not candidates:break
             s=candidates[0]
             if s["queue"]:
                 message,synthetic,size=s["queue"][0]
@@ -89,7 +127,8 @@ class BoundedSchedule:
                 if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
                 elif not s["more"]:self.advance(s)
                 else:s["due"]=message["ts"]+self.data["config"]["interval_ms"]
-                yield message["ts"],s["vehicle"],message,synthetic
+                if self.include_boundaries:yield message["ts"],1,s["vehicle"],message,synthetic
+                else:yield message["ts"],s["vehicle"],message,synthetic
                 self.consuming_bytes=0;self.consuming_count=0;self.account()
                 del message
             elif not self.busy:
@@ -107,4 +146,5 @@ class BoundedSchedule:
         self.stats["discarded_queued_bytes"]=self.queued_bytes
         self.stats["cancelled_page_requests"]=len(self.busy)
         for s in self.states.values():s["queue"].clear();s["future"]=None
+        self.boundaries.clear();self.boundary_streams.clear()
         self.busy.clear();self.queued_bytes=0;self.queued_count=0;self.consuming_bytes=0;self.consuming_count=0;self.account()

@@ -104,3 +104,28 @@ def test_worker_failure_stops_all_processes():
         with pytest.raises(GenerationFailure):f.result(timeout=5)
     finally:pool.close(abort=True)
     assert pool.cleaned and all(p.poll() is not None for p in job.processes)
+
+
+def test_bounded_mqtt_boundaries_merge_touching_trips_and_order_equal_timestamps():
+    job=SimpleNamespace(stop_requested=False,pause_requested=False)
+    pool=FakePool(2,job)
+    rows={"a":[(0,200,0,200),(200,400,200,400)],"b":[(100,200,100,200)],"c":[(0,10000,25,75)]}
+    def provide(vehicle):
+        for i,(a,b,c,d) in enumerate(rows[vehicle]):
+            yield dict(trip_key=f"{vehicle}-{i}",start_ms=a,end_ms=b,observed_start_ms=c,observed_end_ms=d)
+    def generate(vehicle,key,offset,session,limit):
+        a,b,c,d=rows[vehicle][int(key.split("-")[1])]
+        all_messages=[dict(ty=4,ts=t,pld={}) for t in range(a,b,100) if c<=t<d]
+        page=all_messages[offset:offset+limit];more=offset+len(page)<len(all_messages)
+        return dict(status="generated",messages=page,has_more=more,
+                    trip=dict(ty=3,ts=b,pld={}) if not more and d==b else None,synthetic_trip=False)
+    data=dict(assignments=[{"vehicle_id":v} for v in rows],trip_provider=provide,generate=generate,
+              config={"interval_ms":100},measurement_start_ms=0,realtime=False,
+              generation_queue_messages=32,generation_queue_bytes=262144)
+    q=BoundedSchedule(data,pool,lambda due=None:True,{},include_boundaries=True)
+    try:events=list(q)
+    finally:pool.close();q.close()
+    assert [(t,p,v) for t,p,v,_,_ in events]==sorted((t,p,v) for t,p,v,_,_ in events)
+    assert [(t,p,v) for t,p,v,_,_ in events if p!=1]==[(0,0,"a"),(25,0,"c"),(75,2,"c"),(100,0,"b"),(200,2,"b"),(400,2,"a")]
+    assert [(m["ts"],m["ty"]) for _,p,v,m,_ in events if p==1 and v=="a"]==[(0,4),(100,4),(200,3),(200,4),(300,4),(400,3)]
+    assert q.stats["reserved_bytes"]==q.stats["reserved_messages"]==0

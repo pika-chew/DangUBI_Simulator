@@ -88,6 +88,13 @@ type TimingSummary = {
   p95_upper_ms: number;
 };
 export type Result = {
+  buffer_budget?: {
+    max_messages:number;max_bytes:number;reserved_messages:number;reserved_bytes:number;
+    peak_reserved_messages:number;peak_reserved_bytes:number;
+    generation_reserved_messages:number;generation_reserved_bytes:number;
+    transmission_reserved_commands:number;transmission_reserved_bytes:number;
+  };
+  execution_cleanup_confirmed?:boolean;
   transmission?: {
     per_client_in_flight?: number;
     queue_byte_capacity?: number;

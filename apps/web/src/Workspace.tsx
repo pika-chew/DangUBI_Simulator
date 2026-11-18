@@ -133,6 +133,7 @@ function RunMetrics({result:r,live}:{result:Result;live:boolean}) {
       <p className="note">일시정지 중에도 전체 제한시간은 흐릅니다. 연결 정리 {r.connection_cleanup_confirmed===true?"확인":r.connection_cleanup_confirmed===false?"미확인":"기록 없음"} · 강제 종료 {r.forced_termination?"발생":"없음"}</p>
       {r.transmission&&<p className="note">{r.transmission.mode==="parallel"?"Client별 동시 전송":"순차 전송"} · 대기 {r.transmission.queued_messages}/{r.transmission.queue_capacity} · 응답 대기 {r.transmission.in_flight} · 최대 대기 {r.transmission.peak_queued} · 최대 응답 대기 {r.transmission.peak_in_flight} · 생성 대기 {r.transmission.backpressure_count}회 · 대기 취소 {r.transmission.discarded_queued}건</p>}
       {r.transmission?.queue_byte_capacity!==undefined&&<p className="note">Client당 진행 상한 {r.transmission.per_client_in_flight}건 · 대기·진행·연결 명령 합계 {r.transmission.reserved_commands}/{r.transmission.queue_capacity}건 · 예약 크기 {((r.transmission.reserved_bytes??0)/1024).toFixed(1)}/{(r.transmission.queue_byte_capacity/1024).toFixed(0)} KiB · 최대 예약 {((r.transmission.peak_reserved_bytes??0)/1024).toFixed(1)} KiB</p>}
+      {r.buffer_budget&&<p className="note">생성·송신 통합 예약 {r.buffer_budget.reserved_messages}/{r.buffer_budget.max_messages}건 · {(r.buffer_budget.reserved_bytes/1048576).toFixed(2)}/{(r.buffer_budget.max_bytes/1048576).toFixed(0)} MiB · 최대 예약 {(r.buffer_budget.peak_reserved_bytes/1048576).toFixed(2)} MiB · 전체 실행 자원 정리 {r.execution_cleanup_confirmed?"확인":"대기 또는 미확인"}</p>}
     </details>
   </>;
 }

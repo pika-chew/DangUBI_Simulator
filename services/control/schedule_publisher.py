@@ -7,8 +7,9 @@ from services.control.mqtt_bridge import MQTTFailure
 
 
 class SchedulePublisher:
-    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0):
+    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None):
         self.bridge=bridge
+        self.on_account=on_account
         self.measurement_start_ms=measurement_start_ms
         self.clients=client_by_vehicle
         self.queues={client:deque() for client in sorted(set(self.clients.values()))}
@@ -44,6 +45,7 @@ class SchedulePublisher:
         self.state.update(reserved_bytes=self.reserved_bytes,reserved_commands=self.reserved_count)
         self.state["peak_reserved_bytes"]=max(self.state["peak_reserved_bytes"],self.reserved_bytes)
         self.state["peak_reserved_commands"]=max(self.state["peak_reserved_commands"],self.reserved_count)
+        if self.on_account:self.on_account()
 
     def pump(self,allow_start=True,elapsed_ms=0):
         while self.bridge.pending:

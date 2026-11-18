@@ -1,5 +1,4 @@
 """일정 실행: 선택 조회와 동일한 생성기를 사용하고 제한된 페이지와 샘플만 유지한다."""
-import heapq
 import json
 import time
 from services.control.mqtt_bridge import MQTTBridge, MQTTFailure
@@ -26,6 +25,22 @@ def execute(manager, job, data, worker, timeout):
     result["transport"]="mqtt" if mqtt else "dry_run"
     if mqtt:
         result.update(unsent_messages=result["planned_messages"], connection_count=0, disconnect_count=0)
+
+    def budget():
+        if not mqtt:return
+        g=bounded.stats if bounded else {}
+        p=publisher.state if publisher else {}
+        count=g.get("reserved_messages",0)+p.get("reserved_commands",0)
+        size=g.get("reserved_bytes",0)+p.get("reserved_bytes",0)
+        b=result.setdefault("buffer_budget",dict(max_messages=data.get("generation_queue_messages",2000)+100,
+                    max_bytes=data.get("generation_queue_bytes",8388608)+1048576,
+                    peak_reserved_messages=0,peak_reserved_bytes=0))
+        if count>b["max_messages"] or size>b["max_bytes"]:raise GenerationFailure("생성·송신 통합 예약 예산을 초과했습니다.")
+        b.update(reserved_messages=count,reserved_bytes=size,generation_reserved_messages=g.get("reserved_messages",0),
+                 generation_reserved_bytes=g.get("reserved_bytes",0),transmission_reserved_commands=p.get("reserved_commands",0),
+                 transmission_reserved_bytes=p.get("reserved_bytes",0))
+        b["peak_reserved_messages"]=max(b["peak_reserved_messages"],count)
+        b["peak_reserved_bytes"]=max(b["peak_reserved_bytes"],size)
 
     def sync_mqtt():
         if bridge:
@@ -56,12 +71,15 @@ def execute(manager, job, data, worker, timeout):
     def report(state="running", final=False):
         nonlocal last_save
         if bounded:result["generation_pool"]={"assignments":bounded.assignments,"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
+        budget()
         elapsed = time.monotonic()-started
         result.update(elapsed_ms=int(elapsed*1000), paused_ms=int(paused_seconds*1000),
                       active_elapsed_ms=int((elapsed-paused_seconds)*1000),
                       remaining_messages=max(0,result["planned_messages"]-result["processed_messages"]),
                       job_state=state, state=("mqtt_completed" if mqtt else "dry_run_completed") if final and state=="completed" else "mqtt_failed" if mqtt and final and state=="failed" else state,
-                      connection_cleanup_confirmed=final and cleanup, forced_termination=bridge.forced if bridge else (generation.forced or job.forced if generation else False))
+                      connection_cleanup_confirmed=final and cleanup,
+                      execution_cleanup_confirmed=final and cleanup and (generation.cleaned if generation else True),
+                      forced_termination=job.forced or bool(bridge and bridge.forced) or bool(generation and generation.forced))
         with manager.lock:
             job.result = result.copy()
             manager.save(job)
@@ -89,26 +107,13 @@ def execute(manager, job, data, worker, timeout):
                 continue
             elapsed=now-started-paused_seconds
             result["simulation_time_ms"]=min(data["duration_ms"],int(elapsed*1000)) if data["realtime"] else result.get("simulation_time_ms",0)
-            if now-last_save >= .5:
+            # 짧은 ACK 제한시간 안에도 중단 가능한 진행 상태를 확인한다.
+            # 메시지마다 저장하지 않고 진행 중 MQTT 명령이 있을 때만 최대10회/초로 갱신한다.
+            if now-last_save >= (.1 if publisher and publisher.active else .5):
                 report()
             if due is None or not data["realtime"] or elapsed*1000 >= due:
                 return True
             time.sleep(min(.05,max(0,(due-elapsed*1000)/1000)))
-
-    def messages(vehicle):
-        for trip in data["trips_by_vehicle"].get(vehicle,[]):
-            offset=0
-            while gate():
-                output=data["generate"](vehicle,trip["trip_key"],offset,session=generation) if generation else data["generate"](vehicle,trip["trip_key"],offset)
-                if output["status"]=="preparing":
-                    continue
-                for message in output["messages"]:
-                    yield message, False
-                if not output["has_more"]:
-                    if output.get("trip"):
-                        yield output["trip"], output["synthetic_trip"]
-                    break
-                offset += len(output["messages"])
 
     def consume(timestamp,vehicle,message,synthetic):
         if mqtt:
@@ -128,59 +133,27 @@ def execute(manager, job, data, worker, timeout):
 
     try:
         report()
+        generation=GenerationPool(worker,job,manager,data.get("generation_workers",1))
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
-            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"])
+            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget)
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break
                     publisher.enqueue("connect",gate,client_id=client)
                     sync_mqtt();report()
-        else:
-            generation=GenerationPool(worker,job,manager,data.get("generation_workers",1))
+        bounded=BoundedSchedule(data,generation,gate,result,include_boundaries=mqtt and data["config"]["connection_lifetime"]=="while_driving",on_account=budget)
         if not mqtt:
-            bounded=BoundedSchedule(data,generation,gate,result)
             for timestamp,vehicle,message,synthetic in bounded:consume(timestamp,vehicle,message,synthetic)
         else:
-            pending=[]
             driving={}
-            if mqtt and data["config"]["connection_lifetime"]=="while_driving":
-                boundaries={}
-                for vehicle,trips in data["trips_by_vehicle"].items():
-                    client=data["client_by_vehicle"][vehicle]
-                    for trip in trips:
-                        for timestamp,priority in [(trip["observed_start_ms"],0),(trip["observed_end_ms"],2)]:
-                            key=(timestamp,priority,client)
-                            boundaries[key]=boundaries.get(key,0)+1
-                for (timestamp,priority,client),count in boundaries.items():
-                    heapq.heappush(pending,(timestamp,priority,client,count,False))
-            streams={}
-            sequences={}
-            # 차량별 순서를 유지하고 차량 사이는 시각순 heap으로 처리한다.
-            for assignment in data["assignments"]:
-                if not gate():
-                    break
-                vehicle=assignment["vehicle_id"]
-                stream=messages(vehicle)
-                streams[vehicle]=stream
-                message=next(stream,None)
-                if message is not None:
-                    heapq.heappush(pending,(message[0]["ts"],1,vehicle,message[0],message[1]))
-            while pending and not job.stop_requested:
-                timestamp,priority,vehicle,message,synthetic=heapq.heappop(pending)
-                due=timestamp-data["measurement_start_ms"]
-                if not gate(due):
-                    break
-                if priority==3:
-                    next_message=next(streams[vehicle],None)
-                    if next_message is not None:
-                        heapq.heappush(pending,(next_message[0]["ts"],1,vehicle,next_message[0],next_message[1]))
-                    continue
+            for event in bounded:
+                timestamp,priority,vehicle,message,synthetic=event if bounded.include_boundaries else (event[0],1,*event[1:])
                 if priority!=1:
-                    client=vehicle
+                    client=data["client_by_vehicle"][vehicle]
                     before=driving.get(client,0)
-                    driving[client]=before+(message if priority==0 else -message)
+                    driving[client]=before+(1 if priority==0 else -1)
                     if priority==0 and before==0:
                         publisher.enqueue("connect",gate,client_id=client)
                     elif priority==2 and driving[client]==0:
@@ -188,7 +161,6 @@ def execute(manager, job, data, worker, timeout):
                     sync_mqtt();report()
                     continue
                 consume(timestamp,vehicle,message,synthetic)
-                heapq.heappush(pending,(timestamp,3,vehicle,None,False))
         # 마지막 운행 뒤에도 측정 종료까지 주차 시간을 진행한다.
         if not job.stop_requested:
             gate(data["duration_ms"])
