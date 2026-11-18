@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import hashlib
+from collections import OrderedDict
 from pathlib import Path
 
 
@@ -19,6 +20,7 @@ class GenerationSession:
         self.worker_hash=hashlib.sha256(self.worker_path.read_bytes()).hexdigest()
         self.job=job
         self.sequence=0
+        self.prepared_trips=OrderedDict()
         self.stats={"process_starts":1,"page_requests":0,"peak_cache_estimated_bytes":0,"peak_heap_alloc_bytes":0,
                     "page_roundtrip_ms":0.0,"request_write_ms":0.0,"response_wait_ms":0.0,"response_decode_ms":0.0,"worker_identity_ms":0.0}
         self.cleaned=False
@@ -39,6 +41,26 @@ class GenerationSession:
     def _signature(self):
         s=self.worker_path.stat()
         return s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns
+
+    def prepare_trip(self, body, vehicle, trip, start_ms, end_ms, build):
+        # 실행이 보유한 요청만 전달받는다. 참조를 함께 보관해 객체 ID 재사용을 막는다.
+        key=(id(body),vehicle,trip,start_ms,end_ms)
+        cached=self.prepared_trips.get(key)
+        if cached is not None:
+            self.prepared_trips.move_to_end(key)
+            self.record_metric("prepared_trip_hits",1)
+            return cached[1]
+        prepared=build()
+        self.record_metric("prepared_trip_misses",1)
+        # 긴 과거 운행 목록은 페이지 사이에 별도로 복제해 보관하지 않는다.
+        if len(prepared[0])<=16 and len(prepared[3].get("trips") or ())<=16:
+            self.prepared_trips[key]=(body,prepared)
+            if len(self.prepared_trips)>1024:
+                self.prepared_trips.popitem(last=False)
+        return prepared
+
+    def record_metric(self, name, value):
+        self.stats[name]=self.stats.get(name,0)+value
 
     def worker_digest(self,worker):
         before=time.perf_counter()
@@ -135,6 +157,7 @@ class GenerationSession:
                     self.forced=True;self.process.kill();self.process.wait(timeout=2)
             self.cleaned=self.process.poll() is not None
         finally:
+            self.prepared_trips.clear()
             try:self.process.stdin.close()
             except OSError:pass
             self.reader.join(timeout=2)

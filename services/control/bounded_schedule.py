@@ -12,6 +12,8 @@ class PageSession:
     def __init__(self,session,byte_limit):self.session,self.byte_limit=session,byte_limit
     def page(self,payload,timeout=15):return self.session.page(payload,timeout,byte_limit=self.byte_limit)
     def worker_digest(self,worker):return self.session.worker_digest(worker)
+    def prepare_trip(self,*args):return self.session.prepare_trip(*args)
+    def record_metric(self,name,value):self.session.record_metric(name,value)
 
 
 def interval_boundaries(rows):

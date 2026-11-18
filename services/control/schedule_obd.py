@@ -28,7 +28,7 @@ def key_for(vehicle, a, b, profile):
     return hashlib.sha256(f"schedule-plan-1|{vehicle}|{a}|{b}|{profile}".encode()).hexdigest()
 
 
-def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None, checkpoint_store=None, cache_context=None, session=None):
+def prepare_trip(body, vehicle_id, trip_key, start_ms, end_ms):
     req = body.schedule
     plan(req)  # 기존 일정·주차·건수 검증을 그대로 적용한다.
     vehicle = next((v for v in req.vehicles if v.vehicle_id == vehicle_id), None)
@@ -50,14 +50,29 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         raise ValueError("선택 운행과 관측/조회 구간이 겹치지 않습니다.")
     if body.force_end_trip and high<b and high!=instant(req.measurement.end):
         raise ValueError("시험용 강제 Trip은 측정 끝에 아직 진행 중인 운행에만 요청할 수 있습니다.")
+    return chain, low, high, vehicle.model_dump()
+
+
+def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset, limit, anomaly=None, checkpoint_store=None, cache_context=None, session=None):
+    before=time.perf_counter()
+    record=getattr(session,"record_metric",None)
+    build=lambda:prepare_trip(body,vehicle_id,trip_key,start_ms,end_ms)
+    if cache_context is None and hasattr(session,"prepare_trip"):
+        chain,low,high,vehicle_data=session.prepare_trip(body,vehicle_id,trip_key,start_ms,end_ms,build)
+    else:
+        chain,low,high,vehicle_data=build()
+    if record:record("schedule_context_ms",(time.perf_counter()-before)*1000)
+    req=body.schedule
+    index=len(chain)-1
     state={"lat":body.initial_lat,"lon":body.initial_lon,"odometer_m":body.initial_odometer_m}
     coolant,heading=body.initial_coolant_c,0.0
     vehicle_seed=int(hashlib.sha256(f"{req.seed}|{vehicle_id}".encode()).hexdigest()[:7],16)
     digest=session.worker_digest if session is not None and hasattr(session,"worker_digest") else lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
     worker_id = digest(worker)
+    before=time.perf_counter()
     scope = hashlib.sha256(json.dumps({"source":SOURCE_ID,"worker":worker_id,
         "seed":req.seed,"interval_ms":req.interval_ms,"measurement":req.measurement.model_dump(),
-        "vehicle":({"vehicle_id":vehicle_id} if cache_context is not None else vehicle.model_dump()),"initial":dict(state,coolant_c=coolant),
+        "vehicle":({"vehicle_id":vehicle_id} if cache_context is not None else vehicle_data),"initial":dict(state,coolant_c=coolant),
         "anomaly":anomaly,"context":cache_context},sort_keys=True,separators=(",", ":")).encode()).hexdigest()
     resume_start, epoch = 0, None
     saved = None
@@ -75,6 +90,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         state = {key:cached[key] for key in ("lat","lon","odometer_m")}
         coolant, heading, previous_end = cached["coolant_c"], cached["heading_rad"], arrival
         resume_start = seq+1
+    if record:record("checkpoint_restore_ms",(time.perf_counter()-before)*1000)
     computed, computed_ms = 0, 0
     for i in range(resume_start, len(chain)):
         departure,arrival,road = chain[i]
@@ -84,6 +100,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
                                    "computed_trips":computed,"reused_preceding_trips":resume_start}}
         if digest(worker) != worker_id:
             raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
+        before=time.perf_counter()
         if previous_end is not None:
             # 외기20℃·냉각 시정수2시간의 개발 근사. 실차/외기 조회값이 아니다.
             coolant=20+(coolant-20)*math.exp(-(departure-previous_end)/7200000)
@@ -95,6 +112,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
             payload.update(anomaly)
         remaining=deadline-time.monotonic()
         if remaining<=0: raise ValueError("상태 복원 제한시간을 초과했습니다.")
+        if record:record("request_payload_ms",(time.perf_counter()-before)*1000)
         if session is not None:
             output=session.page(payload,min(15,remaining))
         else:
@@ -110,7 +128,9 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         computed_ms += arrival-departure
         if digest(worker) != worker_id:
             raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
+        before=time.perf_counter()
         if checkpoint_store is not None:
             checkpoint_store.put(scope,i,arrival,dict(state,coolant_c=coolant,heading_rad=heading),epoch)
         if selected: selected_initial=initial
+        if record:record("checkpoint_update_ms",(time.perf_counter()-before)*1000)
     return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output.get("events_until_query_end",0),"initial_state":selected_initial,"messages":output["messages"],"trace":output.get("trace",[]),"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}

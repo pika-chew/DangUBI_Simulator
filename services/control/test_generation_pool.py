@@ -80,8 +80,9 @@ def test_real_workers_match_every_legacy_message_and_clean_up():
         checkpoints=ExecutionCheckpoints();job=SimpleNamespace(stop_requested=False,pause_requested=False,processes=[])
         manager=SimpleNamespace(lock=threading.RLock())
         pool=GenerationPool(worker,job,manager,workers)
+        body=ScheduledOBDRequest(schedule=req,checkpoint_epoch=0)
         def page(vehicle,key,offset,session,limit):
-            return generate(ScheduledOBDRequest(schedule=req,checkpoint_epoch=0),vehicle,key,worker,None,None,offset,limit,checkpoint_store=checkpoints,session=session)
+            return generate(body,vehicle,key,worker,None,None,offset,limit,checkpoint_store=checkpoints,session=session)
         data=dict(assignments=[{"vehicle_id":v.vehicle_id} for v in req.vehicles],trip_provider=provider,generate=page,config={"interval_ms":2000},measurement_start_ms=1794888000000,realtime=False,generation_queue_messages=256,generation_queue_bytes=4194304)
         try:
             queue=BoundedSchedule(data,pool,lambda due=None:True,{})
@@ -89,6 +90,8 @@ def test_real_workers_match_every_legacy_message_and_clean_up():
             assert observed==expected
             assert len(observed)==976
             assert checkpoints.stats()["entries"]<=256
+            assert pool.stats["prepared_trip_misses"]==16
+            assert pool.stats["prepared_trip_hits"]>0
         finally:pool.close(abort=False)
         assert pool.cleaned and pool.close_acknowledged and all(p.poll() is not None for p in job.processes)
         if workers>1:assert pool.peak_active_workers>1

@@ -561,10 +561,11 @@ def workspace_execute(body: ScheduleExecutionRequest):
     request={"config":config,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
     from services.control.execution_checkpoints import ExecutionCheckpoints
     execution_checkpoints=ExecutionCheckpoints();checkpoint_epoch=0
+    scheduled_body=ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch) if source.schedule else None
     def generate(vehicle,key,offset,session=None,limit=100):
         if source.fleet:
             return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
-        return generate_scheduled_obd(ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
+        return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if profile:data["mqtt"]=profile
     request["generation"]={"workers":body.generation_workers,"queue_messages":body.generation_queue_messages,"queue_bytes":body.generation_queue_bytes}

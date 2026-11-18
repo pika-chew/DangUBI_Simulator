@@ -1,0 +1,21 @@
+{
+  "repeats": 1,
+  "cases": [
+    {
+      "name": "pool-90s",
+      "vehicles": 160,
+      "clients": 10,
+      "workers": 2,
+      "local_scale": true,
+      "driving_seconds": 90
+    },
+    {
+      "name": "dedicated-90s",
+      "vehicles": 160,
+      "clients": 160,
+      "workers": 2,
+      "local_scale": true,
+      "driving_seconds": 90
+    }
+  ]
+}

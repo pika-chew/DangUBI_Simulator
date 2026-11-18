@@ -56,6 +56,14 @@ class ScheduleMeasurementTest(unittest.TestCase):
         with self.assertRaises(ValidationError):MQTTProfile(broker_url="ssl://127.0.0.1:1",ca_file="a",cert_file="b",key_file="c",max_clients=1000)
         self.assertEqual(ScheduleRequest.model_fields["vehicles"].metadata[1].max_length,100)
 
+    def test_sustained_local_case_respects_existing_message_and_time_limits(self):
+        case=dict(name="sustained",vehicles=160,clients=160,workers=2,local_scale=True,driving_seconds=90)
+        measurement.validate_config(dict(cases=[case]))
+        for changes in (dict(vehicles=218),dict(driving_seconds=91),dict(driving_seconds=True),
+                        dict(vehicles=10,clients=10,local_scale=False)):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                measurement.validate_config(dict(cases=[dict(case,**changes)]))
+
     def test_fingerprint_is_numeric_and_key_order_independent(self):
         m=dict(ty=4,ts=1,pld=dict(sp=1.5,flags=[True,None,"한"]))
         self.assertEqual(hashlib.sha256(measurement.canonical(m)).hexdigest(),"bd88e197fcbbc651353e7db126e41c922dd7544b86a08c0082f45eda8aae25ce")

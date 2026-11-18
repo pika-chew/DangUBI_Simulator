@@ -33,25 +33,27 @@ type streamCommand struct {
 }
 
 type streamStats struct {
-	Connected           int                 `json:"connected_clients"`
-	Active              int                 `json:"active_clients"`
-	Peak                int                 `json:"peak_active_clients"`
-	Attempts            int                 `json:"publish_attempts"`
-	Published           int                 `json:"mqtt_published"`
-	Puback              int                 `json:"puback_count"`
-	Unconfirmed         int                 `json:"unconfirmed_messages"`
-	Reconnects          int                 `json:"reconnect_count"`
-	Connections         int                 `json:"connection_count"`
-	Disconnections      int                 `json:"disconnect_count"`
-	ScheduleDelay       int64               `json:"schedule_delay_ms"`
-	InitialConnectMS    *int64              `json:"initial_connect_ms,omitempty"`
-	PostConnectSchedule DurationSummary     `json:"post_connect_schedule"`
-	Performance         *PerformanceSummary `json:"performance"`
+	Connected           int                     `json:"connected_clients"`
+	Active              int                     `json:"active_clients"`
+	Peak                int                     `json:"peak_active_clients"`
+	Attempts            int                     `json:"publish_attempts"`
+	Published           int                     `json:"mqtt_published"`
+	Puback              int                     `json:"puback_count"`
+	Unconfirmed         int                     `json:"unconfirmed_messages"`
+	Reconnects          int                     `json:"reconnect_count"`
+	Connections         int                     `json:"connection_count"`
+	Disconnections      int                     `json:"disconnect_count"`
+	ScheduleDelay       int64                   `json:"schedule_delay_ms"`
+	InitialConnectMS    *int64                  `json:"initial_connect_ms,omitempty"`
+	PostConnectSchedule DurationSummary         `json:"post_connect_schedule"`
+	PublishWindows      map[int]DurationSummary `json:"publish_windows,omitempty"`
+	Performance         *PerformanceSummary     `json:"performance"`
 }
 
 type mqttSession struct {
 	connectedAt                time.Time
 	postConnect                durationMetric
+	publishWindows             [12]durationMetric
 	mu, connectMu, publishMu   sync.Mutex
 	parked                     map[string]bool
 	profile                    *MQTTProfile
@@ -111,6 +113,14 @@ func (s *mqttSession) snapshot() streamStats {
 	s.stats.Peak = max(s.stats.Peak, s.stats.Active)
 	s.stats.Performance = s.metrics.summary(s.stats.Puback, time.Since(s.started))
 	s.stats.PostConnectSchedule = s.postConnect.summary()
+	if s.profile.LocalBenchmark {
+		s.stats.PublishWindows = make(map[int]DurationSummary)
+		for i := range s.publishWindows {
+			if s.publishWindows[i].count > 0 {
+				s.stats.PublishWindows[i*10] = s.publishWindows[i].summary()
+			}
+		}
+	}
 	return s.stats
 }
 
@@ -220,6 +230,10 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		s.stats.Attempts++
 		if c.DueAtMS > 0 {
 			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
+			if s.profile.LocalBenchmark {
+				window := min(len(s.publishWindows)-1, int(time.Since(s.started)/(10*time.Second)))
+				s.publishWindows[window].add(time.Duration(delay) * time.Millisecond)
+			}
 			s.stats.ScheduleDelay = max(s.stats.ScheduleDelay, delay)
 			s.metrics.schedule.add(time.Duration(delay) * time.Millisecond)
 			if !s.connectedAt.IsZero() && c.DueAtMS >= s.connectedAt.UnixMilli() {

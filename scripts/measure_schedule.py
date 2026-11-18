@@ -30,7 +30,7 @@ def validate_config(config):
     if type(repeats) is not int or not 1<=repeats<=3 or not isinstance(cases,list) or not 1<=len(cases)<=24:raise ValueError("조건1~24개·반복1~3회입니다.")
     names=set();seconds=0
     for c in cases:
-        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
+        if not isinstance(c,dict) or set(c)-{"name","vehicles","clients","workers","lifetime","history_minutes","fault","local_scale","driving_seconds"}:raise ValueError("알 수 없는 조건·주소 입력은 허용하지 않습니다.")
         if type(c.get("local_scale",False)) is not bool:raise ValueError("로컬 확장 플래그는 boolean입니다.")
         cap=1000 if c.get("local_scale") else 20
         name=c.get("name")
@@ -41,7 +41,11 @@ def validate_config(config):
             if type(value) is not int or not lo<=value<=hi:raise ValueError(f"차량/Client1~{cap}·Worker1/2/4·과거 운행0~120분입니다.")
         if c["workers"] not in (1,2,4) or c["clients"]>c["vehicles"]:raise ValueError("Worker 수 또는 고정 Client 수를 확인하세요.")
         if c.get("lifetime","always") not in ("always","while_driving") or c.get("fault","none") not in ("none","delay_ack"):raise ValueError("유지 방식·지연 조건을 확인하세요.")
-        seconds+=60 if c.get("local_scale") else 10
+        driving=c.get("driving_seconds",12 if c.get("local_scale") else 4)
+        if "driving_seconds" in c and (not c.get("local_scale") or type(driving) is not int or not 12<=driving<=90
+                                       or c["vehicles"]*((driving+1)//2+1)>10000):
+            raise ValueError("확장 계측의 운행은 12~90초, 전체 메시지는 10,000건 이하여야 합니다.")
+        seconds+=max(60,driving+2) if c.get("local_scale") else 10
     if seconds*repeats>900:raise ValueError("예상15분 이내의 측정 계획만 허용합니다.")
     return cases,repeats
 
@@ -75,6 +79,8 @@ class Resources:
         self.own=SimpleNamespace(pid=os.getpid(),_handle=handle,poll=lambda:None)
         self.processes=processes;self.items={};self.stop_event=threading.Event()
         self.peak=0;self.samples=0;self.cpu_baseline=0
+        self.started=time.monotonic()
+        self.rss_windows={}
         self._sample();self.cpu_baseline=self.items[self.own.pid][1].cpu
         self.thread=threading.Thread(target=self._run,daemon=True)
         self.thread.start()
@@ -87,6 +93,11 @@ class Resources:
             r.sample()
             if p.poll() is None:current+=r.current_rss
         self.peak=max(self.peak,current);self.samples+=1
+        window=int((time.monotonic()-self.started)//10)*10
+        bucket=self.rss_windows.setdefault(window,dict(min_bytes=current,peak_bytes=0,samples=0))
+        bucket["min_bytes"]=min(bucket["min_bytes"],current)
+        bucket["peak_bytes"]=max(bucket["peak_bytes"],current)
+        bucket["samples"]+=1
 
     def _run(self):
         while not self.stop_event.wait(.1):self._sample()
@@ -101,7 +112,7 @@ class Resources:
         available=all(v["all_cpu_available"] for v in roles.values())
         total=sum(v["cpu_seconds"] for v in roles.values()) if available else None
         return dict(roles=roles,cpu_seconds=total,cpu_one_core_percent=100*total/elapsed if available else None,
-                    observed_peak_process_rss_sum_bytes=self.peak,samples=self.samples,sample_interval_ms=100,
+                    observed_peak_process_rss_sum_bytes=self.peak,samples=self.samples,sample_interval_ms=100,rss_windows=self.rss_windows,
                     all_children_exited=all(p.poll() is not None for _,_,p in self.items.values() if p is not self.own))
 
 
@@ -158,7 +169,7 @@ def child(case,profile_path,worker,temporary):
         original_validate(message);digest=(digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256);accepted+=1
     control.validate_message=validate
     base=datetime(2026,11,18,13,tzinfo=timezone(timedelta(hours=9)))
-    driving=12 if case.get("local_scale") else 4
+    driving=case.get("driving_seconds",12 if case.get("local_scale") else 4)
     source=dict(schedule_version="schedule-plan-1",mode="manual",seed=42,interval_ms=2000 if case.get("local_scale") else 1000,
                 measurement=dict(start=base.isoformat(),end=(base+timedelta(seconds=driving+2)).isoformat(),timezone="Asia/Seoul"),
                 vehicles=[dict(vehicle_id=f"v{i:06d}",trips=[dict(start=(base-timedelta(minutes=case.get("history_minutes",0))).isoformat(),
@@ -194,7 +205,7 @@ def child(case,profile_path,worker,temporary):
             keys=("job_state","planned_messages","processed_messages","publish_attempts","mqtt_published","puback_count","unconfirmed_messages",
                   "connected_clients","active_clients","connection_count","disconnect_count","schedule_delay_ms","elapsed_ms","performance",
                   "generation_session","buffer_budget","transmission","execution_cleanup_confirmed","forced_termination")
-            keys+= ("initial_connect_ms","post_connect_schedule","execution_timing",)
+            keys+= ("initial_connect_ms","post_connect_schedule","execution_timing","publish_windows")
             row=dict(case=case,result={k:result.get(k) for k in keys},resources=resources,wall_seconds=elapsed,
                      plan_preparation_seconds=preparation,accepted_messages=accepted,fingerprint=f"{digest:064x}")
             if profile_thread:
@@ -255,7 +266,8 @@ def compare(report):
     for row in report["results"]:
         if "error" in row:continue
         c=row["case"];groups.setdefault(c["name"],[]).append(row)
-        key=f"vehicles={c['vehicles']},history_minutes={c.get('history_minutes',0)},local_scale={c.get('local_scale',False)}"
+        key=(c["vehicles"],c.get("history_minutes",0),c.get("local_scale",False),c.get("driving_seconds",12 if c.get("local_scale") else 4))
+        key=f"vehicles={key[0]},history_minutes={key[1]},local_scale={key[2]},driving_seconds={key[3]}"
         fingerprints.setdefault(key,set()).add((row["accepted_messages"],row["fingerprint"]))
     comparison=[]
     for name,rows in groups.items():
@@ -304,7 +316,7 @@ def main():
             except Exception as error:row=dict(case=case,error=str(error) if isinstance(error,RuntimeError) else "측정 실행 또는 정리에 실패했습니다.",error_kind=type(error).__name__)
             row["repeat"]=repeat+1;report["results"].append(row)
             (directory/"summary.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
-    lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 동시 관측 RSS 합계입니다. 일반6초/확장14초의 예정 구간이며 실제 지연으로 실행이 길어질 수 있습니다. 최대 처리량·장기 안정성을 판정하지 않습니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
+    lines=["# 일정 생성·송신 통합 측정","","CPU100%=코어1개. 메모리는 동시 관측 RSS 합계입니다. 관측 기간은 운행 시간에 2초를 더한 값입니다.","","|조건|Worker|Client|무결성/정리|CPU초|관측 RSS합계 MiB|최대 지연 ms|ACK 평균 ms|","|---|---:|---:|---|---:|---:|---:|---:|"]
     for row in report["results"]:
         c=row["case"]
         if "error" in row:lines.append(f"|{c['name']}|{c['workers']}|{c['clients']}|측정 오류|—|—|—|—|");continue

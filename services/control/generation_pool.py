@@ -44,7 +44,8 @@ class GenerationPool:
     def stats(self):
         rows=[s.stats.copy() for s in self.sessions]
         keys=["process_starts","page_requests","plan_builds","cache_hits","cache_evictions","cache_entries","cache_estimated_bytes","cache_max_entries","cache_max_estimated_bytes","peak_cache_estimated_bytes","peak_heap_alloc_bytes",
-              "page_roundtrip_ms","request_write_ms","response_wait_ms","response_decode_ms","worker_identity_ms","worker_compute_ms","worker_serialize_ms","worker_stats_ms"]
+              "page_roundtrip_ms","request_write_ms","response_wait_ms","response_decode_ms","worker_identity_ms","worker_compute_ms","worker_serialize_ms","worker_stats_ms",
+              "prepared_trip_hits","prepared_trip_misses","schedule_context_ms","checkpoint_restore_ms","request_payload_ms","checkpoint_update_ms"]
         timing=dict(generation_task_ms=sum(self.work_ms))
         timing["request_preparation_ms"]=max(0,timing["generation_task_ms"]-sum(r.get("page_roundtrip_ms",0) for r in rows))
         return {**{key:sum(r.get(key,0) for r in rows) for key in keys},**timing,"worker_count":len(rows),"peak_active_workers":self.peak_active_workers,"close_acknowledged":self.close_acknowledged}

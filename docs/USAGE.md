@@ -593,4 +593,10 @@ Go가 기록하는 `worker_compute_ms`는 공통 생성 함수, `worker_serializ
 
 `execution_timing`은 실행 준비(`preparation_ms`), 생성·송신 명령 처리(`replay_ms`), 남은 측정 기간 대기(`measurement_wait_ms`), 송신 응답 마무리(`drain_ms`), 프로세스·연결 정리(`cleanup_ms`)로 나눕니다. 준비에는 Worker 시작과 최초 연결 명령 등록이 들어가지만 모든 Client 접속 완료를 뜻하지는 않습니다. 전체 최초 접속은 기존 `initial_connect_ms`로 확인합니다. 실패·중단 때 완료하지 못한 구간의 시간은 없을 수 있습니다.
 
-계측 예시의14초는12초 운행과 이후2초를 포함한 측정 기간입니다. 확정된 처리 시간 목표가 아닙니다. 실시간 전송의 평가는 메시지별 예정 시각 대비 발행 지연과 별도로 구분한 준비·마무리 시간을 함께 봅니다. 현재 허용 지연이나 운영 SLA는 확정하지 않았습니다.
+기본 확장 계측의 14초는 12초 운행과 이후 2초를 포함한 관측 기간입니다. 실시간 전송을 평가할 때는 메시지별 예정 시각 대비 발행 지연과 실행 준비·마무리 시간을 함께 확인하세요.
+
+수동 일정 실행은 Worker마다 검증한 운행 문맥을 최대 1,024개 보관하며, 운행 목록이 16건을 넘는 항목은 저장하지 않습니다. OBD 메시지와 복원 상태는 이 캐시에 들어가지 않습니다. `generation_session`의 `prepared_trip_hits`와 `prepared_trip_misses`는 일정 문맥 재사용 횟수와 준비 횟수입니다. `schedule_context_ms`, `checkpoint_restore_ms`, `request_payload_ms`, `checkpoint_update_ms`는 각각 일정 문맥 확인, 중간 상태 조회 및 복원, 요청 구성, 중간 상태 갱신의 Worker별 누적 경과 시간입니다.
+
+지속 전송 예시는 `.venv/Scripts/python.exe scripts/measure_schedule.py --config configs/schedule-sustained.example.json`으로 실행합니다. 로컬 확장 설정에서 `driving_seconds`를 12~90초로 정하며 차량 전체 메시지는 10,000건 이하입니다. 예시는 160대가 90초 동안 2초마다 Microtrip을 보내고 종료 Trip을 한 건씩 보내는 설정입니다. 연결 방식별로 7,360건을 확인합니다.
+
+`publish_windows`는 송신 Worker 시작을 기준으로 10초마다 발행 건수·평균·최대·P95 상한을 집계합니다. `rss_windows`는 자원 수집 시작을 기준으로 10초마다 제어기와 Worker의 동시 RSS 합계 최솟값·최댓값을 기록합니다. 두 지표의 시간 원점은 다릅니다. 마지막 메모리 구간은 종료 정리도 포함할 수 있습니다.
