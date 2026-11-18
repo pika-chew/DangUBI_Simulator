@@ -3,12 +3,19 @@ from datetime import datetime, timedelta
 
 
 def varied_day(req, day, fixed, daily, kind, kst):
-    scale=fixed["daily_target_minutes"]/60
+    bounded=req.fleet_version=="fleet-plan-3"
+    scale=1 if bounded else fixed["daily_target_minutes"]/60
+    lower,upper=(req.trip_min_minutes,req.trip_max_minutes) if bounded else (2,120)
     day_factor=daily.uniform(1-req.daily_variation_percent/100,1+req.daily_variation_percent/100)
     start=max(240,min(720,fixed["first_departure_minute"]+daily.randint(-req.departure_jitter_minutes,req.departure_jitter_minutes)+(60 if day.isoweekday()>=6 else 0)))
 
     def duration(purpose):
-        if purpose=="commute":
+        if bounded and purpose!="commute":
+            # 범위 내부의 상대 위치를 목적별로 선택한다. 최댓값을 채우지 않는다.
+            a,b,mode={"local":(0,.2,.03),"regular":(.1,.65,.28),"long":(.45,1,.75)}[purpose]
+            fraction=daily.triangular(a,b,mode)
+            value=(lower+(upper-lower)*fraction)*fixed["duration_preference"]*day_factor
+        elif purpose=="commute":
             value=fixed["commute_minutes"]*day_factor*daily.uniform(.9,1.1)
         elif purpose=="local":
             value=daily.uniform(3,12)*scale**.5*day_factor
@@ -16,7 +23,7 @@ def varied_day(req, day, fixed, daily, kind, kst):
             value=daily.uniform(12,35)*scale*day_factor
         else:
             value=daily.uniform(35,95)*scale*day_factor
-        return max(2,min(120,round(value)))
+        return max(lower,min(upper,round(value)))
 
     if kind=="commute":
         outward,homeward=duration("commute"),duration("commute")
@@ -34,7 +41,17 @@ def varied_day(req, day, fixed, daily, kind, kst):
     else:
         count=daily.choices([1,2,3,4,5],weights=[15,35,30,15,5] if kind=="flexible" else [0,30,40,25,5])[0]
         purposes=daily.choices(["local","regular","long"],weights=[55,35,10],k=count)
-        lengths=[duration(p) for p in purposes]
+        if bounded:
+            count=min(count,(1440-start+30)//(lower+30))
+            purposes=purposes[:count]
+            lengths=[]
+            available=1440-start-30*(count-1)
+            for i,purpose in enumerate(purposes):
+                length=min(duration(purpose),available-lower*(count-i-1))
+                lengths.append(length)
+                available-=length
+        else:
+            lengths=[duration(p) for p in purposes]
         extra=1440-start-sum(lengths)-30*(count-1)
         slots=[]
         for i,(length,purpose) in enumerate(zip(lengths,purposes)):

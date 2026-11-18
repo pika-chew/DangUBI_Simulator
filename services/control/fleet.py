@@ -37,12 +37,14 @@ class RoadMix(Strict):
 
 
 class FleetRequest(Strict):
-    fleet_version: Literal["fleet-plan-1", "fleet-plan-2"] = "fleet-plan-1"
+    fleet_version: Literal["fleet-plan-1", "fleet-plan-2", "fleet-plan-3"] = "fleet-plan-1"
     vehicle_count: int = Field(default=20, ge=1, le=100)
     measurement: Measurement
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)
     interval_ms: int = Field(default=2000, ge=100, le=86400000)
-    daily_driving_minutes: int = Field(default=120, ge=10, le=480)
+    daily_driving_minutes: int | None = Field(default=None, ge=10, le=480)
+    trip_min_minutes: int | None = Field(default=None, ge=2, le=240)
+    trip_max_minutes: int | None = Field(default=None, ge=2, le=240)
     vehicle_variation_percent: int = Field(default=20, ge=0, le=50)
     daily_variation_percent: int = Field(default=25, ge=0, le=50)
     departure_jitter_minutes: int = Field(default=30, ge=0, le=120)
@@ -56,6 +58,15 @@ class FleetRequest(Strict):
 
     @model_validator(mode="after")
     def feasible(self):
+        if self.fleet_version == "fleet-plan-3":
+            if self.daily_driving_minutes is not None:
+                raise ValueError("새 시간 범위 배정에는 하루 목표 시간을 사용하지 않습니다. 최소·최대 운행 시간을 지정하세요.")
+            self.trip_min_minutes = 3 if self.trip_min_minutes is None else self.trip_min_minutes
+            self.trip_max_minutes = 90 if self.trip_max_minutes is None else self.trip_max_minutes
+            if self.trip_min_minutes > self.trip_max_minutes:
+                raise ValueError("최소 운행 시간은 최대 운행 시간 이하여야 합니다.")
+            return self
+        self.daily_driving_minutes = 120 if self.daily_driving_minutes is None else self.daily_driving_minutes
         maximum = self.daily_driving_minutes * (1 + self.vehicle_variation_percent / 100) * (1 + self.daily_variation_percent / 100)
         if maximum > 600:
             raise ValueError("운행 시간 목표와 두 편차의 최대 조합은 하루 600분 이하여야 합니다. 목표나 편차를 줄이세요.")
@@ -97,7 +108,7 @@ def allocation(req):
         result[vehicle] = {
             "pattern": kind,
             "anomaly_eligible": vehicle in eligible,
-            "daily_target_minutes": req.daily_driving_minutes * fixed.uniform(1-variation, 1+variation),
+            "daily_target_minutes": (req.daily_driving_minutes or 0) * fixed.uniform(1-variation, 1+variation),
             "first_departure_minute": first,
             "evening_departure_minute": fixed.randint(1020, 1140),
             "road_profile": fixed.choices(list(req.road_mix.model_dump()), weights=list(req.road_mix.model_dump().values()))[0],
@@ -105,6 +116,13 @@ def allocation(req):
         if req.fleet_version=="fleet-plan-2":
             personal=rng(req,"commute-length",vehicle)
             result[vehicle]["commute_minutes"]=max(5,min(105,result[vehicle]["daily_target_minutes"]/2*personal.lognormvariate(-.18,.55)))
+        if req.fleet_version=="fleet-plan-3":
+            del result[vehicle]["daily_target_minutes"]
+            personal=rng(req,"commute-length",vehicle)
+            low, high=req.trip_min_minutes,req.trip_max_minutes
+            # 운행 1회의 길이를 범위 안에서 선택한다. 하루 합계 목표는 만들지 않는다.
+            result[vehicle]["commute_minutes"]=personal.triangular(low,high,low+(high-low)*.3)
+            result[vehicle]["duration_preference"]=personal.uniform(1-variation,1+variation)
     return result
 
 
@@ -121,7 +139,7 @@ def iter_vehicle_days(req, vehicle, fixed):
         if weekend and rng(req, vehicle, day.isoformat(), "weekend").random() >= req.weekend_activity_probability:
             continue
         kind = "flexible" if weekend else fixed["pattern"]
-        if req.fleet_version=="fleet-plan-2":
+        if req.fleet_version in ("fleet-plan-2", "fleet-plan-3"):
             yield from varied_day(req,day,fixed,daily,kind,KST)
             continue
         count = 2 if kind == "commute" else daily.randint(2, 3) if kind == "daytime" else daily.randint(1, 3)

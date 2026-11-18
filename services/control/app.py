@@ -597,5 +597,13 @@ def workspace_delete_records(body: DeleteWorkspaceRecords):
     return {"deleted_keys":keys,"deleted_count":len(keys)}
 
 
+@app.middleware("http")
+async def current_web_page(request: Request, call_next):
+    response = await call_next(request)
+    if "text/html" in response.headers.get("content-type", ""):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 if (ROOT / "apps/web/dist").is_dir():
     app.mount("/", StaticFiles(directory=ROOT / "apps/web/dist", html=True), name="web")

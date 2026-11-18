@@ -1096,3 +1096,28 @@ def test_workspace_schedule_interleaves_vehicles_and_forced_boundary(client):
         assert len({s['vehicle_id'] for s in result['samples']})==2
         stamps=[s['message']['ts'] for s in result['samples']]
         assert stamps==sorted(stamps)
+
+
+def test_bounded_fleet_record_and_obd_without_daily_target(client):
+    import json
+    body=json.loads((Path(__file__).resolve().parents[2]/"configs/fleet-bounded.example.json").read_text(encoding="utf-8"))
+    body.update(vehicle_count=2,trip_min_minutes=4,trip_max_minutes=9,day_off_probability=0,weekend_activity_probability=1)
+    created=client.post("/api/workspace/plans",json={"title":"범위 운행", "fleet":body})
+    assert created.status_code==201,created.text
+    record=created.json()
+    assert record["request"]["fleet"].get("daily_driving_minutes") is None
+    preview=client.post("/api/fleets/preview",json=body).json()
+    trip=preview["trips"][0]
+    assert 240000<=trip["end_ms"]-trip["start_ms"]<=540000
+    result=client.post(f"/api/fleets/obd/{trip['vehicle_id']}/{trip['trip_key']}",json={"fleet":body})
+    assert result.status_code==200,result.text
+    message=result.json()["trip"]
+    assert message["pld"]["edt"]-message["pld"]["stt"]==trip["end_ms"]-trip["start_ms"]
+    control.validate_message(message)
+    assert client.get("/api/workspace/records/"+record["key"]).json()["request"]==record["request"]
+
+
+def test_web_html_does_not_reuse_old_interface(client):
+    page=client.get("/")
+    assert page.status_code==200
+    assert page.headers["cache-control"]=="no-store"

@@ -59,3 +59,48 @@ def test_legacy_fleet_version_still_divides_daily_budget():
         for trip in vehicle.trips:
             totals[trip.start[:10]]+=(instant(trip.end)-instant(trip.start))/60000
         assert set(totals.values())=={120}
+
+
+def bounded_request(**changes):
+    body=json.loads((Path(__file__).resolve().parents[2]/"configs/fleet-bounded.example.json").read_text(encoding="utf-8"))
+    body.update(vehicle_count=24,day_off_probability=0.0,weekend_activity_probability=1.0,
+                measurement={"start":"2026-11-16T00:00:00+09:00","end":"2026-11-23T00:00:00+09:00","timezone":"Asia/Seoul"})
+    body.update(changes)
+    return FleetRequest(**body)
+
+
+def test_bounded_journeys_obey_trip_limits_parking_and_replay_at_extremes():
+    for low,high in [(3,90),(2,2),(12,17),(180,240),(240,240)]:
+        req=bounded_request(trip_min_minutes=low,trip_max_minutes=high,vehicle_variation_percent=50,daily_variation_percent=50,departure_jitter_minutes=120)
+        schedule,assigned=expand(req)
+        assert req.daily_driving_minutes is None
+        assert all("daily_target_minutes" not in v for v in assigned.values())
+        assert schedule==expand(req)[0]
+        lengths=[]
+        for vehicle in schedule.vehicles:
+            trips=sorted(vehicle.trips,key=lambda t:t.start)
+            for before,after in zip(trips,trips[1:]):
+                assert instant(after.start)-instant(before.end)>=1800000
+            for trip in trips:
+                length=(instant(trip.end)-instant(trip.start))/60000
+                assert low<=length<=high
+                assert trip.start[:10]==trip.end[:10] or trip.end[11:19]=="00:00:00"
+                lengths.append(length)
+        if high-low>20:
+            assert len(set(lengths))>20
+
+
+def test_bounded_rejects_daily_target_and_reversed_limits():
+    import pytest
+    for fields in [dict(trip_min_minutes=20,trip_max_minutes=10),dict(daily_driving_minutes=160),dict(trip_min_minutes=1),dict(trip_max_minutes=241)]:
+        with pytest.raises(ValueError):
+            bounded_request(**fields)
+
+
+def test_bounded_calendar_replay_and_off_days():
+    req=bounded_request(vehicle_count=2)
+    original,_=expand(req)
+    wider,_=expand(bounded_request(vehicle_count=2,measurement={"start":"2026-11-15T00:00:00+09:00","end":"2026-11-25T00:00:00+09:00","timezone":"Asia/Seoul"}))
+    for a,b in zip(original.vehicles,wider.vehicles):
+        assert [t for t in a.trips if t.start.startswith("2026-11-18")]==[t for t in b.trips if t.start.startswith("2026-11-18")]
+    assert all(not v.trips for v in expand(bounded_request(day_off_probability=1))[0].vehicles)

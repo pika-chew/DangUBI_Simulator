@@ -1167,9 +1167,8 @@ export function DrivingResult({
               <th>경과 (초)</th>
               <th>상태</th>
               <th>속도 (km/h)</th>
-              <th>RPM</th>
+              <th>운행 누적거리 (km)</th>
               <th>엔진 상태·기어</th>
-              <th>누적거리 (m)</th>
               <th>도로·상황</th>
               <th>운전자·노면</th>
               <th>가속/횡가속 (m/s²)</th>
@@ -1182,7 +1181,7 @@ export function DrivingResult({
                 <td>{p.elapsed_seconds}</td>
                 <td>{p.state}</td>
                 <td>{p.speed_kmh.toFixed(1)}</td>
-                <td>{p.rpm}</td>
+                <td>{(p.distance_m/1000).toFixed(3)}</td>
                 <td>
                   {p.context?.engine_state
                     ? p.context.engine_state +
@@ -1190,7 +1189,6 @@ export function DrivingResult({
                       (p.context.gear ? p.context.gear + "단" : "—")
                     : "이전 모델"}
                 </td>
-                <td>{p.distance_m.toFixed(1)}</td>
                 <td>
                   {p.context
                     ? p.context.road +
