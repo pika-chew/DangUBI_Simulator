@@ -481,6 +481,7 @@ def main():
     directory=local/"measurements"/("schedule-"+datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d-%H%M%S-")+uuid.uuid4().hex[:6]);directory.mkdir(parents=True)
     report=dict(schema_version="schedule-measure-2",environment=dict(os=platform.platform(),processor=platform.processor(),logical_cpus=os.cpu_count(),python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest(),resource_scope="제어기+생성Worker+송신프로세스, 브로커 제외; 제어기 계측·TestClient 부하 포함",control_poll_ms={"normal":50,"local_scale":500},cpu_basis="100%=코어1개",memory_basis="100ms 동시 관측 RSS 합계의 최댓값; 공유 메모리 중복 가능"),results=[])
     report["environment"]["control_stack_sampling"]=os.environ.get("DANGUBI_PROFILE_SCHEDULE")=="1"
+    report["environment"]["schedule_deadline_basis"]="실행 시작의 고정 시각 + 일시정지 누적 시간 + 매핑된 메시지 예정 오프셋"
     if parking:
         report["environment"].update(control_poll_ms={"parking":1000},
             memory_basis="1000ms 동시 관측 RSS 합계; 공유 메모리 중복 가능")

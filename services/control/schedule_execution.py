@@ -10,6 +10,7 @@ from services.control.schedule_publisher import SchedulePublisher
 
 def execute(manager, job, data, worker, timeout):
     started = time.monotonic()
+    started_wall_ms = time.time()*1000
     paused_seconds = 0.0
     result = job.result.copy()
     result.update(assignments=data["assignments"], model_version="schedule-obd-3/journey-8",
@@ -101,7 +102,9 @@ def execute(manager, job, data, worker, timeout):
             if job.stop_requested:
                 return False
             if publisher:
-                publisher.pump(allow_start=not job.pause_requested,elapsed_ms=(now-started-paused_seconds)*1000)
+                publisher.pump(allow_start=not job.pause_requested,
+                               elapsed_ms=(now-started-paused_seconds)*1000,
+                               origin_ms=started_wall_ms+paused_seconds*1000)
                 sync_mqtt()
             if job.pause_requested:
                 before=time.monotonic()

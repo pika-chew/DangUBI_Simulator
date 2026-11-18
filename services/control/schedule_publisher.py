@@ -47,7 +47,10 @@ class SchedulePublisher:
         self.state["peak_reserved_commands"]=max(self.state["peak_reserved_commands"],self.reserved_count)
         if self.on_account:self.on_account()
 
-    def pump(self,allow_start=True,elapsed_ms=0):
+    def pump(self,allow_start=True,elapsed_ms=0,origin_ms=None):
+        # 실행기가 전달한 시작 원점에 일시정지 누적 시간만 더한다.
+        # 응답 회수·파이프 쓰기에 걸린 시간이 예정 시각을 뒤로 밀지 않게 한다.
+        due_origin_ms=origin_ms if origin_ms is not None else time.time()*1000-elapsed_ms
         while self.bridge.pending:
             reply=self.bridge.poll()
             if reply is None:break
@@ -65,7 +68,7 @@ class SchedulePublisher:
             if not queue or client in self.busy:continue
             command,fields,size=queue[0]
             if command=="publish":
-                fields=dict(fields,due_at_ms=int(time.time()*1000+self.due_offset(fields["message"]["ts"])-elapsed_ms))
+                fields=dict(fields,due_at_ms=int(due_origin_ms+self.due_offset(fields["message"]["ts"])))
             identifier=self.bridge.submit(command,**fields)
             queue.popleft()
             self.active[identifier]=(client,command,size)

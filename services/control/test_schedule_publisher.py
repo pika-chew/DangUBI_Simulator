@@ -94,3 +94,35 @@ def test_bridge_write_failure_keeps_unsent_queue_for_final_accounting():
     publisher.discard()
     assert publisher.state["discarded_queued"]==1
     assert publisher.state["reserved_commands"]==publisher.state["reserved_bytes"]==0
+
+
+def test_slow_commands_keep_same_deadline_across_clients_and_pumps(monkeypatch):
+    bridge=Bridge()
+    clock=[100.]
+    monkeypatch.setattr("services.control.schedule_publisher.time.time",lambda:clock[0])
+    submit=bridge.submit
+    def slow_submit(command,**fields):
+        clock[0]+=.04
+        return submit(command,**fields)
+    bridge.submit=slow_submit
+    publisher=SchedulePublisher(bridge,{},{"a":"c1","b":"c2"},measurement_start_ms=5000)
+    for vehicle in ("a","b","a"):
+        publisher.enqueue("publish",lambda:True,vehicle_id=vehicle,message={"ts":6000})
+    publisher.pump(origin_ms=100000)
+    bridge.replies=[1,2]
+    clock[0]+=3
+    publisher.pump(origin_ms=100000)
+    assert [fields["due_at_ms"] for _,_,fields in bridge.sent]==[101000]*3
+    assert clock[0]*1000-bridge.sent[-1][2]["due_at_ms"]>2000
+
+
+def test_pause_compensation_and_compressed_offsets_preserve_payload():
+    bridge=Bridge()
+    publisher=SchedulePublisher(bridge,{},{"a":"c1"},due_offset=lambda ts:35000)
+    message={"ts":1794976206000}
+    publisher.enqueue("publish",lambda:True,vehicle_id="a",message=message)
+    publisher.pump(allow_start=False,origin_ms=100000)
+    assert not bridge.sent
+    publisher.pump(origin_ms=100500)
+    assert bridge.sent[0][2]["due_at_ms"]==135500
+    assert bridge.sent[0][2]["message"] is message

@@ -611,3 +611,5 @@ Go가 기록하는 `worker_compute_ms`는 공통 생성 함수, `worker_serializ
 압축 반복 시험은 `.venv/Scripts/python.exe scripts/measure_schedule.py --config configs/schedule-compressed.example.json`으로 실행합니다. 1,000대가 4초씩 3회 운행하며, 차량당 회차별 Microtrip 2건과 종료 Trip 1건을 전송합니다. OBD 본문과 상태 복원에는 30분 2초 주차를 포함한 원래 일정을 사용합니다. 로컬 MQTT 발행 예정은 0·35·70초이며, 접속이 지연되면 그 시간도 발행 지연에 반영됩니다. 두 연결 방식은 순차 실행합니다.
 
 압축 시험의 기준은 구성별 9,000건, 같은 차량의 위치·누적거리 연속성, 동일 Client ID의 회차별 접속, 회차 사이 활성 연결·예약 0, 종료 정리입니다. `publish_windows`의 지연은 실제 발행한 10초 구간의 집계이며, 밀린 발행은 다음 구간에 기록될 수 있습니다. 실제 30분 유휴 시간 그 자체는 장시간 주차 시험으로 확인합니다.
+
+발행 지연은 실행 시작에 고정한 원점과 메시지 예정 오프셋을 기준으로 계산합니다. 일시정지 누적 시간은 원점에 더합니다. 송신 처리와 응답 회수 중 걸린 시간은 지연에 포함됩니다. 계측 결과의 environment.schedule_deadline_basis에서 계산 기준을 확인할 수 있습니다.
