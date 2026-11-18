@@ -270,6 +270,36 @@ def short_parallel_schedule():
                      for v in ["v000001","v000002","v000003"]],end="03",interval=200)
 
 
+def test_scale_thousand_connected_clients_stop_cleans_resources(mqtt_client,monkeypatch):
+    from scripts.scale_schedule import prepare
+    from services.control import schedule_execution
+    client,path=mqtt_client
+    profile=json.loads(path.read_text())
+    profile.update(local_benchmark=True,max_clients=1000,max_messages=10000,max_duration_seconds=120,connect_per_second=200,publish_per_second=5000)
+    source=short_parallel_schedule()
+    source["vehicles"]=[dict(vehicle_id=f"v{i:06d}",trips=[dict(start="2026-11-18T13:00:00+09:00",end="2026-11-18T13:00:12+09:00",road_profile="mixed")]) for i in range(1000)]
+    source["measurement"]["end"]="2026-11-18T13:00:14+09:00";source["interval_ms"]=2000
+    bridges=[];original=schedule_execution.MQTTBridge
+    def bridge(*args,**kwargs):
+        b=original(*args,**kwargs);bridges.append(b);return b
+    monkeypatch.setattr(schedule_execution,"MQTTBridge",bridge)
+    start_run=prepare(source,dict(local_scale=True,clients=1000,workers=2),control.WORKER,profile,control.validate_message)
+    started=start_run(control.JOBS);job=control.JOBS.active
+    deadline=time.monotonic()+40
+    while time.monotonic()<deadline:
+        r=client.get("/api/jobs/"+started["id"]).json()["result"]
+        if r.get("connected_clients")==1000:break
+        if r["job_state"] not in control.ACTIVE:break
+        time.sleep(.1)
+    assert r["connected_clients"]==1000,r
+    client.post("/api/jobs/"+started["id"]+"/stop")
+    assert job.finished.wait(10)
+    r=client.get("/api/jobs/"+started["id"]).json()["result"]
+    assert r["job_state"]=="stopped" and r["execution_cleanup_confirmed"],r
+    assert r["buffer_budget"]["reserved_bytes"]==r["active_clients"]==0
+    assert all(p.poll() is not None for p in job.processes) and bridges[0].process.poll() is not None
+
+
 def test_schedule_mqtt_slow_generation_uses_workers_and_isolates_ui_cache(mqtt_client,monkeypatch):
     client,_=mqtt_client
     generate=control.generate_scheduled_obd

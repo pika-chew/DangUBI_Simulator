@@ -233,7 +233,7 @@ func (b *testBroker) measureMessage(topic string, m map[string]any) {
 		b.invalidMeasured++
 		return
 	}
-	if _, ok := b.lastTimestamp[topic]; !ok && len(b.lastTimestamp) >= 100 {
+	if _, ok := b.lastTimestamp[topic]; !ok && len(b.lastTimestamp) >= 1000 {
 		b.invalidMeasured++
 		return
 	}

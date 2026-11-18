@@ -129,3 +129,18 @@ def test_bounded_mqtt_boundaries_merge_touching_trips_and_order_equal_timestamps
     assert [(t,p,v) for t,p,v,_,_ in events if p!=1]==[(0,0,"a"),(25,0,"c"),(75,2,"c"),(100,0,"b"),(200,2,"b"),(400,2,"a")]
     assert [(m["ts"],m["ty"]) for _,p,v,m,_ in events if p==1 and v=="a"]==[(0,4),(100,4),(200,3),(200,4),(300,4),(400,3)]
     assert q.stats["reserved_bytes"]==q.stats["reserved_messages"]==0
+
+
+def test_thousand_vehicle_queue_with_large_pages_keeps_headroom():
+    pool=FakePool(4,SimpleNamespace(stop_requested=False,pause_requested=False))
+    def provide(v):yield dict(trip_key=v,start_ms=0,end_ms=2000,observed_start_ms=0,observed_end_ms=2000)
+    def generate(v,key,offset,session,limit):
+        return dict(status="generated",messages=[dict(ty=4,ts=offset*1000,pld={"padding":"x"*14000})],has_more=offset==0,trip=None)
+    data=dict(assignments=[dict(vehicle_id=f"v{i:06d}") for i in range(1000)],trip_provider=provide,generate=generate,
+              config={"interval_ms":1000},measurement_start_ms=0,realtime=False)
+    q=BoundedSchedule(data,pool,lambda due=None:True,{})
+    try:
+        keys=[(t,v) for t,v,_,_ in q]
+        assert len(keys)==2000 and keys==sorted(keys)
+        assert q.stats["peak_reserved_bytes"]<=8388608 and q.stats["peak_reserved_messages"]<=2000
+    finally:pool.close();q.close()

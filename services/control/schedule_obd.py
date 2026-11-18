@@ -53,7 +53,8 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
     state={"lat":body.initial_lat,"lon":body.initial_lon,"odometer_m":body.initial_odometer_m}
     coolant,heading=body.initial_coolant_c,0.0
     vehicle_seed=int(hashlib.sha256(f"{req.seed}|{vehicle_id}".encode()).hexdigest()[:7],16)
-    worker_id = hashlib.sha256(worker.read_bytes()).hexdigest()
+    digest=session.worker_digest if session is not None and hasattr(session,"worker_digest") else lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+    worker_id = digest(worker)
     scope = hashlib.sha256(json.dumps({"source":SOURCE_ID,"worker":worker_id,
         "seed":req.seed,"interval_ms":req.interval_ms,"measurement":req.measurement.model_dump(),
         "vehicle":({"vehicle_id":vehicle_id} if cache_context is not None else vehicle.model_dump()),"initial":dict(state,coolant_c=coolant),
@@ -81,7 +82,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
             return {"status":"preparing", "vehicle_id":vehicle_id,"trip_key":trip_key,
                     "restoration":{"checkpoint_epoch":epoch,"completed_preceding_trips":i,"total_preceding_trips":index,
                                    "computed_trips":computed,"reused_preceding_trips":resume_start}}
-        if hashlib.sha256(worker.read_bytes()).hexdigest() != worker_id:
+        if digest(worker) != worker_id:
             raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
         if previous_end is not None:
             # 외기20℃·냉각 시정수2시간의 개발 근사. 실차/외기 조회값이 아니다.
@@ -107,7 +108,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         previous_end=arrival
         computed += 1
         computed_ms += arrival-departure
-        if hashlib.sha256(worker.read_bytes()).hexdigest() != worker_id:
+        if digest(worker) != worker_id:
             raise CheckpointReset("생성 엔진이 변경되었습니다. 새 조회를 시작하세요.")
         if checkpoint_store is not None:
             checkpoint_store.put(scope,i,arrival,dict(state,coolant_c=coolant,heading_rad=heading),epoch)

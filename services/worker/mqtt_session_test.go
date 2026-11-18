@@ -3,11 +3,52 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"testing"
 	"time"
 )
+
+func TestScaleSessionIsLoopbackOnlyAndNormalAssignmentsStayLimited(t *testing.T) {
+	_, p := localBroker(t, false, false)
+	p.LocalBenchmark = true
+	p.MaxClients = 1000
+	p.MaxMessages = 10000
+	p.MaxDurationSeconds = 120
+	p.ConnectPerSecond = 200
+	p.PublishPerSecond = 5000
+	if err := p.validate(); err != nil {
+		t.Fatal(err)
+	}
+	url := p.BrokerURL
+	p.BrokerURL = "ssl://example.com:8883"
+	if p.validate() == nil {
+		t.Fatal("외부 확장 연결 허용")
+	}
+	p.BrokerURL = url
+	req := request("shared", 1)
+	req.MQTT = p
+	req.Assignments = nil
+	for i := 0; i < 1000; i++ {
+		req.Assignments = append(req.Assignments, Assignment{fmt.Sprintf("v%06d", i), "scale-c1"})
+	}
+	s, err := newMQTTSession(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.close()
+	p.LocalBenchmark = false
+	p.MaxClients = 20
+	p.MaxMessages = 100
+	p.MaxDurationSeconds = 30
+	p.ConnectPerSecond = 5
+	p.PublishPerSecond = 70
+	req.Assignments = req.Assignments[:101]
+	if _, err := newMQTTSession(req); err == nil {
+		t.Fatal("일반 배정 상한 변경")
+	}
+}
 
 func TestMQTTStreamParallelCancellation(t *testing.T) {
 	for _, mode := range []string{"stop", "eof", "duplicate_client", "oversized"} {

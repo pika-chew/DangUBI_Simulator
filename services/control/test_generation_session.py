@@ -15,6 +15,16 @@ def payload():
     return dict(start_ms=start,end_ms=start+600000,from_ms=start,until_ms=start+600000,interval_ms=2000,offset=0,limit=100,tid=1,seed=42,profile="mixed",lat=37.5,lon=127,odometer_m=50000,continuity=dict(vehicle_seed=42,coolant_c=80,heading_rad=0))
 
 
+def test_worker_identity_is_cached_but_rejects_file_changes(tmp_path):
+    import hashlib
+    p=tmp_path/"worker";p.write_bytes(b"original")
+    s=GenerationSession.__new__(GenerationSession)
+    s.worker_path=p.resolve();s.worker_signature=s._signature();s.worker_hash=hashlib.sha256(p.read_bytes()).hexdigest()
+    assert s.worker_digest(p)==s.worker_hash
+    p.write_bytes(b"modified-longer")
+    with pytest.raises(GenerationFailure,match="변경"):s.worker_digest(p)
+
+
 def test_session_matches_all_pages_and_closes():
     s=GenerationSession(WORKER)
     try:

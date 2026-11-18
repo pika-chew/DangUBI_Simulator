@@ -1,0 +1,85 @@
+{
+  "repeats": 1,
+  "cases": [
+    {
+      "name": "scale-100-c10-w2",
+      "local_scale": true,
+      "vehicles": 100,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-100-c100-w2",
+      "local_scale": true,
+      "vehicles": 100,
+      "clients": 100,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-250-c10-w2",
+      "local_scale": true,
+      "vehicles": 250,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-250-c250-w2",
+      "local_scale": true,
+      "vehicles": 250,
+      "clients": 250,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-500-c10-w2",
+      "local_scale": true,
+      "vehicles": 500,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-500-c500-w2",
+      "local_scale": true,
+      "vehicles": 500,
+      "clients": 500,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-1000-c10-w2",
+      "local_scale": true,
+      "vehicles": 1000,
+      "clients": 10,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-1000-c1000-w2",
+      "local_scale": true,
+      "vehicles": 1000,
+      "clients": 1000,
+      "workers": 2,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-1000-c10-w1",
+      "local_scale": true,
+      "vehicles": 1000,
+      "clients": 10,
+      "workers": 1,
+      "lifetime": "always"
+    },
+    {
+      "name": "scale-1000-c10-w4",
+      "local_scale": true,
+      "vehicles": 1000,
+      "clients": 10,
+      "workers": 4,
+      "lifetime": "always"
+    }
+  ]
+}

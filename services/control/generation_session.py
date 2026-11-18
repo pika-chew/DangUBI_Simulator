@@ -4,6 +4,8 @@ import queue
 import subprocess
 import threading
 import time
+import hashlib
+from pathlib import Path
 
 
 class GenerationFailure(Exception):
@@ -12,6 +14,9 @@ class GenerationFailure(Exception):
 
 class GenerationSession:
     def __init__(self, worker, job=None):
+        self.worker_path=Path(worker).resolve()
+        self.worker_signature=self._signature()
+        self.worker_hash=hashlib.sha256(self.worker_path.read_bytes()).hexdigest()
         self.job=job
         self.sequence=0
         self.stats={"process_starts":1,"page_requests":0,"peak_cache_estimated_bytes":0,"peak_heap_alloc_bytes":0}
@@ -29,6 +34,15 @@ class GenerationSession:
         except BaseException:
             self.close(abort=True)
             raise
+
+    def _signature(self):
+        s=self.worker_path.stat()
+        return s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns
+
+    def worker_digest(self,worker):
+        if Path(worker).resolve()!=self.worker_path or self._signature()!=self.worker_signature:
+            raise GenerationFailure("생성 엔진 파일이 변경되었습니다. 실행을 다시 준비하세요.")
+        return self.worker_hash
 
     def _read(self):
         try:

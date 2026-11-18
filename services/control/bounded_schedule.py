@@ -10,6 +10,7 @@ from services.control.generation_session import GenerationFailure
 class PageSession:
     def __init__(self,session,byte_limit):self.session,self.byte_limit=session,byte_limit
     def page(self,payload,timeout=15):return self.session.page(payload,timeout,byte_limit=self.byte_limit)
+    def worker_digest(self,worker):return self.session.worker_digest(worker)
 
 
 def interval_boundaries(rows):
@@ -32,8 +33,8 @@ class BoundedSchedule:
         count=len(data["assignments"]);workers=len(pool.sessions)
         self.byte_cap=data.get("generation_queue_bytes",8*1024*1024)
         self.count_cap=data.get("generation_queue_messages",2000)
-        self.frame=min(1048576,self.byte_cap//max(1,count+2*workers+1))
-        self.limit=min(100,self.count_cap//max(1,count+workers+1)-1)
+        self.frame=max(16384,min(1048576,self.byte_cap//max(1,count+2*workers+1)))
+        self.limit=max(1,min(100,self.count_cap//max(1,count+workers+1)-1))
         if self.frame<16384 or self.limit<1:raise GenerationFailure("대기열 예산이 차량·Worker 수에 비해 작습니다.")
         self.closed=False
         self.states={};self.busy={};self.queued_bytes=0;self.queued_count=0;self.consuming_bytes=0;self.consuming_count=0
@@ -98,7 +99,9 @@ class BoundedSchedule:
                 if s["queue"] or s["future"] is not None or s["owner"] in self.busy:continue
                 if self.data["realtime"] and s["due"]-self.data["measurement_start_ms"]>self.result.get("simulation_time_ms",0)+2000:continue
                 # 최악 응답의 원문과 디코딩 객체를 위한 바이트 credit을 먼저 예약한다.
-                if self.queued_bytes+self.consuming_bytes+(len(self.busy)+1)*self.frame*2>self.byte_cap or self.queued_count+self.consuming_count+(len(self.busy)+1)*(self.limit+1)>self.count_cap:
+                # 가장 이른 미준비 차량을 위한 응답 공간을 남겨 순서 대기 교착을 막는다.
+                reserve=0 if s is candidates[0] else 1
+                if self.queued_bytes+self.consuming_bytes+(len(self.busy)+1+reserve)*self.frame*2>self.byte_cap or self.queued_count+self.consuming_count+(len(self.busy)+1+reserve)*(self.limit+1)>self.count_cap:
                     self.stats["backpressure_count"]+=1;continue
                 self.busy[s["owner"]]=time.monotonic();s["future"]=self.pool.submit(s["owner"],lambda session,s=s:self.prepare(s,session));self.account()
             if self.boundaries and (not candidates or self.boundaries[0]<(candidates[0]["due"],1,candidates[0]["vehicle"])):

@@ -33,21 +33,25 @@ type streamCommand struct {
 }
 
 type streamStats struct {
-	Connected      int                 `json:"connected_clients"`
-	Active         int                 `json:"active_clients"`
-	Peak           int                 `json:"peak_active_clients"`
-	Attempts       int                 `json:"publish_attempts"`
-	Published      int                 `json:"mqtt_published"`
-	Puback         int                 `json:"puback_count"`
-	Unconfirmed    int                 `json:"unconfirmed_messages"`
-	Reconnects     int                 `json:"reconnect_count"`
-	Connections    int                 `json:"connection_count"`
-	Disconnections int                 `json:"disconnect_count"`
-	ScheduleDelay  int64               `json:"schedule_delay_ms"`
-	Performance    *PerformanceSummary `json:"performance"`
+	Connected           int                 `json:"connected_clients"`
+	Active              int                 `json:"active_clients"`
+	Peak                int                 `json:"peak_active_clients"`
+	Attempts            int                 `json:"publish_attempts"`
+	Published           int                 `json:"mqtt_published"`
+	Puback              int                 `json:"puback_count"`
+	Unconfirmed         int                 `json:"unconfirmed_messages"`
+	Reconnects          int                 `json:"reconnect_count"`
+	Connections         int                 `json:"connection_count"`
+	Disconnections      int                 `json:"disconnect_count"`
+	ScheduleDelay       int64               `json:"schedule_delay_ms"`
+	InitialConnectMS    *int64              `json:"initial_connect_ms,omitempty"`
+	PostConnectSchedule DurationSummary     `json:"post_connect_schedule"`
+	Performance         *PerformanceSummary `json:"performance"`
 }
 
 type mqttSession struct {
+	connectedAt                time.Time
+	postConnect                durationMetric
 	mu, connectMu, publishMu   sync.Mutex
 	parked                     map[string]bool
 	profile                    *MQTTProfile
@@ -70,7 +74,11 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 		return nil, err
 	}
 	validID := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
-	if !validID.MatchString(req.RunID) || len(req.Assignments) < 1 || len(req.Assignments) > 100 {
+	maxAssignments := 100
+	if p.LocalBenchmark {
+		maxAssignments = 1000
+	}
+	if !validID.MatchString(req.RunID) || len(req.Assignments) < 1 || len(req.Assignments) > maxAssignments {
 		return nil, errors.New("실행/차량 배정을 확인하세요.")
 	}
 	s := &mqttSession{profile: p, clients: map[string]mqtt.Client{}, vehicles: map[string]string{}, seen: map[string]bool{}, parked: map[string]bool{}, started: time.Now()}
@@ -102,6 +110,7 @@ func (s *mqttSession) snapshot() streamStats {
 	}
 	s.stats.Peak = max(s.stats.Peak, s.stats.Active)
 	s.stats.Performance = s.metrics.summary(s.stats.Puback, time.Since(s.started))
+	s.stats.PostConnectSchedule = s.postConnect.summary()
 	return s.stats
 }
 
@@ -160,6 +169,11 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		s.seen[id] = true
 	}
 	s.stats.Connections++
+	if len(s.seen) == len(s.clients) && s.connectedAt.IsZero() {
+		s.connectedAt = time.Now()
+		elapsed := time.Since(s.started).Milliseconds()
+		s.stats.InitialConnectMS = &elapsed
+	}
 	s.mu.Unlock()
 	s.snapshot()
 	return nil
@@ -208,6 +222,9 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
 			s.stats.ScheduleDelay = max(s.stats.ScheduleDelay, delay)
 			s.metrics.schedule.add(time.Duration(delay) * time.Millisecond)
+			if !s.connectedAt.IsZero() && c.DueAtMS >= s.connectedAt.UnixMilli() {
+				s.postConnect.add(time.Duration(delay) * time.Millisecond)
+			}
 		}
 		s.mu.Unlock()
 		started := time.Now()

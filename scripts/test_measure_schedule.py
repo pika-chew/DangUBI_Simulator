@@ -44,6 +44,18 @@ class ScheduleMeasurementTest(unittest.TestCase):
             with self.assertRaises(ValueError):measurement.child(self.config["cases"][0],p,Path(sys.executable),Path(folder))
             self.assertEqual(p.read_text(),"original")
 
+    def test_scale_is_explicit_and_public_contracts_stay_limited(self):
+        from services.control.schedule import ScheduleRequest
+        from services.control.app import MQTTProfile,ScheduleExecutionRequest
+        from pydantic import ValidationError
+        c=dict(name="scale",local_scale=True,vehicles=1000,clients=1000,workers=4)
+        measurement.validate_config(dict(cases=[c],repeats=1))
+        with self.assertRaises(ValueError):measurement.validate_config(dict(cases=[dict(c,local_scale=False)]))
+        with self.assertRaises(ValueError):measurement.validate_config(dict(cases=[dict(c,vehicles=1001)]))
+        with self.assertRaises(ValidationError):ScheduleExecutionRequest(plan_key="test",client_count=1000)
+        with self.assertRaises(ValidationError):MQTTProfile(broker_url="ssl://127.0.0.1:1",ca_file="a",cert_file="b",key_file="c",max_clients=1000)
+        self.assertEqual(ScheduleRequest.model_fields["vehicles"].metadata[1].max_length,100)
+
     def test_fingerprint_is_numeric_and_key_order_independent(self):
         m=dict(ty=4,ts=1,pld=dict(sp=1.5,flags=[True,None,"한"]))
         self.assertEqual(hashlib.sha256(measurement.canonical(m)).hexdigest(),"bd88e197fcbbc651353e7db126e41c922dd7544b86a08c0082f45eda8aae25ce")
