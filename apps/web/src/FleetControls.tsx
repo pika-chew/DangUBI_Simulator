@@ -1,6 +1,6 @@
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
-  fleet_version: "fleet-plan-1";
+  fleet_version: "fleet-plan-1" | "fleet-plan-2";
   vehicle_count: number;
   measurement: { start: string; end: string; timezone: "Asia/Seoul" };
   interval_ms: number;
@@ -30,13 +30,13 @@ export function defaultFleet(): FleetConfig {
   const day = localTime(Date.now()).slice(0, 10);
   const start = `${day}T00:00:00+09:00`;
   return {
-    fleet_version: "fleet-plan-1", vehicle_count: 20,
+    fleet_version: "fleet-plan-2", vehicle_count: 20,
     measurement: { start, end: iso(localTime(Date.parse(start) + 3 * 86400000)), timezone: "Asia/Seoul" },
-    interval_ms: 2000, seed: 42, daily_driving_minutes: 120,
+    interval_ms: 2000, seed: 42, daily_driving_minutes: 60,
     vehicle_variation_percent: 20, daily_variation_percent: 25, departure_jitter_minutes: 30,
     day_off_probability: 0.2, weekend_activity_probability: 0.5,
     anomaly_vehicle_percent: 5, anomaly_events_per_hour: 2, anomaly_intensity: "medium",
-    pattern_mix: { ...presets.mixed }, road_mix: { urban: 50, highway: 20, congested: 10, mixed: 20 },
+    pattern_mix: { ...presets.mixed }, road_mix: { urban: 35, highway: 20, congested: 5, mixed: 40 },
   };
 }
 function Help({ text }: { text: string }) {
@@ -52,7 +52,9 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
   const preset = Object.entries(presets).find(([, m]) => JSON.stringify(m) === JSON.stringify(v.pattern_mix))?.[0] ?? "custom";
   return <fieldset disabled={disabled} className="schedule-fieldset">
     <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
+    {v.fleet_version==="fleet-plan-1" && <p className="context-note">이 일정은 이전의 하루 합계 맞춤 배정을 사용합니다. 짧은 용무와 다양한 길이의 운행을 적용하려면 ‘설정 복사’ 후 운행 시간 배정을 ‘다양한 생활 운행’으로 선택하세요. 저장된 원본은 자동 변경하지 않습니다.</p>}
     <div className="fields">
+      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch({fleet_version:e.target.value as FleetConfig["fleet_version"]})}><option value="fleet-plan-2">다양한 생활 운행 · 기본</option><option value="fleet-plan-1">이전 배정 · 하루 합계 맞춤</option></select></label>
       {numeric("vehicle_count", "차량 수", 1, 100, "현재 로컬 계획은 최대100대입니다. 설정 자동화가 대규모 생성·전송 지원을 의미하지는 않습니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
       <label>측정 종료 (KST)<input type="datetime-local" step="1" value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
@@ -63,7 +65,7 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
         <option value="flexible">비정기 중심 · 20% / 30% / 50%</option>
         {preset === "custom" && <option value="custom" disabled>고급 설정의 사용자 비율</option>}
       </select></label>
-      {numeric("daily_driving_minutes", "운행일 하루 목표 시간 (분)", 10, 480, "운행하는 날의 전체 운행 시간 목표입니다. 차량 간·날짜별 편차와 미운행·관측 경계 때문에 실제 관측 평균은 달라집니다. 모든 차의 운행 시간을 강제로 같게 맞추지 않습니다.")}
+      {numeric("daily_driving_minutes", v.fleet_version==="fleet-plan-2" ? "운행량 기준 시간 (분/운행일)" : "운행일 하루 목표 시간 (분)", 10, 480, v.fleet_version==="fleet-plan-2" ? "생활 운행의 길이를 조절하는 기준입니다. 짧은 용무·출퇴근·장거리의 길이를 따로 정하며 하루 합계를 이 값에 강제로 맞추지 않습니다. 60분은 개발 기본값이며 실측 평균이 아닙니다." : "이전 배정은 하루 목표 시간을 운행 횟수로 나눕니다. 짧은 운행을 섞으려면 다양한 생활 운행을 선택하세요.")}
       <label><span className="label-line">하루 미운행 확률 (%) <Help text="각 차량이 하루 전체 운행을 쉬는 확률입니다. 기간 전체 미운행 차량 비율과 다릅니다. 주말 참여 여부와 별도로 적용됩니다." /></span><input aria-label="하루 미운행 확률 (%)" type="number" min="0" max="100" step="1" value={v.day_off_probability * 100} onChange={e => patch({ day_off_probability: Number(e.target.value) / 100 })} /></label>
       {numeric("vehicle_variation_percent", "차량 간 운행 시간 편차 (±%)", 0, 50, "차량마다 목표 시간의 차이를 한 번 정하고 여러 날짜에 유지합니다.")}
       {numeric("daily_variation_percent", "같은 차량의 날짜별 편차 (±%)", 0, 50, "차량별 목표 시간에 날짜별 차이를 추가합니다. 같은 차량도 매일 같은 길이로 운행하지 않습니다.")}
@@ -79,7 +81,7 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
         {(Object.entries({ commute: "출퇴근형", daytime: "주간 운행형", flexible: "비정기형" }) as [keyof Mix, string][]).map(([key, title]) => <label key={key}>{title} 비율 (%)<input type="number" min="0" max="100" value={v.pattern_mix[key]} onChange={e => patch({ pattern_mix: { ...v.pattern_mix, [key]: Number(e.target.value) } })} /></label>)}
         {(Object.entries({ urban: "도심", highway: "고속도로", congested: "정체", mixed: "혼합" }) as [keyof FleetConfig["road_mix"], string][]).map(([key, title]) => <label key={key}>{title} 도로 배정 비중 (%)<input type="number" min="0" max="100" value={v.road_mix[key]} onChange={e => patch({ road_mix: { ...v.road_mix, [key]: Number(e.target.value) } })} /></label>)}
       </div>
-      <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
+      <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 다양한 생활 운행에서는 짧은 용무·운행 길이에 맞게 개별 도로 성격도 달라질 수 있습니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
     </details>
     <p className="note">계획 최대100대·30일·문맥 포함10,000운행, 장기 OBD 상태는 요청당 최대16회·48시간씩 나누어 준비합니다. 목표 시간×두 편차의 최대 조합은 하루600분 이하여야 합니다. 설정만 바꿔도 이 상한이 확대되지는 않습니다.</p>
   </fieldset>;

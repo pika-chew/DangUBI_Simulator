@@ -1,0 +1,31 @@
+{
+  "fleet_version": "fleet-plan-2",
+  "vehicle_count": 20,
+  "measurement": {
+    "start": "2026-11-17T00:00:00+09:00",
+    "end": "2026-11-20T00:00:00+09:00",
+    "timezone": "Asia/Seoul"
+  },
+  "seed": 42,
+  "interval_ms": 2000,
+  "daily_driving_minutes": 60,
+  "vehicle_variation_percent": 20,
+  "daily_variation_percent": 25,
+  "departure_jitter_minutes": 30,
+  "day_off_probability": 0.2,
+  "weekend_activity_probability": 0.5,
+  "anomaly_vehicle_percent": 5,
+  "anomaly_events_per_hour": 2,
+  "anomaly_intensity": "medium",
+  "pattern_mix": {
+    "commute": 60,
+    "daytime": 20,
+    "flexible": 20
+  },
+  "road_mix": {
+    "urban": 35,
+    "highway": 20,
+    "congested": 5,
+    "mixed": 40
+  }
+}

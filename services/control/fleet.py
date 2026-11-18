@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 from services.control.schedule import Strict, Measurement, ScheduleRequest, KST, instant, plan
+from services.control.journey_schedule import varied_day
 from services.control.schedule_obd import ScheduledOBDRequest, generate, key_for
 
 
@@ -36,7 +37,7 @@ class RoadMix(Strict):
 
 
 class FleetRequest(Strict):
-    fleet_version: Literal["fleet-plan-1"] = "fleet-plan-1"
+    fleet_version: Literal["fleet-plan-1", "fleet-plan-2"] = "fleet-plan-1"
     vehicle_count: int = Field(default=20, ge=1, le=100)
     measurement: Measurement
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)
@@ -101,6 +102,9 @@ def allocation(req):
             "evening_departure_minute": fixed.randint(1020, 1140),
             "road_profile": fixed.choices(list(req.road_mix.model_dump()), weights=list(req.road_mix.model_dump().values()))[0],
         }
+        if req.fleet_version=="fleet-plan-2":
+            personal=rng(req,"commute-length",vehicle)
+            result[vehicle]["commute_minutes"]=max(5,min(105,result[vehicle]["daily_target_minutes"]/2*personal.lognormvariate(-.18,.55)))
     return result
 
 
@@ -117,6 +121,9 @@ def iter_vehicle_days(req, vehicle, fixed):
         if weekend and rng(req, vehicle, day.isoformat(), "weekend").random() >= req.weekend_activity_probability:
             continue
         kind = "flexible" if weekend else fixed["pattern"]
+        if req.fleet_version=="fleet-plan-2":
+            yield from varied_day(req,day,fixed,daily,kind,KST)
+            continue
         count = 2 if kind == "commute" else daily.randint(2, 3) if kind == "daytime" else daily.randint(1, 3)
         delta = req.daily_variation_percent / 100
         budget = max(count, round(fixed["daily_target_minutes"] * daily.uniform(1-delta, 1+delta)))

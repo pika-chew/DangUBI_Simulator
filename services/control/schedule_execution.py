@@ -9,7 +9,7 @@ def execute(manager, job, data, worker, timeout):
     started = time.monotonic()
     paused_seconds = 0.0
     result = job.result.copy()
-    result.update(assignments=data["assignments"], model_version="schedule-obd-2/traffic-7",
+    result.update(assignments=data["assignments"], model_version="schedule-obd-3/journey-8",
                   microtrip_count=0, trip_count=0, schedule_delay_ms=0)
     last_save = 0.0
     mqtt=data["operation"]=="mqtt"

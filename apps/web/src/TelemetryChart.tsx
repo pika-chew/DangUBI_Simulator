@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import type { TracePoint } from "./SimulationTools";
 
 export function SpeedChart({ trace, start, end, departure, disabled, onRange, axis = "clock" }: { trace: TracePoint[]; start: number; end: number; departure: number; disabled: boolean; onRange: (a: number, b: number) => void; axis?: "clock" | "elapsed" }) {
-  const label = (ms: number) => axis === "elapsed" ? `${(ms / 1000).toFixed(1)}초` : new Date(ms).toLocaleString("ko-KR", {timeZone:"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+  const label = (ms: number, short=false) => axis === "elapsed" ? `${(ms / 1000).toFixed(1)}초` : new Date(ms).toLocaleString("ko-KR", {timeZone:"Asia/Seoul",...(short?{}:{month:"2-digit" as const,day:"2-digit" as const}),hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
   const anchor = useRef<number | null>(null);
   const [drag, setDrag] = useState<[number, number] | null>(null);
   const span = Math.max(1, end - start), max = Math.max(10, ...trace.map(p => p.speed_kmh));
@@ -19,6 +19,9 @@ export function SpeedChart({ trace, start, end, departure, disabled, onRange, ax
     {trace.length === 1 && <circle cx={60 + (departure + trace[0].elapsed_seconds * 1000 - start) / span * 880} cy={190 - trace[0].speed_kmh / max * 150} r="4" fill="#087c70" />}
     {drag && <rect x={Math.min(...drag)} y="30" width={Math.abs(drag[1] - drag[0])} height="160" fill="#087c70" fillOpacity="0.18" pointerEvents="none" />}
     <text x="4" y="22">km/h</text><text x="10" y="46">{max.toFixed(0)}</text><text x="30" y="194">0</text>
-    <text x="60" y="223">{label(start)}</text><text x="940" y="223" textAnchor="end">{label(end)}</text>
+    {[0,.25,.5,.75,1].map(fraction => <g key={fraction}>
+      <path d={`M${60+880*fraction} 190 v6`} fill="none" stroke="#c6d4de" />
+      <text x={60+880*fraction} y="223" textAnchor={fraction===0?"start":fraction===1?"end":"middle"}>{label(start+(end-start)*fraction, fraction>0 && fraction<1)}</text>
+    </g>)}
   </svg>;
 }

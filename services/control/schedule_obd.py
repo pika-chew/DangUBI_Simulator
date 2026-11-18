@@ -11,7 +11,7 @@ from services.control.schedule import Strict, ScheduleRequest, instant, plan, ve
 from services.control.checkpoints import CheckpointError, CheckpointReset
 
 # 실행 중 파일 수정과 구분해 서버가 시작할 때의 생성 정책을 식별한다.
-SOURCE_ID = hashlib.sha256(b"obd-state-1" + b"".join(Path(__file__).with_name(name).read_bytes() for name in ("schedule_obd.py", "schedule.py", "fleet.py"))).hexdigest()
+SOURCE_ID = hashlib.sha256(b"obd-state-1" + b"".join(Path(__file__).with_name(name).read_bytes() for name in ("schedule_obd.py", "schedule.py", "fleet.py", "journey_schedule.py"))).hexdigest()
 
 
 class ScheduledOBDRequest(Strict):

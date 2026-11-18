@@ -21,7 +21,7 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	if g.ModelVersion == koreaVersion || isPowertrain(g.ModelVersion) {
 		arterial.Limit = 50
 	}
-	if g.ModelVersion == trafficVersion {
+	if g.ModelVersion == trafficVersion || g.ModelVersion == journeyVersion {
 		// 제한표지가 지정된 간선 구간의 개발 가정. 차로 수로 속도를 추정하지 않는다.
 		arterial = roadContext{"외곽 간선 · 제한표지", []float64{60, 70, 80}[rng.Intn(3)], .08}
 		if g.Profile == "urban" || g.Profile == "congested" {
@@ -56,6 +56,9 @@ func buildRoute(g *Generation, rng *rand.Rand) []routePart {
 	lastZoneEnd := -600.0
 	for t < duration {
 		dt := min(duration-t, 120+rng.Float64()*300)
+		if g.ModelVersion == journeyVersion {
+			dt = min(duration-t, 300+rng.Float64()*600)
+		}
 		// 보호구역은 도심 도로의 일부다. 모든 차량에 나타나도록 강제하지 않는다.
 		if current.Name == urban.Name && t-lastZoneEnd >= 600 && dt >= 120 && rng.Float64() < .2 {
 			add(40, current)
@@ -106,8 +109,8 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	}
 	rng := rand.New(rand.NewSource(g.Seed + int64(index)*1000003))
 	eventRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0xabc123))
-	timedEvents := g.ModelVersion == eventVersion || g.ModelVersion == trafficVersion
-	variableFlow := g.ModelVersion == trafficVersion
+	timedEvents := g.ModelVersion == eventVersion || g.ModelVersion == trafficVersion || g.ModelVersion == journeyVersion
+	variableFlow := g.ModelVersion == trafficVersion || g.ModelVersion == journeyVersion
 	clock := newEventClock(g.Seed+int64(index)*1000003+0x74696d65, g.AnomalyEventsPerHour)
 	if !timedEvents || !g.cache.eligible[index] {
 		clock = newEventClock(0, 0)
@@ -135,6 +138,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 	currentRoad := effectiveRoad(route[0].Road)
 	flowUntil, flowFactor, grade := 0.0, 1.0, 0.0
 	flowReason := "원활한 흐름"
+	lastFlowRoad := ""
 	contextRNG := rand.New(rand.NewSource(g.Seed + int64(index)*1000003 + 0x666c6f77))
 	spec := engineSpec{}
 	if isPowertrain(g.ModelVersion) {
@@ -205,6 +209,10 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			break
 		}
 		road := currentRoad
+		if g.ModelVersion == journeyVersion && lastFlowRoad != road.Name {
+			flowUntil = 0
+			lastFlowRoad = road.Name
+		}
 		if t >= flowUntil {
 			flowUntil = t + 90 + contextRNG.Float64()*210
 			flowFactor, flowReason = 1, "원활한 흐름"
@@ -213,6 +221,11 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 				flowFactor, flowReason = .15+contextRNG.Float64()*.4, "혼잡·앞차 감속"
 			} else if flow < .4 {
 				flowFactor, flowReason = .65+contextRNG.Float64()*.2, "앞차 속도 유지"
+			}
+			if g.ModelVersion == journeyVersion {
+				var duration float64
+				flowFactor, flowReason, duration = journeyFlow(g, road, t, contextRNG)
+				flowUntil = t + duration
 			}
 			grade = (contextRNG.Float64()*2 - 1) * .025
 		}
@@ -261,6 +274,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		} // 실제 경로의 유턴 허용 지점을 알 수 없으므로 기본 생성하지 않는다.
 		turnSign := rng.Intn(2)
 		radius := 30 + rng.Float64()*70
+		if g.ModelVersion == journeyVersion && (road.Name == "외곽 간선 · 제한표지" || road.Name == "지정 간선 · 제한표지") {
+			radius = 150 + rng.Float64()*300
+		}
 		if uturn {
 			radius = 9 + rng.Float64()*5
 		}
