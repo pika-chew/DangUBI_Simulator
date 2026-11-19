@@ -1,3 +1,4 @@
+import {InfoHint} from "./InfoHint";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Message, TracePoint } from "./SimulationTools";
 import { EventFinder } from "./EventFinder";
@@ -40,11 +41,10 @@ async function post<T>(path: string, body: unknown, signal: AbortSignal): Promis
   const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   return readJSONResponse<T>(response);
 }
-function Hint({ text }: { text: string }) {
-  return <span className="hint"><button type="button" className="info-button" aria-label={text}>i</button><span className="hint-content" role="tooltip">{text}</span></span>;
-}
+const Hint=InfoHint;
+
 function RoadSelect({ value, onChange }: { value: Road; onChange: (road: Road) => void }) {
-  return <label>도로 설정<select value={value} onChange={e => onChange(e.target.value as Road)}>{Object.entries(roads).map(([key, title]) => <option key={key} value={key}>{title}</option>)}</select></label>;
+  return <label>도로 설정 <Hint label="도로 설정" text="이 운행의 도로 성격입니다. 바꾸면 속도와 정차 패턴이 달라집니다." /><select value={value} onChange={e => onChange(e.target.value as Road)}>{Object.entries(roads).map(([key, title]) => <option key={key} value={key}>{title}</option>)}</select></label>;
 }
 
 export function SchedulePanel({ renderMessages, view, record, draftToken, draftInput, onRecorded, onConfigure, onActivity }: {
@@ -245,11 +245,11 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       <p className="note">모든 시각은 한국 시간(KST)입니다. 설정을 수정하면 이전 조회를 비우고 새 일정으로 다시 계획합니다.</p>
       <fieldset disabled={!!busy || readOnly} className="schedule-fieldset">
         <div className="fields">
-          <label>측정 시작<input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
-          <label>측정 종료<input type="datetime-local" step="1" value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
-          <label>일정 방식<select value={draft.mode} onChange={e => { const mode = e.target.value as Schedule["mode"]; edit({ ...draft, mode, vehicles: draft.vehicles.map(v => mode === "manual" ? { vehicle_id: v.vehicle_id, trips: [] } : { vehicle_id: v.vehicle_id, pattern: pattern(), overrides: {} }) }); }}><option value="manual">직접 지정</option><option value="patterned">자동 일정 · 개발 예시</option></select></label>
-          <label>Microtrip 주기 (초)<input type="number" min="0.1" max="86400" step="0.1" value={draft.interval_ms / 1000} onChange={e => edit({ ...draft, interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
-          <label>seed <Hint text="같은 설정과 seed로 같은 일정을 재생성합니다. 날짜별 편차가 있어도 조회할 때마다 무작위로 바뀌지 않습니다." /><input type="number" value={draft.seed} onChange={e => edit({ ...draft, seed: Number(e.target.value) })} /></label>
+          <label>측정 시작 <Hint label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발과 구분합니다." range="시작 < 종료 · 최대30일 · 1970~2100년" /><input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
+          <label>측정 종료 <Hint label="측정 종료" text="데이터를 관측할 끝 시각입니다. 늦출수록 관측량이 늘어납니다." range="계획 최대30일 · 개별 일정 실행 최대1시간·10,000메시지" /><input type="datetime-local" step="1" value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
+          <label>일정 방식 <Hint label="일정 방식" text="직접 지정은 운행 시각을 입력하고, 자동 일정은 요일과 시간대로 배정합니다." range="최대100대 · 차량당1,000운행 · 직접 지정 전체10,000운행" /><select value={draft.mode} onChange={e => { const mode = e.target.value as Schedule["mode"]; edit({ ...draft, mode, vehicles: draft.vehicles.map(v => mode === "manual" ? { vehicle_id: v.vehicle_id, trips: [] } : { vehicle_id: v.vehicle_id, pattern: pattern(), overrides: {} }) }); }}><option value="manual">직접 지정</option><option value="patterned">자동 일정 · 개발 예시</option></select></label>
+          <label>Microtrip 주기 (초) <Hint label="Microtrip 주기" text="운행 중 메시지 생성 간격입니다. 짧을수록 메시지가 많아집니다." range="0.1~86,400초" /><input type="number" min="0.1" max="86400" step="0.1" value={draft.interval_ms / 1000} onChange={e => edit({ ...draft, interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
+          <label>seed <Hint label="seed" text="무작위 배정의 기준값입니다. 같은 버전·조건·seed는 같은 결과를 만듭니다." range="-2,147,483,648~2,147,483,647 · 정수" /><input type="number" value={draft.seed} onChange={e => edit({ ...draft, seed: Number(e.target.value) })} /></label>
         </div>
         <p className="note">방식을 바꾸면 차량 명부를 유지하고 운행 설정을 초기화합니다. 직접 지정의 운행 목록이 비어 있으면 해당 차량은 미운행입니다.</p>
         <div className="schedule-actions">
@@ -258,12 +258,12 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
           <button disabled={draft.vehicles.length <= 1} onClick={() => { edit({ ...draft, vehicles: draft.vehicles.filter((_, i) => i !== editor) }); setEditor(0); }}>선택 차량 제거</button>
         </div>
         {draft.mode === "manual" ? <>
-          <p className="note">{current.vehicle_id} · 운행 사이 최소 주차 30분 <Hint text="시동을 끄고 별도 운행을 시작할 때의 최소 간격입니다. 신호 대기나 정체 중 정차는 같은 운행에 포함됩니다." /> · 종료 시각에는 Trip만 생성합니다.</p>
+          <p className="note">{current.vehicle_id} · 운행 사이 최소 주차 30분 <Hint text="시동을 끈 뒤 다음 운행까지의 간격입니다. 신호 대기는 같은 운행입니다." /> · 종료 시각에는 Trip만 생성합니다.</p>
           {!current.trips?.length && <p className="schedule-empty">설정한 운행이 없습니다. 이 차량은 미운행입니다.</p>}
           {current.trips?.map((t, i) => <div className="schedule-trip-edit" key={i}>
             <b>운행 {i + 1}</b>
-            <label>출발<input type="datetime-local" step="1" value={local(t.start)} onChange={e => patchTrip(i, { start: iso(e.target.value) })} /></label>
-            <label>종료<input type="datetime-local" step="1" value={local(t.end)} onChange={e => patchTrip(i, { end: iso(e.target.value) })} /></label>
+            <label>출발 <Hint label="출발" text="이 운행의 시동을 켜는 시각입니다. 이전 운행 뒤 주차 간격을 둡니다." range="운행 최대24시간 · 운행 사이 주차 최소30분" /><input type="datetime-local" step="1" value={local(t.start)} onChange={e => patchTrip(i, { start: iso(e.target.value) })} /></label>
+            <label>종료 <Hint label="종료" text="이 운행이 끝나는 시각입니다. 이때 종료 Trip을 만듭니다." range="출발 < 종료 · 운행 최대24시간" /><input type="datetime-local" step="1" value={local(t.end)} onChange={e => patchTrip(i, { end: iso(e.target.value) })} /></label>
             <RoadSelect value={t.road_profile} onChange={road_profile => patchTrip(i, { road_profile })} />
             <button onClick={() => editVehicle({ ...current, trips: current.trips!.filter((_, n) => n !== i) })}>운행 {i + 1} 제거</button>
           </div>)}
@@ -272,14 +272,14 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
           <p className="note">자동 일정의 시간·확률·편차는 개발 예시입니다. 한국 운전자 대표 통계로 보정한 값은 아닙니다.</p>
           <div className="schedule-weekdays" role="group" aria-label="운행 요일">{["월", "화", "수", "목", "금", "토", "일"].map((title, i) => <label key={title}><input type="checkbox" checked={current.pattern!.weekdays.includes(i + 1)} onChange={e => patchPattern({ weekdays: e.target.checked ? [...current.pattern!.weekdays, i + 1].sort() : current.pattern!.weekdays.filter(n => n !== i + 1) })} />{title}</label>)}</div>
           <div className="fields">
-            <label>하루 미운행 확률 (%) <Hint text="선택 요일에도 이 확률로 하루 운행을 쉬도록 계획합니다. 실제 통계가 아닌 설정값이며 날짜 예외가 있으면 예외가 우선합니다." /><input type="number" min="0" max="100" value={current.pattern!.day_off_probability * 100} onChange={e => patchPattern({ day_off_probability: Number(e.target.value) / 100 })} /></label>
-            <label>차량별 고정 출발 편차 (±분) <Hint text="차량별로 한 번 정해져 여러 날짜에 유지되는 출발 시각 차이입니다. 아래의 날짜별 편차와 함께 적용됩니다." /><input type="number" min="0" max="120" value={current.pattern!.baseline_jitter_minutes} onChange={e => patchPattern({ baseline_jitter_minutes: Number(e.target.value) })} /></label>
+            <label>하루 미운행 확률 (%) <Hint label="하루 미운행 확률" text="운행 요일에도 하루를 쉬는 확률입니다. 높이면 운행 없는 날이 늘어납니다." range="0~100%" /><input type="number" min="0" max="100" value={current.pattern!.day_off_probability * 100} onChange={e => patchPattern({ day_off_probability: Number(e.target.value) / 100 })} /></label>
+            <label>차량별 고정 출발 편차 (±분) <Hint label="차량별 고정 출발 편차" text="차량마다 출발 시각을 다르게 배정합니다. 정해진 차이는 여러 날 유지됩니다." range="편차 크기0~120분" /><input type="number" min="0" max="120" value={current.pattern!.baseline_jitter_minutes} onChange={e => patchPattern({ baseline_jitter_minutes: Number(e.target.value) })} /></label>
           </div>
           {current.pattern!.slots.map((s, i) => <div className="schedule-slot" key={i}>
-            <label>기준 출발<input type="time" value={s.start_time} onChange={e => patchSlot(i, { start_time: e.target.value })} /></label>
-            <label>최소 운행 (분)<input type="number" min="1" max="1440" value={s.duration_min_minutes} onChange={e => patchSlot(i, { duration_min_minutes: Number(e.target.value) })} /></label>
-            <label>최대 운행 (분)<input type="number" min="1" max="1440" value={s.duration_max_minutes} onChange={e => patchSlot(i, { duration_max_minutes: Number(e.target.value) })} /></label>
-            <label>날짜별 출발 편차 (±분)<input type="number" min="0" max="120" value={s.departure_jitter_minutes} onChange={e => patchSlot(i, { departure_jitter_minutes: Number(e.target.value) })} /></label>
+            <label>기준 출발 <Hint label="기준 출발" text="이 시간대의 기본 출발 시각입니다. 설정한 편차가 여기에 더해집니다." range="00:00~23:59 · 차량당 최대16시간대" /><input type="time" value={s.start_time} onChange={e => patchSlot(i, { start_time: e.target.value })} /></label>
+            <label>최소 운행 (분) <Hint label="최소 운행" text="한 번의 운행 시간 하한입니다. 최대 운행 시간 이하로 정합니다." range="1~1,440분/회" /><input type="number" min="1" max="1440" value={s.duration_min_minutes} onChange={e => patchSlot(i, { duration_min_minutes: Number(e.target.value) })} /></label>
+            <label>최대 운행 (분) <Hint label="최대 운행" text="한 번의 운행 시간 상한입니다. 최소 운행 시간 이상으로 정합니다." range="1~1,440분/회" /><input type="number" min="1" max="1440" value={s.duration_max_minutes} onChange={e => patchSlot(i, { duration_max_minutes: Number(e.target.value) })} /></label>
+            <label>날짜별 출발 편차 (±분) <Hint label="날짜별 출발 편차" text="같은 차량의 출발 시각을 날짜마다 앞뒤로 바꿉니다." range="편차 크기0~120분" /><input type="number" min="0" max="120" value={s.departure_jitter_minutes} onChange={e => patchSlot(i, { departure_jitter_minutes: Number(e.target.value) })} /></label>
             <RoadSelect value={s.road_profile} onChange={road_profile => patchSlot(i, { road_profile })} /><button onClick={() => patchPattern({ slots: current.pattern!.slots.filter((_, n) => n !== i) })}>시간대 {i + 1} 제거</button>
           </div>)}
           <button disabled={current.pattern!.slots.length >= 16} onClick={() => patchPattern({ slots: [...current.pattern!.slots, { start_time: "12:00", duration_min_minutes: 30, duration_max_minutes: 30, departure_jitter_minutes: 0, road_profile: "urban" }] })}>운행 시간대 추가</button>
@@ -313,7 +313,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         {plan.vehicles.find(v => v.vehicle_id === vehicle)?.pattern && <p className="note">배정 패턴: {({commute:"출퇴근형",daytime:"주간 운행형",flexible:"비정기형"} as Record<string,string>)[plan.vehicles.find(v => v.vehicle_id === vehicle)!.pattern!]} · 이상 이벤트 {plan.vehicles.find(v => v.vehicle_id === vehicle)?.anomaly_eligible ? "대상" : "비대상"} 차량</p>}
         <p>{roads[trip.road_profile]} · 실제 운행 {clock(trip.start_ms)} → {clock(trip.end_ms)} · <b>총주행시간 {duration(trip.end_ms-trip.start_ms)}</b></p>
         <p className="note">관측 범위 {clock(trip.observed_start_ms)} → {clock(trip.observed_end_ms)} · 관측 시간 {duration(trip.observed_end_ms-trip.observed_start_ms)}{trip.started_before_window && " · 측정 시작 전 출발"}{trip.continues_after_window && " · 측정 종료 후에도 운행 중"}</p>
-        <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>
+        <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="측정 끝에도 운행 중인 차량의 시험용 요약을 만듭니다. 실제 운행 종료를 뜻하지 않습니다." /></label>
         {!trip.continues_after_window && <p className="note">선택 운행은 측정 기간 안에 정상 종료하므로 시험용 Trip 옵션이 비활성화됩니다.</p>}
         <EventFinder key={[record?.key,draftToken,vehicle,tripKey,force].join(":")} vehicle={vehicle} path={"/api/"+(frozenFleet?"fleets":"schedules")+"/obd/"+vehicle+"/"+tripKey} body={{...(frozenFleet?{fleet:frozenFleet}:{schedule:frozen}),force_end_trip:force}} disabled={!!busy} renderMessages={renderMessages} onSelect={ts=>{setEventTime(ts);void query(Math.max(trip.observed_start_ms,ts-30000),Math.min(trip.observed_end_ms,ts+30000));}} />
         <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>{summary ? "OBD 상세 다시 조회" : "OBD 상세 조회"}</button>

@@ -1,3 +1,4 @@
+import {InfoHint} from "./InfoHint";
 import { useEffect, useRef, useState } from "react";
 import { SpeedChart } from "./TelemetryChart";
 import { readJSONResponse } from "./http";
@@ -473,7 +474,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                     </label>
                     <label htmlFor="setting-5">
                       <span className="label-line">
-                        Client 수 <Info name="Client 수" />
+                        Client 수 <Info name="Client 수" range={"풀1~"+config.vehicle_count.toLocaleString()+"개 · 실제 MQTT는 서버 상한과20개 중 작은 값"} />
                       </span>
                       <input
                         id="setting-5"
@@ -521,7 +522,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                       <>
                         <label>
                           동시 처리 Client 수{" "}
-                          <Info name="동시 처리 Client 수" />
+                          <Info name="동시 처리 Client 수" range={"1~"+Math.min(config.client_count,100)+"개 · 순차 전송은1개"} />
                           <input
                             aria-label="동시 처리 Client 수"
                             type="number"
@@ -550,7 +551,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                     )}
                     <label htmlFor="setting-7">
                       <span className="label-line">
-                        차량당 생성 건수 <Info name="차량당 생성 건수" />
+                        차량당 생성 건수 <Info name="차량당 생성 건수" range={mode==="automatic"?"자동 계산 · 전체10,000메시지 이하":"1~"+Math.floor(10000/config.vehicle_count).toLocaleString()+"건/차량"} />
                       </span>
                       <input
                         id="setting-7"
@@ -573,7 +574,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                     </label>
                     <label htmlFor="setting-8">
                       <span className="label-line">
-                        생성 주기 (밀리초) <Info name="생성 주기 (밀리초)" />
+                        생성 주기 (밀리초) <Info name="생성 주기 (밀리초)" range={mode==="automatic"?"100ms 이상 · 운행 시간을 나누어 떨어지는10구간 이상":"1~86,400,000ms"} />
                       </span>
                       <input
                         id="setting-8"
@@ -741,7 +742,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                           </label>
                         )}
                         <label>
-                          이상 대상 차량 비율 (%)
+                          이상 대상 차량 비율 (%) <InfoHint label="이상 대상 차량 비율" text="급기동이 발생할 수 있는 차량 비율입니다. 실제 발생은 보장하지 않으며 과속은 별도 판정합니다." range="0~100%" />
                           <input
                             type="number"
                             min={0}
@@ -823,7 +824,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                           ] as const
                         ).map(([key, label, min, max]) => (
                           <label key={key}>
-                            {label}
+                            {label} <InfoHint label={label} text={key==="seed"?"무작위 주행의 기준값입니다. 같은 버전·조건·seed로 재현합니다.":key==="duration_seconds"?"한 번의 운행 길이입니다. 늘리면 운행 시간과 메시지가 늘어납니다.":key==="initial_odometer_m"?"출발 전 차량의 총주행거리입니다. 여기에 새 운행 거리가 더해집니다.":"운행을 시작할 위치·시각입니다. 생성 데이터의 기준을 바꿉니다."} range={key==="start_time_ms"?"1970~2100년 · UTC 밀리초":min.toLocaleString("ko-KR")+"~"+max.toLocaleString("ko-KR")+(key==="duration_seconds"?"초":key==="initial_odometer_m"?"m":key==="seed"?" · 정수":"°")} />
                             <input
                               type="number"
                               step={
@@ -1318,92 +1319,48 @@ export function DrivingResult({
   );
 }
 
-const explanations: Record<string, string> = {
-  "데이터 생성 방식":
-    "수동 입력은 입력 JSON을 차량별로 복제합니다. 자동 주행 생성은 운행 설정과 seed로 Microtrip과 종료 Trip을 만듭니다.",
-  "실행 시간":
-    "실제 시간은 설정한 주기에 맞춰 기다립니다. 가상시간은 송신 없이 데이터 시각만 증가시켜 즉시 생성합니다.",
-  "전송 방식":
-    "송신 없는 확인은 MQTT에 연결하지 않습니다. 실제 MQTT는 서버 접속 설정과 별도 송신 확인이 필요합니다.",
-  "차량 수":
-    "생성할 가상 차량의 수입니다. 차량 수와 MQTT 연결 수는 별개의 설정입니다.",
-  "연결 방식":
-    "연결 풀은 여러 차량이 Client를 공유합니다. 차량별 전체 연결은 차량마다 Client 한 개를 배정합니다. 실행 중 배정은 고정됩니다.",
-  "Client 수":
-    "MQTT 연결에 사용할 Client ID 개수입니다. 풀에서는 차량 수 이하, 차량별 연결에서는 차량 수와 같습니다. 실제 동시 연결 수와는 다를 수 있습니다.",
-  "연결 유지 정책":
-    "기간 내내 유지는 실행 시작부터 종료까지 연결합니다. 운행 중 유지는 첫 메시지부터 마지막 메시지 응답까지 유지합니다. 일시중지 중에도 기존 연결을 유지합니다.",
-  "차량당 생성 건수":
-    "수동 모드에서 차량마다 만들 메시지 수입니다. 자동 모드에서는 시작·종료 Microtrip과 종료 Trip을 포함해 자동 계산합니다.",
-  "생성 주기 (밀리초)":
-    "차량별 메시지 생성 간격입니다. 2,000ms는 2초입니다. 실제 발행 속도 제한이나 응답 지연 때문에 전송 간격은 길어질 수 있습니다.",
-  "이상 주행 빈도":
-    "v6는 대상 차량당 운행 1시간의 평균 발생 기회입니다. 시점은 무작위이며 정차·부적합 상황·직전 사건 종료 후 30초 회복 중의 기회는 버립니다. 실제 발생 횟수를 보장하지 않습니다. v2~v5는 이전 구간별 추첨 방식입니다.",
-  "전송 처리 방식":
-    "실제 MQTT 전송에 적용합니다. 순차 전송은 전체에서 하나씩 응답을 기다립니다. Client별 동시 전송은 서로 다른 Client를 제한된 수만큼 함께 처리하며 같은 Client의 메시지는 순서를 지킵니다. 연결 수·배정은 바뀌지 않습니다.",
-  "동시 처리 Client 수":
-    "전체에서 동시에 발행 응답을 기다릴 Client의 상한입니다. Client당 진행 중 메시지는1건이며 설정은 실행 중 고정됩니다. 전체 발행 속도 상한도 유지합니다. 응답 미확인 발생 시 신규 발행을 멈추고 진행 중 결과를 집계한 뒤 종료합니다.",
-  "대기 메시지 상한":
-    "메모리에 보관할 생성됐지만 아직 발행하지 않은 메시지 수의 전체 상한입니다. 가득 차면 생성을 늦추며 임의로 버리거나 무한히 쌓지 않습니다. 중단/실패 시 대기 중 메시지는 발행하지 않고 대기 취소로 집계합니다. 이미 발행한 미확인 메시지는 별도 집계합니다.",
-  "전송 성능":
-    "생성·검사는 메시지 생성·검사·직렬화 시간입니다. 예정 시각 대비 지연은 일시중지를 제외하고 발행 직전까지 걸린 지연입니다. 접속과 PUBACK 대기는 실패·시간초과도 포함합니다. P95 상한은 1µs 단위 2배 간격 버킷으로 추정한 95백분위 상한입니다. 정확한 P95가 아니며 전체 메시지 시간을 저장하지 않습니다. CPU/RSS는 별도 측정 보고서의 Worker 프로세스 관측값입니다.",
-  "이상 주행 강도":
-    "v6의 가감속·회전 강도를 낮음/보통/높음으로 선택합니다. 강우와 차량 출력으로 완화되거나, 실제 가속도·횡가속도가 개발 기준에 못 미치면 이상 이벤트로 표시되지 않을 수 있습니다. 실차 통계나 법정 위험운전 판정 기준은 아닙니다.",
-  "엔진 시작 상태":
-    "v5/v6 개발 모형의 초기 냉각수 온도를 냉간20℃ 또는 온간85℃로 설정합니다. 냉간에서는 공회전·연료를 보정하고, 연료 차단은 온도·회전수·요구 동력 조건을 함께 봅니다. 실제 차량/외기 온도를 조회한 값은 아닙니다.",
-  "날씨 조건":
-    "v4/v5/v6의 실행 전체에 적용할 가상 날씨입니다. 강우·젖은 노면은 도로 기본 속도 상한의 80%를 제어 상한으로 쓰고 가감속도 완화합니다. 실제 기상 조회, 폭우·결빙·가변 속도표지는 포함하지 않습니다.",
-  "운행 프로필":
-    "v5는 기어·RPM·부하·연료의 연관성을 추가한 가솔린 근사입니다. v4/v5/v6는 도심 기본 속도와 선택한 가상 날씨를 적용하고, 합성 경로의 연결 순서와 구간 지속시간·교통 상태를 유지합니다. 고속 중심은 900초 이상에서 진출입로를 거칩니다. 실제 지도·실차 보정은 없으며 v3/v2/v1 기록은 기존 모델로 재생성합니다.",
-  "생성 확인":
-    "Worker가 생성한 메시지 수입니다. 실제 MQTT에 전달됐거나 저장됐다는 뜻은 아닙니다.",
-  미생성:
-    "전체 계획 중 아직 생성하지 않은 메시지 수입니다. 중단하면 이 수가 남을 수 있습니다.",
-  "발행 미시도":
-    "MQTT 계획 중 아직 Publish를 시도하지 않은 수입니다. 송신 없는 실행에서는 발행 대상 자체가 없어 0으로 표시합니다.",
-  "최대 주기 지연":
-    "예정 생성 시각에 비해 가장 늦었던 시간입니다. 일시중지 시간은 제외합니다. 목표 속도 달성률이나 네트워크 왕복시간과는 다릅니다.",
-  Microtrip:
-    "운행 중 주기적으로 생성하는 위치·속도·엔진 등의 상세 메시지입니다. 개발 규격 ty=4입니다.",
-  Trip: "운행 종료 시 같은 운행 데이터로 집계한 요약 메시지입니다. 개발 규격 ty=3이며 중단된 운행에는 새 종료 Trip을 만들지 않습니다.",
-  "배정 Client":
-    "실행 전에 고정 배정한 Client ID 수입니다. 실제 접속에 성공한 수와 구분합니다.",
-  "접속 확인 Client":
-    "한 번 이상 접속 성공을 확인한 고유 Client 수입니다. 현재 열려 있는 연결 수가 아닙니다.",
-  "현재 연결":
-    "Worker가 마지막으로 보고한 열려 있는 MQTT 연결 수입니다. 서버에서 직접 조회한 실시간 계정 전체 연결 수는 아닙니다.",
-  "최종 보고 연결":
-    "마지막 Worker 보고의 연결 수입니다. 강제 종료·연결 정리 미확인 상태라면 확정된 최종 값으로 해석하지 않습니다.",
-  "발행 시도":
-    "MQTT Publish 요청을 시도한 메시지 수입니다. PUBACK를 받지 못한 요청도 포함합니다.",
-  "응답 미확인":
-    "발행을 시도했지만 PUBACK를 확인하지 못한 수입니다. 실제 브로커에 도착했을 수 있어 자동 재발행하지 않습니다.",
-  "재연결 시도":
-    "이전에 접속한 Client ID로 다시 접속을 시도한 횟수입니다. 성공 횟수와는 다릅니다.",
-  "MQTT 발행":
-    "현재 QoS 1 구현에서 PUBACK까지 확인한 발행 건수입니다. 발행 시도 수와 구분하며 PUBACK 지표와 같은 기준입니다.",
-  PUBACK:
-    "QoS 1 발행에 대한 MQTT 브로커의 수신 확인 응답입니다. 후속 DB·S3 저장이나 파이프라인 처리 완료를 보장하지 않습니다.",
-  "생성 JSON 크기":
-    "생성한 JSON 본문 크기의 합계입니다. MQTT·TLS·네트워크 헤더와 실제 AWS 과금 단위는 포함하지 않습니다.",
+const explanations: Record<string,string> = {
+  "데이터 생성 방식": "수동은 입력 JSON을 복제하고, 자동은 주행 조건으로 Microtrip과 Trip을 만듭니다.",
+  "실행 시간": "실제 시간은 주기를 기다립니다. 가상시간은 기다리지 않고 생성하며 외부 송신은 하지 않습니다.",
+  "전송 방식": "생성만 확인하거나 실제 MQTT로 보냅니다. 실제 송신은 서버 설정과 확인이 필요합니다.",
+  "차량 수": "데이터를 만들 가상 차량 수입니다. 늘리면 생성량과 처리 부하가 커집니다.",
+  "연결 방식": "연결 풀은 여러 차량이 연결을 공유합니다. 차량별 연결은 차량마다 한 연결을 배정합니다.",
+  "Client 수": "연결 풀에서 사용할 연결 개수입니다. 늘리면 연결별 부담은 줄고 접속 부담은 늘어납니다.",
+  "연결 유지 정책": "기간 내내 연결하거나 운행 중에만 연결합니다. 운행 중만 유지하면 주차 중 접속 시간이 줄어듭니다.",
+  "차량당 생성 건수": "수동 모드의 차량별 메시지 수입니다. 자동 모드에서는 운행 시간과 주기로 계산합니다.",
+  "생성 주기 (밀리초)": "메시지 생성 간격입니다. 짧을수록 생성량이 늘어납니다. 2,000ms는2초입니다.",
+  "이상 주행 빈도": "급기동 발생 기회 수입니다. 높일수록 자주 시도하지만 도로 조건에 따라 실제 횟수는 달라집니다.",
+  "전송 처리 방식": "순차는 한 건씩 응답을 기다립니다. 동시는 서로 다른 Client의 메시지를 함께 보냅니다.",
+  "동시 처리 Client 수": "동시에 발행 응답을 기다릴 Client 수입니다. 늘리면 병행 처리량이 커질 수 있습니다.",
+  "대기 메시지 상한": "발행 전 메시지를 보관할 최대 개수입니다. 가득 차면 다음 생성을 기다립니다.",
+  "전송 성능": "생성·접속·발행 지연을 구분해 표시합니다. P95/P99 상한은 구간별 추정값입니다.",
+  "이상 주행 강도": "급기동의 가감속·회전을 강하게 만듭니다. 발생 빈도는 별도로 설정합니다.",
+  "엔진 시작 상태": "냉간은 식은 엔진, 온간은 데워진 엔진으로 시작합니다. 초기 RPM·연료·냉각수에 영향을 줍니다.",
+  "날씨 조건": "가상 노면 상태입니다. 강우를 선택하면 주행 속도와 가감속을 완화합니다.",
+  "운행 프로필": "주행할 도로 성격입니다. 바꾸면 속도·정차·회전 패턴이 달라집니다.",
+  "생성 확인": "실제로 생성한 메시지 수입니다. 전송 성공 건수와는 다릅니다.",
+  "미생성": "계획했지만 아직 만들지 않은 메시지 수입니다.",
+  "발행 미시도": "아직 MQTT 발행을 시도하지 않은 메시지 수입니다. 송신 없는 실행에서는0입니다.",
+  "최대 주기 지연": "메시지 생성이 예정 시각보다 가장 늦어진 시간입니다. 일시중지는 제외합니다.",
+  "Microtrip": "운행 중 주기적으로 만드는 위치·속도·엔진 메시지입니다.",
+  "Trip": "운행이 종료될 때 만드는 운행 전체 요약입니다.",
+  "배정 Client": "실행 전에 배정한 Client ID 수입니다. 실제 연결 성공 수와 구분합니다.",
+  "접속 확인 Client": "한 번 이상 접속에 성공한 Client 수입니다. 현재 연결 수는 아닙니다.",
+  "현재 연결": "Worker가 마지막으로 보고한 열려 있는 연결 수입니다.",
+  "최종 보고 연결": "Worker가 마지막으로 보고한 연결 수입니다. 정리 미확인 시 최종 상태로 확정할 수 없습니다.",
+  "발행 시도": "MQTT 발행을 요청한 건수입니다. 응답을 못 받은 요청도 포함합니다.",
+  "응답 미확인": "발행했지만 PUBACK을 확인하지 못한 건수입니다. 브로커에 도착했을 수 있습니다.",
+  "재연결 시도": "기존 Client ID로 다시 접속을 시도한 횟수입니다. 성공 횟수와 구분합니다.",
+  "MQTT 발행": "현재 QoS1에서 PUBACK까지 확인한 발행 건수입니다.",
+  "PUBACK": "브로커의 수신 확인입니다. 이후 DB·S3 저장 완료를 보장하지 않습니다.",
+  "생성 JSON 크기": "생성한 JSON 본문의 총 크기입니다. 통신 헤더와 AWS 과금 단위는 제외합니다."
 };
-export function Info({ name }: { name: string }) {
-  return (
-    <span className="hint">
-      <button
-        type="button"
-        className="info-button"
-        aria-label={name + " 도움말"}
-        onClick={(e) => e.preventDefault()}
-      >
-        i
-      </button>
-      <span role="tooltip" className="hint-content">
-        {explanations[name] || name}
-      </span>
-    </span>
-  );
+
+export function Info({name,range}:{name:string;range?:string}) {
+  const bounds:Record<string,string>={"차량 수":"1~10,000대 · 전체 합계10,000메시지 이하","대기 메시지 상한":"1~1,000건","이상 주행 빈도":"0~60회/운행 1시간"};
+  return <InfoHint label={name} text={explanations[name]||name} range={range??bounds[name]} />;
 }
+
 export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample[];catalog:Catalog;localOnly?:boolean}) {
   const [table,setTable]=useState(true);
   const [picked,setPicked]=useState(0);

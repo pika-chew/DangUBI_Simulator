@@ -622,3 +622,5 @@ footer {
 
 .timeline-ticks span:first-child::before { left:0; }
 .timeline-ticks span:last-child::before { left:100%; }
+
+.hint .hint-range { display:block;margin-top:6px;padding-top:6px;border-top:1px solid currentColor;font-weight:600; }
