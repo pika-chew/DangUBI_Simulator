@@ -28,6 +28,8 @@ type scheduledCache struct {
 }
 
 func scheduleKey(s ScheduledInput) ScheduledInput {
+	s.SearchEvents = false
+	s.EventMask = 0
 	s.FromMS = 0
 	s.UntilMS = 0
 	s.Offset = 0

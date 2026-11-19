@@ -296,7 +296,7 @@ def health():
     except HTTPException:
         mqtt_ready = False
         limits = None
-    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "execution_profiles":PROFILES,"features":{"microtrip_em":True},"aws_connected": False, "active_job_id": JOBS.active_id()}
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "execution_profiles":PROFILES,"features":{"microtrip_em":True,"microtrip_event_search":True},"aws_connected": False, "active_job_id": JOBS.active_id()}
 
 
 @app.get("/api/schema")

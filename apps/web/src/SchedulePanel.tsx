@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Message, TracePoint } from "./SimulationTools";
+import { EventFinder } from "./EventFinder";
 import { SpeedChart } from "./TelemetryChart";
 import type {PlanRecord, PlanInput, View} from "./workspaceTypes";
 import { EMControl } from "./EMControl";
@@ -70,6 +71,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
   const [force, setForce] = useState(false);
+  const [eventTime,setEventTime]=useState<number|undefined>();
   const [restoration, setRestoration] = useState<Restoration | null>(null);
   const [cache, setCache] = useState<CacheStats | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
@@ -111,7 +113,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
   function edit(next: Schedule) { resetResults(); setDraft(next); }
   function editFleet(next: FleetConfig) { resetResults(); setFleet(next); }
   function editVehicle(next: Vehicle) { edit({ ...draft, vehicles: draft.vehicles.map((v, i) => i === editor ? next : v) }); }
-  function clearOBD() { setLoaded(null); setSummary(null); setError(""); }
+  function clearOBD() { setEventTime(undefined); setLoaded(null); setSummary(null); setError(""); }
   function chooseTrip(t?: Trip, load = false) {
     clearOBD(); setForce(false); setTripKey(t?.trip_key || "");
     setRangeStart(t ? kst(t.observed_start_ms) : ""); setRangeEnd(t ? kst(t.observed_end_ms) : "");
@@ -297,7 +299,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       {plan.anomaly_target_count !== undefined && <p>이상 이벤트 대상 {plan.anomaly_target_count}대 · 실제 발생 차량 수와 다를 수 있습니다.</p>}
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
       <div className="fields">
-        <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 운행 {trips.length}회 · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} · 운행 {v.observed_trip_count}회</option>)}</select></label>
+        <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 운행 {trips.length}회 · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} · 운행 {v.observed_trip_count}회{v.anomaly_eligible?" · 이상 이벤트 대상":""}</option>)}</select></label>
         {frozenFleet?.execution_profile==="operations"&&<label>차량 번호 직접 조회<input type="text" placeholder="v000001" maxLength={7} onKeyDown={e=>{if(e.key==="Enter"&&/^v[0-9]{6}$/.test(e.currentTarget.value))void selectVehicle(e.currentTarget.value);}}/><span className="note">목록은 처음100대입니다. 다른 차량은 번호를 입력한 뒤 Enter로 조회합니다. 선택 차량: {vehicle}</span></label>}
         <label>조회 운행<select disabled={!!busy || !trips.length} value={tripKey} onChange={e => chooseTrip(trips.find(t => t.trip_key === e.target.value), true)}>{!trips.length && <option value="">관측 운행 없음</option>}{trips.map((t, i) => <option key={t.trip_key} value={t.trip_key}>운행 {i + 1} · {clock(t.start_ms)} → {clock(t.end_ms)}</option>)}</select></label>
       </div>
@@ -309,6 +311,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         <p className="note">관측 범위 {clock(trip.observed_start_ms)} → {clock(trip.observed_end_ms)} · 관측 시간 {duration(trip.observed_end_ms-trip.observed_start_ms)}{trip.started_before_window && " · 측정 시작 전 출발"}{trip.continues_after_window && " · 측정 종료 후에도 운행 중"}</p>
         <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>
         {!trip.continues_after_window && <p className="note">선택 운행은 측정 기간 안에 정상 종료하므로 시험용 Trip 옵션이 비활성화됩니다.</p>}
+        <EventFinder key={[record?.key,draftToken,vehicle,tripKey,force].join(":")} vehicle={vehicle} path={"/api/"+(frozenFleet?"fleets":"schedules")+"/obd/"+vehicle+"/"+tripKey} body={{...(frozenFleet?{fleet:frozenFleet}:{schedule:frozen}),force_end_trip:force}} disabled={!!busy} renderMessages={renderMessages} onSelect={ts=>{setEventTime(ts);void query(Math.max(trip.observed_start_ms,ts-30000),Math.min(trip.observed_end_ms,ts+30000));}} />
         <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>{summary ? "선택 운행 다시 조회" : "선택 운행 OBD 생성·조회"}</button>
         <p className="note">운행 막대나 조회 운행을 선택하면 상세 데이터가 자동 조회됩니다. 먼저 가까운 중간 상태에서 이어 계산합니다. 처음 조회하는 먼 구간은 요청당 최대16회·48시간의 운행을 나누어 준비한 뒤 자동으로 조회합니다.</p>
         {restoration && <div className="schedule-status" role="status">
@@ -333,7 +336,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       <p className="note">그래프를 좌우로 드래그하면 그래프·상태표·Microtrip 표/JSON이 함께 바뀝니다. 그래프는 최대 120점 요약이며 Trip 계산은 내부 전체 운행 기준입니다. 짧은 변화는 구간을 좁혀 확인하세요.</p>
       {loaded && <>
         <p className="schedule-range">조회 완료 · {clock(loaded.start)} → {clock(loaded.end)} · Microtrip {loaded.data.microtrip_count.toLocaleString()}건</p>
-        <SpeedChart trace={loaded.data.trace} start={loaded.start} end={loaded.end} departure={trip.start_ms} disabled={!!busy} onRange={(a, b) => void query(a, b)} />
+        <SpeedChart marker={eventTime} trace={loaded.data.trace} start={loaded.start} end={loaded.end} departure={trip.start_ms} disabled={!!busy} onRange={(a, b) => void query(a, b)} />
         {!!loaded.data.trace.length && <details><summary>주행 상태표 · 최대 120점</summary><div className="table-scroll"><table className="schedule-trace"><thead><tr><th>시각 (KST)</th><th>속도 (km/h)</th><th>운행 누적거리 (km)</th><th>상태</th><th>도로·상황</th></tr></thead><tbody>{loaded.data.trace.map(p => <tr key={p.elapsed_seconds}><td>{clock(trip.start_ms + p.elapsed_seconds * 1000)}</td><td>{p.speed_kmh.toFixed(1)}</td><td>{(p.distance_m/1000).toFixed(3)}</td><td>{p.state}</td><td>{p.context?.road} · {p.context?.reason}</td></tr>)}</tbody></table></div></details>}
         <div className="schedule-actions"><b>Microtrip · {loaded.data.microtrip_count ? loaded.offset + 1 : 0}~{loaded.offset + loaded.data.messages.length} / {loaded.data.microtrip_count.toLocaleString()}건</b><button disabled={!!busy || loaded.offset === 0} onClick={() => void query(loaded.start, loaded.end, Math.max(0, loaded.offset - 100))}>이전 100건</button><button disabled={!!busy || !loaded.data.has_more} onClick={() => void query(loaded.start, loaded.end, loaded.offset + 100)}>다음 100건</button></div>
         <div className="interval-messages">{renderMessages(loaded.data.messages, vehicle, loaded.offset)}</div>

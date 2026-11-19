@@ -122,6 +122,10 @@ body { margin:0; }
 .studio .view-switch .note { margin:0 0 0 auto; }
 .studio .interval-messages { max-height:none;overflow:visible; }
 .studio .schedule-actions { gap:8px;margin:15px 0; }
+.studio .event-finder { border:1px solid var(--border);border-radius:6px;padding:16px;margin:18px 0;background:var(--well); }
+.studio .event-finder > .table-scroll { max-height:360px;overflow:auto; }
+.studio .event-finder progress { width:100%;height:8px; }
+.studio .event-finder h3 { margin:0 0 10px; }
 .studio .empty-state,.studio .schedule-empty { padding:26px;border:1px dashed var(--border);border-radius:6px;color:var(--muted);font-size:13px;line-height:1.8;background:var(--well); }
 .studio .empty-state.small { padding:14px;font-size:11px;margin:10px; }
 .studio .error,.studio .delete-review { color:var(--danger);background:color-mix(in srgb,var(--danger) 8%,var(--panel));border:1px solid color-mix(in srgb,var(--danger) 35%,var(--border));padding:12px;border-radius:5px;font-size:12px;line-height:1.8; }

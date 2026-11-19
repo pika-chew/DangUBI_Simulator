@@ -11,6 +11,8 @@ type EngineContinuity struct {
 	Heading     float64 `json:"heading_rad"`
 }
 type ScheduledInput struct {
+	SearchEvents         bool             `json:"search_events,omitempty"`
+	EventMask            int              `json:"event_mask,omitempty"`
 	IncludeEM            bool             `json:"include_em,omitempty"`
 	AnomalyEligible      bool             `json:"anomaly_eligible"`
 	AnomalyEventsPerHour float64          `json:"anomaly_events_per_hour"`
@@ -32,6 +34,7 @@ type ScheduledInput struct {
 	ForceEnd             bool             `json:"force_end"`
 }
 type ScheduledOutput struct {
+	EventSearch         *EventSearchPage `json:"event_search,omitempty"`
 	EventsUntilQueryEnd int              `json:"events_until_query_end"`
 	Model               string           `json:"model"`
 	MicroCount          int64            `json:"microtrip_count"`
@@ -57,7 +60,7 @@ func scheduledPage(input Request, cache *scheduledCache, executionOnly bool) (Re
 	}
 	span := s.EndMS - s.StartMS
 	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
-	if s.StartMS < 0 || s.EndMS > 4102444800000 || span < 1000 || span > 86400000 || span%1000 != 0 || s.IntervalMS < 100 || s.IntervalMS > 86400000 || s.FromMS < s.StartMS || s.UntilMS > s.EndMS || s.FromMS > s.UntilMS || s.Offset < 0 || s.Offset > 1000000 || s.Limit < 1 || s.Limit > 100 || s.TID < 1 || s.TID > 9007199254740991 || !finite(s.Lat) || !finite(s.Lon) || !finite(s.Odometer) || !finite(s.Continuity.Coolant) || !finite(s.Continuity.Heading) || math.Abs(s.Lat) > 85 || math.Abs(s.Lon) > 180 || s.Odometer < 0 || s.Odometer > 1e12 || s.Continuity.Coolant < -40 || s.Continuity.Coolant > 130 {
+	if s.EventMask < 0 || s.EventMask > 127 || s.StartMS < 0 || s.EndMS > 4102444800000 || span < 1000 || span > 86400000 || span%1000 != 0 || s.IntervalMS < 100 || s.IntervalMS > 86400000 || s.FromMS < s.StartMS || s.UntilMS > s.EndMS || s.FromMS > s.UntilMS || s.Offset < 0 || s.Offset > 1000000 || s.Limit < 1 || s.Limit > 100 || s.TID < 1 || s.TID > 9007199254740991 || !finite(s.Lat) || !finite(s.Lon) || !finite(s.Odometer) || !finite(s.Continuity.Coolant) || !finite(s.Continuity.Heading) || math.Abs(s.Lat) > 85 || math.Abs(s.Lon) > 180 || s.Odometer < 0 || s.Odometer > 1e12 || s.Continuity.Coolant < -40 || s.Continuity.Coolant > 130 {
 		return Result{}, errors.New("운행 시각·상태·페이지 범위를 확인하세요.")
 	}
 	if s.Profile != "urban" && s.Profile != "highway" && s.Profile != "congested" && s.Profile != "mixed" {
@@ -93,13 +96,16 @@ func scheduledPage(input Request, cache *scheduledCache, executionOnly bool) (Re
 		}
 	}
 	out := &ScheduledOutput{Model: "schedule-obd-4/journey-8-events-2", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
-	if !executionOnly {
+	if !executionOnly && !s.SearchEvents {
 		_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
 	}
-	for seq := first + int64(s.Offset); seq <= last && len(out.Messages) < s.Limit; seq++ {
+	if s.SearchEvents {
+		out.EventSearch = searchEventMessages(s, r, first, last, message)
+	}
+	for seq := first + int64(s.Offset); !s.SearchEvents && seq <= last && len(out.Messages) < s.Limit; seq++ {
 		out.Messages = append(out.Messages, message(int(seq)))
 	}
-	if !executionOnly {
+	if !executionOnly && !s.SearchEvents {
 		stride := max(int64(1), (last-first+120)/120)
 		for seq := first; seq <= last; seq += stride {
 			m := message(int(seq))

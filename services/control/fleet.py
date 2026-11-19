@@ -86,6 +86,8 @@ class FleetOBDRequest(Strict):
     fleet: FleetRequest
     checkpoint_epoch: int | None = Field(default=None, ge=0)
     force_end_trip: bool = False
+    search_events: bool = False
+    event_mask: int = Field(default=0, ge=0, le=127)
 
 
 def rng(req, *parts):
@@ -228,7 +230,7 @@ def obd(body, vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit, che
     else:
         raise ValueError("계획에 없는 운행입니다.")
     schedule = selected_schedule(body.fleet,[{"vehicle_id":vehicle_id,"trips":trips}])
-    output = generate(ScheduledOBDRequest(schedule=schedule, force_end_trip=body.force_end_trip, checkpoint_epoch=body.checkpoint_epoch), vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit,
+    output = generate(ScheduledOBDRequest(schedule=schedule, search_events=body.search_events, event_mask=body.event_mask, force_end_trip=body.force_end_trip, checkpoint_epoch=body.checkpoint_epoch), vehicle_id, trip_key, worker, start_ms, end_ms, offset, limit,
                       anomaly={"anomaly_eligible": fixed["anomaly_eligible"], "anomaly_events_per_hour": body.fleet.anomaly_events_per_hour, "anomaly_intensity": body.fleet.anomaly_intensity}, checkpoint_store=checkpoint_store, cache_context=body.fleet.model_dump(), session=session)
     output["vehicle_assignment"] = fixed
     output["fleet_version"] = body.fleet.fleet_version

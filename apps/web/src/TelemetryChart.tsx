@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import type { TracePoint } from "./SimulationTools";
 
-export function SpeedChart({ trace, start, end, departure, disabled, onRange, axis = "clock" }: { trace: TracePoint[]; start: number; end: number; departure: number; disabled: boolean; onRange: (a: number, b: number) => void; axis?: "clock" | "elapsed" }) {
+export function SpeedChart({ marker, trace, start, end, departure, disabled, onRange, axis = "clock" }: { marker?:number; trace: TracePoint[]; start: number; end: number; departure: number; disabled: boolean; onRange: (a: number, b: number) => void; axis?: "clock" | "elapsed" }) {
   const label = (ms: number, short=false) => axis === "elapsed" ? `${(ms / 1000).toFixed(1)}초` : new Date(ms).toLocaleString("ko-KR", {timeZone:"Asia/Seoul",...(short?{}:{month:"2-digit" as const,day:"2-digit" as const}),hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
   const anchor = useRef<number | null>(null);
   const [drag, setDrag] = useState<[number, number] | null>(null);
@@ -17,6 +17,7 @@ export function SpeedChart({ trace, start, end, departure, disabled, onRange, ax
     <path d="M60 30 V190 H940 M60 110 H940 M60 40 H940" fill="none" stroke="#c6d4de" />
     <polyline points={trace.map(p => `${60 + (departure + p.elapsed_seconds * 1000 - start) / span * 880},${190 - p.speed_kmh / max * 150}`).join(" ")} fill="none" stroke="#087c70" strokeWidth="3" />
     {trace.length === 1 && <circle cx={60 + (departure + trace[0].elapsed_seconds * 1000 - start) / span * 880} cy={190 - trace[0].speed_kmh / max * 150} r="4" fill="#087c70" />}
+    {marker!==undefined && marker>=start && marker<=end && <g><line x1={60+(marker-start)/span*880} x2={60+(marker-start)/span*880} y1="30" y2="190" stroke="#c15b16" strokeWidth="2" strokeDasharray="5 3"/><text x={Math.min(800,60+(marker-start)/span*880+5)} y="25">선택 이벤트</text></g>}
     {drag && <rect x={Math.min(...drag)} y="30" width={Math.abs(drag[1] - drag[0])} height="160" fill="#087c70" fillOpacity="0.18" pointerEvents="none" />}
     <text x="4" y="22">km/h</text><text x="10" y="46">{max.toFixed(0)}</text><text x="30" y="194">0</text>
     {[0,.25,.5,.75,1].map(fraction => <g key={fraction}>

@@ -22,6 +22,8 @@ class ScheduledOBDRequest(Strict):
     initial_odometer_m: float = Field(default=500000, ge=0, le=1e9)
     initial_coolant_c: float = Field(default=20, ge=-40, le=130)
     force_end_trip: bool = False
+    search_events: bool = False
+    event_mask: int = Field(default=0, ge=0, le=127)
 
 
 def key_for(vehicle, a, b, profile):
@@ -108,6 +110,8 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         selected=i==len(chain)-1
         key=key_for(vehicle_id,departure,arrival,road)
         payload={"start_ms":departure,"end_ms":arrival,"from_ms":low if selected else arrival,"until_ms":high if selected else arrival,"interval_ms":req.interval_ms,"include_em":req.include_em,"offset":offset if selected else 0,"limit":limit if selected else 1,"tid":int(key[:12],16),"seed":int(hashlib.sha256(f"{req.seed}|{key}".encode()).hexdigest()[:7],16),"profile":road,**state,"continuity":{"vehicle_seed":vehicle_seed,"coolant_c":coolant,"heading_rad":heading},"force_end":body.force_end_trip if selected else False}
+        if selected and body.search_events:
+            payload.update(search_events=True, event_mask=body.event_mask)
         if anomaly:
             payload.update(anomaly)
         remaining=deadline-time.monotonic()
@@ -133,4 +137,4 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
             checkpoint_store.put(scope,i,arrival,dict(state,coolant_c=coolant,heading_rad=heading),epoch)
         if selected: selected_initial=initial
         if record:record("checkpoint_update_ms",(time.perf_counter()-before)*1000)
-    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"model":output["model"],"events_until_query_end":output.get("events_until_query_end",0),"initial_state":selected_initial,"messages":output["messages"],"trace":output.get("trace",[]),"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}
+    return {"status":"generated_local_only","vehicle_id":vehicle_id,"trip_key":trip_key,"event_search":output.get("event_search"),"model":output["model"],"events_until_query_end":output.get("events_until_query_end",0),"initial_state":selected_initial,"messages":output["messages"],"trace":output.get("trace",[]),"microtrip_count":output["microtrip_count"],"has_more":offset+len(output["messages"])<output["microtrip_count"],"trip":output.get("trip"),"synthetic_trip":output["synthetic_trip"],"trip_scope":"측정 끝까지 잘린 시험 요약" if output["synthetic_trip"] else "실제 운행 전체 요약", "warnings":["로컬 생성·조회이며 MQTT 발행·전체 메시지 저장은 없습니다. 차량 종료 상태만 제한된 로컬 캐시에 보관할 수 있습니다.","첫 계획 운행부터 상태를 복원합니다. 자동 일정은 관측 기간의 앞뒤 문맥을 초기 기준으로 사용합니다.","연속성은 현재 일정 요청 기준입니다. 측정 기간 자체를 바꾸면 초기 문맥이 바뀔 수 있습니다.","공유 교통·목적지 길찾기·실차 냉각 보정은 아직 적용하지 않았습니다."]}
