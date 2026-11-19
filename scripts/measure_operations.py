@@ -32,6 +32,11 @@ def feasibility(case):
                 connection_admission_floor_seconds=case["clients"]/1000,
                 note="설정 상한만 고려한 산술 하한입니다. 실제 처리량·AWS 할당량을 보장하지 않습니다.")
 
+def compact_assignments(pool):
+    if pool and "assignments" in pool:
+        shown=pool.pop("assignments")
+        pool.setdefault("assignment_count",len(shown))
+
 @contextmanager
 def peak_schedule(case):
     from services.control import fleet,fleet_execution
@@ -142,7 +147,7 @@ def child(case,folder):
             and broker_report.get("fingerprint")==fingerprint and broker_report.get("out_of_order")==0 and broker_report.get("invalid_messages")==0
             and result.get("connection_cleanup_confirmed") and result.get("execution_cleanup_confirmed"))
         mqtt_verified=complete and observed_consistent
-        keys=["job_state","planned_messages","processed_messages","remaining_messages","puback_count","publish_attempts","unconfirmed_messages","errors",
+        keys=["job_state","planned_messages","processed_messages","remaining_messages","unsent_messages","mqtt_published","puback_count","publish_attempts","unconfirmed_messages","errors",
               "payload_bytes","microtrip_count","trip_count","peak_active_clients","connected_clients","connection_count","disconnect_count",
               "generation_pool","generation_session","execution_timing","transmission","performance","transmission_goal","buffer_budget",
               "connection_cleanup_confirmed","execution_cleanup_confirmed","execution_timing","schedule_delay_ms","simulation_time_ms"]
@@ -150,6 +155,7 @@ def child(case,folder):
             environment=dict(platform=sys.platform,python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest()),
             feasibility=feasibility(case),plan_preparation_seconds=prepare_seconds,execution_seconds=elapsed,
             observed_messages_per_second=result["processed_messages"]/max(elapsed,.001),stop_reason=reason,
+            puback_messages_per_second=result["puback_count"]/max(elapsed,.001) if broker else None,
             completed_within_budget=complete,broker_integrity_verified=mqtt_verified if broker else None,
             observed_delivery_consistent=observed_consistent if broker else None,
             validated_messages=validated,validation_seconds=validation_seconds,validated_fingerprint=fingerprint if broker else None,
@@ -157,8 +163,7 @@ def child(case,folder):
         report["resources"]["scope"]="제어기와 생성/송신 프로세스의 표본 RSS 합계·CPU. 시험 브로커·Docker 엔진·호스트 전체 사용량은 제외."
         report["measurement_overhead"]="250ms마다 실행 조회·RSS 표본을 수집합니다. MQTT는 스키마 검증·본문 지문 계산을 포함하며 dry_run과 비용이 다릅니다."
         pool=report["result"].get("generation_pool")
-        if pool and "assignments" in pool:
-            pool["assignment_count"]=len(pool.pop("assignments"))
+        compact_assignments(pool)
         (folder/"result.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
     finally:
         if sampler:sampler.finish(max(.001,time.monotonic()-sampler.started))

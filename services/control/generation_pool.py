@@ -43,7 +43,7 @@ class GenerationPool:
     @property
     def stats(self):
         rows=[s.stats.copy() for s in self.sessions]
-        keys=["process_starts","page_requests","plan_builds","cache_hits","cache_evictions","cache_entries","cache_estimated_bytes","cache_max_entries","cache_max_estimated_bytes","peak_cache_estimated_bytes","peak_heap_alloc_bytes",
+        keys=["process_starts","page_requests","batch_requests","plan_builds","cache_hits","cache_evictions","cache_entries","cache_estimated_bytes","cache_max_entries","cache_max_estimated_bytes","peak_cache_estimated_bytes","peak_heap_alloc_bytes",
               "page_roundtrip_ms","request_write_ms","response_wait_ms","response_decode_ms","worker_identity_ms","worker_compute_ms","worker_serialize_ms","worker_stats_ms",
               "prepared_trip_hits","prepared_trip_misses","schedule_context_ms","checkpoint_restore_ms","request_payload_ms","checkpoint_update_ms"]
         timing=dict(generation_task_ms=sum(self.work_ms))

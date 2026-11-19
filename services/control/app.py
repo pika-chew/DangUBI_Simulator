@@ -603,6 +603,7 @@ def workspace_execute(body: ScheduleExecutionRequest):
             return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
         return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"execution_profile":mode,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":stream.generate if stream else generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
+    if stream:data["generate_batch"]=stream.generate_many
     if profile:data["mqtt"]=profile
     if mode=="operations":
         data.update(transmission_queue_messages=min(4096,max(100,clients*2)),transmission_queue_bytes=8388608,stop_grace_seconds=15)

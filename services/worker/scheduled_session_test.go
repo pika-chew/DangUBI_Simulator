@@ -14,6 +14,79 @@ func sessionInput(seconds int64) ScheduledInput {
 	s.UntilMS = s.EndMS
 	return s
 }
+
+func TestScheduleBatchMatchesPagesAndRejectsInvalidBudgets(t *testing.T) {
+	for _, count := range []int{0, 1, 32, 33} {
+		pages := make([]ScheduledInput, count)
+		for i := range pages {
+			pages[i] = sessionInput(180)
+			pages[i].Seed += int64(i)
+			pages[i].Limit = 1
+		}
+		var input, output bytes.Buffer
+		json.NewEncoder(&input).Encode(map[string]any{"id": 1, "command": "batch", "pages": pages, "byte_limit": 1048576})
+		json.NewEncoder(&input).Encode(map[string]any{"id": 2, "command": "close"})
+		serveScheduleStream(&input, &output)
+		decoder := json.NewDecoder(&output)
+		var ready, reply map[string]any
+		decoder.Decode(&ready)
+		decoder.Decode(&reply)
+		valid := count > 0 && count <= 32
+		if reply["ok"] != valid {
+			t.Fatal("묶음 수 검증", count, reply)
+		}
+		if !valid {
+			continue
+		}
+		rows := reply["pages"].([]any)
+		for i, row := range rows {
+			expected, err := scheduledOBD(Request{Scheduled: &pages[i]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(expected.Scheduled.Messages)
+			actual, _ := json.Marshal(row.(map[string]any)["messages"])
+			if !bytes.Equal(raw, actual) {
+				t.Fatal("묶음 원문 불일치", i)
+			}
+		}
+		stats := reply["stats"].(map[string]any)
+		if stats["cache_max_entries"] != float64(25000) || stats["cache_max_estimated_bytes"] != float64(512*1024*1024) {
+			t.Fatal(stats)
+		}
+	}
+	var input, output bytes.Buffer
+	json.NewEncoder(&input).Encode(map[string]any{"id": 1, "command": "batch", "pages": []ScheduledInput{sessionInput(180), sessionInput(180)}, "byte_limit": 16384})
+	serveScheduleStream(&input, &output)
+	decoder := json.NewDecoder(&output)
+	var ready, reply map[string]any
+	decoder.Decode(&ready)
+	decoder.Decode(&reply)
+	if reply["ok"] != false {
+		t.Fatal("묶음 바이트 예산 검증 누락")
+	}
+}
+
+func TestScheduleCacheLRUPreservesRecentlyUsedVehicle(t *testing.T) {
+	c := scheduledCache{maxEntries: 2, maxBytes: scheduleCacheBytes}
+	a, b, d := sessionInput(10), sessionInput(10), sessionInput(10)
+	b.Seed++
+	d.Seed += 2
+	for _, s := range []ScheduledInput{a, b, a, d} {
+		if _, err := scheduledPage(Request{Scheduled: &s}, &c, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := c.entries[scheduleKey(a)]; !ok {
+		t.Fatal("최근 차량 계산 축출")
+	}
+	if _, ok := c.entries[scheduleKey(b)]; ok {
+		t.Fatal("오래된 차량 계산 정리 누락")
+	}
+	if c.evictions != 1 || c.hits != 1 || c.lru.Len() != 2 {
+		t.Fatal(c.evictions, c.hits, c.lru.Len())
+	}
+}
 func TestScheduleSessionPagesMatchLegacyAndReuse(t *testing.T) {
 	for _, seconds := range []int64{242, 600, 3600, 10800} {
 		for _, force := range []bool{false, true} {

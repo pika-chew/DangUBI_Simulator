@@ -92,7 +92,7 @@ class GenerationSession:
 
     def _write(self,command):
         raw=json.dumps(command,separators=(",",":"))+"\n"
-        if len(raw.encode())>16384:raise GenerationFailure("생성 명령 크기 상한을 초과했습니다.")
+        if len(raw.encode())>(262144 if command.get("command")=="batch" else 16384):raise GenerationFailure("생성 명령 크기 상한을 초과했습니다.")
         try:
             self.process.stdin.write(raw)
             self.process.stdin.flush()
@@ -132,6 +132,23 @@ class GenerationSession:
         self.stats["page_requests"]+=1
         self.stats["page_roundtrip_ms"]+=(time.perf_counter()-before)*1000
         return result
+
+    def batch(self, payloads, timeout=15, byte_limit=1048576):
+        if self.closed or not 1<=len(payloads)<=32:raise GenerationFailure("생성 묶음 크기를 확인하세요.")
+        before=time.perf_counter();self.sequence+=1
+        self._write({"id":self.sequence,"command":"batch","pages":payloads,"byte_limit":byte_limit})
+        written=time.perf_counter();self.stats["request_write_ms"]+=(written-before)*1000
+        reply=self._receive(self.sequence,timeout)
+        self.stats["response_wait_ms"]+=(time.perf_counter()-written)*1000
+        results=reply.get("pages")
+        if not isinstance(results,list) or len(results)!=len(payloads):raise GenerationFailure("생성 묶음 응답 수가 다릅니다.")
+        for request,result in zip(payloads,results):
+            if not isinstance(result,dict) or not isinstance(result.get("messages"),list) or result.get("next_offset")!=request["offset"]+len(result["messages"]):
+                raise GenerationFailure("생성 묶음 진행 위치를 확인하세요.")
+        self.stats["page_requests"]+=len(payloads)
+        self.record_metric("batch_requests",1)
+        self.stats["page_roundtrip_ms"]+=(time.perf_counter()-before)*1000
+        return results
 
     def close(self,abort=False):
         if self.closed:return

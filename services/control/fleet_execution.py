@@ -30,6 +30,31 @@ class FleetExecution:
     def generate(self, vehicle, key, offset, session=None, limit=100):
         if session is None:raise GenerationFailure("운영 생성은 실행 전용 Worker 세션이 필요합니다.")
         session.worker_digest(self.worker)
+        pages=self._pages(vehicle,key,offset,limit)
+        try:
+            payload=next(pages)
+            while True:
+                output=session.page(payload)
+                session.worker_digest(self.worker)
+                payload=pages.send(output)
+        except StopIteration as done:return done.value
+
+    def generate_many(self, requests, session):
+        session.worker_digest(self.worker)
+        pages=[self._pages(v,k,o,limit) for v,k,o,limit in requests]
+        pending={i:next(p) for i,p in enumerate(pages)}
+        results=[None]*len(pages)
+        while pending:
+            indices=list(pending)
+            replies=session.batch([pending[i] for i in indices])
+            for i,reply in zip(indices,replies):
+                try:pending[i]=pages[i].send(reply)
+                except StopIteration as done:
+                    results[i]=done.value;del pending[i]
+        session.worker_digest(self.worker)
+        return results
+
+    def _pages(self, vehicle, key, offset, limit):
         with self.lock:
             cursor=self.cursors.get(vehicle)
             if cursor is None:
@@ -63,8 +88,7 @@ class FleetExecution:
                                          coolant_c=cursor["initial"]["coolant_c"],heading_rad=cursor["initial"]["heading_rad"]),
                          force_end=self.force_end if selected else False,anomaly_eligible=fixed["anomaly_eligible"],
                          anomaly_events_per_hour=self.req.anomaly_events_per_hour,anomaly_intensity=self.req.anomaly_intensity)
-            output=session.page(payload)
-            session.worker_digest(self.worker)
+            output=yield payload
             cursor["final"]=dict(lat=output["final_lat"],lon=output["final_lon"],odometer_m=output["final_odometer_m"],
                                  coolant_c=output["final_coolant_c"],heading_rad=output["final_heading_rad"])
             cursor["last_end"]=b

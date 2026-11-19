@@ -11,6 +11,7 @@ from services.control.generation_session import GenerationFailure
 class PageSession:
     def __init__(self,session,byte_limit):self.session,self.byte_limit=session,byte_limit
     def page(self,payload,timeout=15):return self.session.page(payload,timeout,byte_limit=self.byte_limit)
+    def batch(self,payloads):return self.session.batch(payloads,byte_limit=self.byte_limit)
     def worker_digest(self,worker):return self.session.worker_digest(worker)
     def prepare_trip(self,*args):return self.session.prepare_trip(*args)
     def record_metric(self,name,value):self.session.record_metric(name,value)
@@ -41,6 +42,7 @@ class BoundedSchedule:
         # 운영 경로는 모든 차량의 응답 공간을 미리 예약하지 않는다.
         # 같은 시각의 차량 수가 큐보다 많아도 뒤 시각의 페이지가 큐를 점유하지 않게 한다.
         self.frame=min(1048576,self.byte_cap//max(1,2*(workers+1))) if self.sequential else max(16384,min(1048576,self.byte_cap//max(1,count+2*workers+1)))
+        self.batched=bool(self.sequential and data.get("generate_batch"))
         self.limit=1 if self.sequential else max(1,min(100,self.count_cap//max(1,count+workers+1)-1))
         if self.frame<16384 or self.limit<1:raise GenerationFailure("대기열 예산이 차량·Worker 수에 비해 작습니다.")
         self.closed=False
@@ -87,14 +89,23 @@ class BoundedSchedule:
             seq=max(0,(t["observed_start_ms"]-t["start_ms"]+interval-1)//interval)
             s["due"]=min(t["start_ms"]+seq*interval,t["observed_end_ms"])
     def account(self):
-        count=self.queued_count+self.consuming_count+len(self.busy)*(self.limit+1)
+        count=self.queued_count+self.consuming_count+self.inflight_pages()*(self.limit+1)
         size=self.queued_bytes+self.consuming_bytes+len(self.busy)*self.frame*2
         if count>self.count_cap or size>self.byte_cap:raise GenerationFailure("생성 대기열 예산을 초과했습니다.")
         self.stats.update(queued_messages=self.queued_count,queued_bytes=self.queued_bytes,reserved_messages=count,reserved_bytes=size)
         for key,value in [("peak_messages",self.queued_count),("peak_bytes",self.queued_bytes),("peak_reserved_messages",count),("peak_reserved_bytes",size)]:self.stats[key]=max(self.stats[key],value)
         if self.on_account:self.on_account()
+    def inflight_pages(self):
+        return sum(len(v) if isinstance(v,list) else 1 for v in self.inflight.values())
     def prepare(self,s,session):
         wrapped=PageSession(session,self.frame)
+        if isinstance(s,list):
+            if self.pool.cancelled.is_set() or self.pool.job.stop_requested:raise GenerationFailure("생성 풀을 중단했습니다.")
+            out=self.data["generate_batch"]([(x["vehicle"],x["trip"]["trip_key"],x["offset"],self.limit) for x in s],wrapped)
+            if len(out)!=len(s):raise GenerationFailure("생성 묶음 수가 다릅니다.")
+            for i,value in enumerate(out):
+                if value["status"]=="preparing":out[i]=self.prepare(s[i],session)
+            return out
         previous=-1
         for _ in range(100):
             while self.pool.job.pause_requested and not self.pool.cancelled.is_set() and not self.pool.job.stop_requested:time.sleep(.01)
@@ -105,30 +116,37 @@ class BoundedSchedule:
             if completed<=previous:raise GenerationFailure("실행 중간 상태 복원이 진행되지 않습니다.")
             previous=completed
         raise GenerationFailure("실행 중간 상태 복원 상한을 초과했습니다.")
+    def accept(self,s,out):
+        items=[(m,False) for m in out["messages"]]
+        deferred=bool(self.sequential and not out["has_more"] and out.get("trip") and items and out["trip"]["ts"]>items[-1][0]["ts"])
+        if not out["has_more"] and out.get("trip") and not deferred:items.append((out["trip"],out["synthetic_trip"]))
+        used=0
+        for m,synthetic in items:
+            size=len(json.dumps(m,separators=(",",":"),ensure_ascii=False).encode())
+            s["queue"].append((m,synthetic,size));used+=size
+        if used>self.frame or len(items)>self.limit+1:raise GenerationFailure("생성 응답이 예약 예산을 초과했습니다.")
+        self.queued_bytes+=used;self.queued_count+=len(items);s["more"]=bool(out["has_more"] or deferred);s["offset"]+=len(out["messages"])
+        s["next_due"]=out["trip"]["ts"] if deferred else None
+        if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
+        elif s["more"]:raise GenerationFailure("빈 페이지가 계속된다고 응답했습니다.")
+        else:self.advance(s)
+        self.track(s)
+        self.account()
+
     def __iter__(self):
         while self.boundaries or self.peek(self.heads) is not None:
             if not self.gate():return
             for owner,s in list(self.inflight.items()):
-                f=s["future"]
+                states=s if isinstance(s,list) else [s]
+                f=states[0]["future"]
                 if f is None or not f.done():continue
-                out=f.result();self.pool.release(f);del self.busy[owner];del self.inflight[owner];s["future"]=None
-                items=[(m,False) for m in out["messages"]]
-                deferred=bool(self.sequential and not out["has_more"] and out.get("trip") and items and out["trip"]["ts"]>items[-1][0]["ts"])
-                if not out["has_more"] and out.get("trip") and not deferred:items.append((out["trip"],out["synthetic_trip"]))
-                used=0
-                for m,synthetic in items:
-                    size=len(json.dumps(m,separators=(",",":"),ensure_ascii=False).encode())
-                    s["queue"].append((m,synthetic,size));used+=size
-                if used>self.frame or len(items)>self.limit+1:raise GenerationFailure("생성 응답이 예약 예산을 초과했습니다.")
-                self.queued_bytes+=used;self.queued_count+=len(items);s["more"]=bool(out["has_more"] or deferred);s["offset"]+=len(out["messages"])
-                s["next_due"]=out["trip"]["ts"] if deferred else None
-                if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
-                elif s["more"]:raise GenerationFailure("빈 페이지가 계속된다고 응답했습니다.")
-                else:self.advance(s)
-                self.track(s)
+                out=f.result();self.pool.release(f);del self.busy[owner];del self.inflight[owner]
+                outputs=out if isinstance(s,list) else [out]
+                for state,value in zip(states,outputs):
+                    state["future"]=None
+                    self.accept(state,value)
                 self.account()
-                m=None
-                del out,items,f
+                del out,outputs,f
             head=self.peek(self.heads)
             candidates=sorted((s for owner,heap in enumerate(self.ready) if owner not in self.busy and (s:=self.peek(heap,True)) is not None),key=lambda s:(s["due"],s["vehicle"]))
             for s in candidates:
@@ -136,10 +154,20 @@ class BoundedSchedule:
                 # 최악 응답의 원문과 디코딩 객체를 위한 바이트 credit을 먼저 예약한다.
                 # 가장 이른 미준비 차량을 위한 응답 공간을 남겨 순서 대기 교착을 막는다.
                 reserve=0 if s is head else 1
-                if self.queued_bytes+self.consuming_bytes+(len(self.busy)+1+reserve)*self.frame*2>self.byte_cap or self.queued_count+self.consuming_count+(len(self.busy)+1+reserve)*(self.limit+1)>self.count_cap:
+                if self.queued_bytes+self.consuming_bytes+(len(self.busy)+1+reserve)*self.frame*2>self.byte_cap or self.queued_count+self.consuming_count+(self.inflight_pages()+1+reserve)*(self.limit+1)>self.count_cap:
                     self.stats["backpressure_count"]+=1;continue
-                heapq.heappop(self.ready[s["owner"]])
-                self.busy[s["owner"]]=time.monotonic();s["future"]=self.pool.submit(s["owner"],lambda session,s=s:self.prepare(s,session));self.inflight[s["owner"]]=s;self.account()
+                owner=s["owner"]
+                batch=[s];heapq.heappop(self.ready[owner])
+                if self.batched:
+                    slots=min(32,self.frame//16384,(self.count_cap-self.queued_count-self.consuming_count-reserve*2-self.inflight_pages()*2)//2)
+                    while len(batch)<slots:
+                        other=self.peek(self.ready[owner],True)
+                        if other is None or other["due"]!=s["due"]:break
+                        heapq.heappop(self.ready[owner]);batch.append(other)
+                target=batch if self.batched else s
+                future=self.pool.submit(owner,lambda session,target=target:self.prepare(target,session))
+                for item in batch:item["future"]=future
+                self.inflight[owner]=target;self.busy[owner]=time.monotonic();self.account()
             if self.boundaries and (head is None or self.boundaries[0]<(head["due"],1,head["vehicle"])):
                 timestamp,priority,vehicle=self.boundaries[0]
                 due=self.due_offset(timestamp)
@@ -177,14 +205,15 @@ class BoundedSchedule:
                 else:raise GenerationFailure("생성 대기열이 진행되지 않습니다.")
             else:
                 if any(time.monotonic()-started>30 for started in self.busy.values()):raise GenerationFailure("생성 Worker 작업 제한시간을 초과했습니다.")
-                wait([s["future"] for s in self.inflight.values()],timeout=.005,return_when=FIRST_COMPLETED)
+                wait([(s[0] if isinstance(s,list) else s)["future"] for s in self.inflight.values()],timeout=.005,return_when=FIRST_COMPLETED)
 
     def close(self):
         if self.closed:return
         self.closed=True
         self.stats["discarded_queued_messages"]=self.queued_count
         self.stats["discarded_queued_bytes"]=self.queued_bytes
-        self.stats["cancelled_page_requests"]=len(self.busy)
+        self.stats["cancelled_page_requests"]=self.inflight_pages()
+        self.stats["cancelled_batch_requests"]=len(self.busy) if self.batched else 0
         for s in self.states.values():s["queue"].clear();s["future"]=None
         self.boundaries.clear();self.boundary_streams.clear()
         self.heads.clear()

@@ -33,6 +33,21 @@ if __PHASE__ == 'create':
           'message':api('/api/schema')['profiles']['4']['example'],'transport':'dry_run','confirm_mqtt':False,'realtime':False}
     run=api('/api/runs',body)
     assert run['result']['processed_messages']==6 and run['result']['mqtt_published']==0
+    fleet={'execution_profile':'operations','fleet_version':'fleet-plan-4','vehicle_count':3,
+           'measurement':{'start':'2026-11-19T00:00:00+09:00','end':'2026-11-20T00:00:00+09:00','timezone':'Asia/Seoul'},
+           'seed':42,'interval_ms':60000,'trip_min_minutes':3,'trip_max_minutes':3,
+           'day_off_probability':0,'weekend_activity_probability':1}
+    plan=api('/api/workspace/plans',{'title':'container operations smoke','fleet':fleet})
+    operation=api('/api/workspace/execute',{'plan_key':plan['key'],'transport':'dry_run',
+                  'confirm_mqtt':False,'realtime':False,'mapping_mode':'shared','client_count':2})
+    deadline=time.monotonic()+20
+    while time.monotonic()<deadline:
+        result=api('/api/jobs/'+operation['id'])['result']
+        if result['job_state'] not in {'starting','running','stopping'}:break
+        time.sleep(.1)
+    assert result['job_state']=='completed',result
+    assert result['processed_messages']==result['planned_messages'] and result['trip_count']>0
+    assert result['generation_session']['batch_requests']>0 and result['execution_cleanup_confirmed']
     state={'lat':37.5,'lon':127.0,'odometer_m':1000,'coolant_c':80,'heading_rad':0}
     cache.put('container-smoke',0,1000,state,cache.stats()['epoch'])
     body['realtime']=True
@@ -44,13 +59,15 @@ if __PHASE__ == 'create':
         if result['processed_messages']>0:break
         time.sleep(.1)
     else:raise AssertionError('Worker did not start')
-    print(json.dumps({'run_id':run['id'],'job_id':job['id']}))
+    print(json.dumps({'run_id':run['id'],'job_id':job['id'],'operations_job_id':operation['id']}))
 else:
     records=api('/api/runs')
-    assert len(records)==2
+    assert len(records)==3
     full=[r for r in records if r['result'].get('processed_messages')==6 and 'job_state' not in r['result']]
     stopped=[r for r in records if r['result'].get('job_state')=='stopped']
     assert len(full)==len(stopped)==1
+    completed=[r for r in records if r['result'].get('job_state')=='completed']
+    assert len(completed)==1 and completed[0]['result']['generation_session']['batch_requests']>0
     assert not stopped[0]['result']['forced_termination']
     epoch,resumed=cache.resume('container-smoke',1)
     assert resumed is not None and cache.stats()['entries']==1
