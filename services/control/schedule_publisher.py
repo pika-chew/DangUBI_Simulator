@@ -7,7 +7,7 @@ from services.control.mqtt_bridge import MQTTFailure
 
 
 class SchedulePublisher:
-    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None):
+    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None,queue_capacity=100,queue_bytes=1048576):
         self.bridge=bridge
         self.on_account=on_account
         self.due_offset=due_offset or (lambda ts:ts-measurement_start_ms)
@@ -19,7 +19,7 @@ class SchedulePublisher:
         self.reserved_count=0
         self.state=result["transmission"]={
             "mode":"parallel","max_in_flight":len(self.queues),"per_client_in_flight":1,
-            "queue_capacity":100,"queue_byte_capacity":1048576,
+            "queue_capacity":queue_capacity,"queue_byte_capacity":queue_bytes,
             "queued_messages":0,"in_flight":0,"peak_queued":0,"peak_in_flight":0,
             "reserved_bytes":0,"peak_reserved_bytes":0,"reserved_commands":0,"peak_reserved_commands":0,
             "backpressure_count":0,"discarded_queued":0,"discarded_queued_bytes":0}

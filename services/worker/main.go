@@ -243,18 +243,35 @@ func processContext(ctx context.Context, req Request, progress func(Result)) (Re
 	return out, nil
 }
 func main() {
-	reader := bufio.NewReaderSize(os.Stdin, 1048577)
-	first, err := reader.ReadSlice('\n')
-	if len(first) > 1048576 || (err != nil && err != io.EOF) {
-		fail("요청 크기를 확인하세요.")
-		return
+	reader := bufio.NewReaderSize(os.Stdin, 65536)
+	var first []byte
+	for {
+		fragment, readErr := reader.ReadSlice('\n')
+		if len(first)+len(fragment) > 8388608 {
+			fail("요청 크기를 확인하세요.")
+			return
+		}
+		first = append(first, fragment...)
+		if readErr == bufio.ErrBufferFull {
+			continue
+		}
+		if readErr != nil && readErr != io.EOF {
+			fail("요청 크기를 확인하세요.")
+			return
+		}
+		break
 	}
 	// 첫 요청은 한 줄 JSON이다. 기존 EOF 종료 요청도 허용한다.
+	var err error
 	dec := json.NewDecoder(io.MultiReader(bytes.NewReader(first), reader))
 	dec.DisallowUnknownFields()
 	var req Request
 	if err := dec.Decode(&req); err != nil {
 		fail("요청 JSON을 읽을 수 없습니다.")
+		return
+	}
+	if len(first) > 1048576 && req.Operation != "mqtt_stream" {
+		fail("요청 크기를 확인하세요.")
 		return
 	}
 	if req.Operation == "schedule_stream" {

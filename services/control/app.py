@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from services.control.jobs import JobManager, ACTIVE
 from services.control.runtime import RuntimePaths
 from services.control.transmission_goal import assess
+from services.control.operating import PROFILES
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -172,21 +173,30 @@ class MQTTProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     enabled: bool = False
     contract_reviewed: bool = False
+    execution_profile: Literal["small_test", "operations"] = "small_test"
     broker_url: str
     ca_file: str
     cert_file: str
     key_file: str
     topic_prefix: str = "sim"
-    max_clients: int = Field(default=5, ge=1, le=20)
-    max_messages: int = Field(default=20, ge=1, le=100)
-    max_duration_seconds: int = Field(default=30, ge=1, le=30)
-    connect_per_second: int = Field(default=2, ge=1, le=5)
-    publish_per_second: int = Field(default=10, ge=1, le=70)
+    max_clients: int = Field(default=5, ge=1, le=25000)
+    max_messages: int = Field(default=20, ge=1, le=1000000000000)
+    max_duration_seconds: int = Field(default=30, ge=1, le=2592600)
+    connect_per_second: int = Field(default=2, ge=1, le=1000)
+    publish_per_second: int = Field(default=10, ge=1, le=20000)
+    max_connecting: int = Field(default=100, ge=1, le=1000)
     timeout_ms: int = Field(default=3000, ge=100, le=5000)
     reconnect_attempts: int = Field(default=2, ge=0, le=3)
 
+    @model_validator(mode="after")
+    def profile_bounds(self):
+        if self.execution_profile=="small_test" and any(getattr(self,key)>value for key,value in
+            dict(max_clients=20,max_messages=100,max_duration_seconds=30,connect_per_second=5,publish_per_second=70).items()):
+            raise ValueError("소량 MQTT 시험의 연결·건수·시간·속도 상한을 초과했습니다.")
+        return self
 
-def mqtt_profile():
+
+def mqtt_profile(mode=None):
     try:
         profile = MQTTProfile.model_validate_json(MQTT_PROFILE.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
@@ -194,6 +204,10 @@ def mqtt_profile():
     if not profile.enabled or not profile.contract_reviewed:
         raise HTTPException(409, detail="서버 MQTT 활성화와 수신 규격·시험 토픽 확인이 필요합니다.")
     result = profile.model_dump()
+    if mode=="small_test":
+        result["execution_profile"]="small_test"
+        for key,cap in dict(max_clients=20,max_messages=100,max_duration_seconds=30,connect_per_second=5,publish_per_second=70,max_connecting=20).items():
+            result[key]=min(result[key],cap)
     for key in ("ca_file", "cert_file", "key_file"):
         result[key] = str((ROOT / result[key]).resolve())
     return result
@@ -232,7 +246,7 @@ def prepare_worker(body: RunRequest, operation: str, run_id: str):
     if operation == "mqtt":
         if not body.confirm_mqtt:
             raise HTTPException(409, detail="실제 MQTT 송신 확인을 선택하세요.")
-        profile = mqtt_profile()
+        profile = mqtt_profile("small_test")
         if body.generation and body.generation.duration_seconds >= profile["max_duration_seconds"]:
             raise HTTPException(422, detail="자동 운행시간은 실제 송신 전체 제한시간보다 짧아야 합니다. 접속·응답 시간도 필요합니다.")
         if body.config.client_count > profile["max_clients"] or body.config.vehicle_count * body.config.messages_per_vehicle > profile["max_messages"]:
@@ -277,11 +291,11 @@ def health():
     try:
         profile = mqtt_profile()
         mqtt_ready = True
-        limits = {k: profile[k] for k in ("max_clients", "max_messages", "max_duration_seconds")}
+        limits = {k: profile[k] for k in ("execution_profile","max_clients", "max_messages", "max_duration_seconds","connect_per_second","publish_per_second","max_connecting")}
     except HTTPException:
         mqtt_ready = False
         limits = None
-    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "aws_connected": False, "active_job_id": JOBS.active_id()}
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "execution_profiles":PROFILES,"aws_connected": False, "active_job_id": JOBS.active_id()}
 
 
 @app.get("/api/schema")
@@ -504,14 +518,14 @@ class ScheduleExecutionRequest(BaseModel):
     plan_key: str
     realtime: bool = True
     mapping_mode: Literal["shared", "dedicated"] = "shared"
-    client_count: int = Field(default=1, ge=1, le=100)
+    client_count: int | None = Field(default=None, ge=1, le=25000)
     force_end_trip: bool = False
     transport: Literal["dry_run", "mqtt"] = "dry_run"
     confirm_mqtt: bool = False
     connection_lifetime: Literal["always", "while_driving"] = "always"
     generation_workers: int = Field(default=1,ge=1,le=4,strict=True)
-    generation_queue_messages: int = Field(default=2000,ge=256,le=2000)
-    generation_queue_bytes: int = Field(default=8388608,ge=4194304,le=16777216)
+    generation_queue_messages: int = Field(default=2000,ge=256,le=65536)
+    generation_queue_bytes: int = Field(default=8388608,ge=4194304,le=67108864)
 
     @model_validator(mode="after")
     def worker_count(self):
@@ -530,39 +544,49 @@ def workspace_execute(body: ScheduleExecutionRequest):
         raise HTTPException(422, detail="저장된 일정을 선택하세요.")
     source = WorkspacePlanRequest.model_validate(saved["request"])
     req = source.fleet or source.schedule
+    mode=source.fleet.execution_profile if source.fleet else "small_test"
+    limits=PROFILES[mode]
     start, end = instant(req.measurement.start), instant(req.measurement.end)
-    if end-start > 3600000 or saved["planned_messages"] > 10000:
-        raise HTTPException(422, detail="초기 일정 실행은 측정 기간1시간·10,000메시지 이하입니다. 장기 계획 조회와 실행 상한은 다릅니다.")
-    vehicle_ids=[v["vehicle_id"] for v in saved["result"]["vehicles"]]
-    clients=len(vehicle_ids) if body.mapping_mode=="dedicated" else body.client_count
+    if end-start > limits["max_duration_ms"] or saved["planned_messages"] > limits["max_messages"]:
+        raise HTTPException(422, detail="소량 일정 실행은 측정 기간1시간·10,000메시지 이하입니다. 운영 프로필은 최대30일·설정된 메시지 상한을 적용합니다.")
+    vehicle_ids=[f"v{i:06d}" for i in range(1,source.fleet.vehicle_count+1)] if mode=="operations" else [v["vehicle_id"] for v in saved["result"]["vehicles"]]
+    clients=len(vehicle_ids) if body.mapping_mode=="dedicated" else (body.client_count if body.client_count is not None else min(limits["default_clients"],len(vehicle_ids)))
+    if mode=="small_test" and (clients>100 or body.generation_queue_messages>2000 or body.generation_queue_bytes>16777216):
+        raise HTTPException(422,detail="소량 실행의 Client·대기열 상한을 초과했습니다.")
     if clients > len(vehicle_ids):
         raise HTTPException(422, detail="연결 풀 Client 수는 차량 수 이하여야 합니다.")
     from services.control.schedule_cursor import provider_for
-    trip_provider=provider_for(source)
-    planned=0
-    for vehicle in vehicle_ids:
-        for row in trip_provider(vehicle):
-            count=row["microtrip_count"]+row["trip_count"]
-            if body.force_end_trip and row["continues_after_window"]:
-                count+=0 if (end-row["start_ms"])%req.interval_ms==0 else 1
-            planned+=count
-    if planned>10000:
-        raise HTTPException(422,detail="시험용 Trip을 포함한 실행은10,000메시지 이하여야 합니다.")
+    stream=None
+    if mode=="operations":
+        from services.control.fleet_execution import FleetExecution
+        stream=FleetExecution(source.fleet,WORKER,body.force_end_trip)
+    trip_provider=stream.trips if stream else provider_for(source)
+    planned=saved["planned_messages"]
+    if body.force_end_trip:
+        for vehicle in vehicle_ids:
+            for row in trip_provider(vehicle):
+                if row["continues_after_window"]:planned+=0 if (end-row["start_ms"])%req.interval_ms==0 else 1
+    if planned>limits["max_messages"]:
+        raise HTTPException(422,detail="시험용 Trip을 포함한 실행 건수가 프로필 상한을 초과했습니다.")
     profile=None
     if body.transport=="mqtt":
         if not body.confirm_mqtt:
             raise HTTPException(409,detail="실제 MQTT 송신 확인을 선택하세요.")
         if not body.realtime or body.force_end_trip:
             raise HTTPException(422,detail="일정 MQTT는 실제 시간·정상 Trip만 지원합니다. 가상시간 또는 시험용 Trip을 해제하세요.")
-        profile=mqtt_profile()
+        profile=mqtt_profile(mode)
+        if mode=="operations" and profile["execution_profile"]!="operations":
+            raise HTTPException(409,detail="운영 MQTT 서버 프로필이 필요합니다. 현재 소량 시험 설정은 유지됩니다.")
         if clients>profile["max_clients"] or planned>profile["max_messages"] or end-start>=profile["max_duration_seconds"]*1000:
             raise HTTPException(422,detail="서버 MQTT 연결·메시지·시간 상한을 초과했습니다. 접속·응답 여유를 포함해 일정을 줄이세요.")
+        if mode=="operations":
+            profile={**profile,"max_duration_seconds":min(profile["max_duration_seconds"],(end-start+999)//1000+600)}
         if not WORKER.is_file():
             raise HTTPException(503,detail="Worker가 준비되지 않았습니다.")
     run_id=uuid4().hex
     assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}"} for i,v in enumerate(vehicle_ids)]
     config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
-    request={"config":config,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
+    request={"config":config,"execution_profile":mode,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
     from services.control.execution_checkpoints import ExecutionCheckpoints
     execution_checkpoints=ExecutionCheckpoints();checkpoint_epoch=0
     scheduled_body=ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch) if source.schedule else None
@@ -570,11 +594,13 @@ def workspace_execute(body: ScheduleExecutionRequest):
         if source.fleet:
             return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
         return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
-    data={"operation":body.transport,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
+    data={"operation":body.transport,"execution_profile":mode,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":stream.generate if stream else generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if profile:data["mqtt"]=profile
+    if mode=="operations":
+        data.update(transmission_queue_messages=min(4096,max(100,clients*2)),transmission_queue_bytes=8388608,stop_grace_seconds=15)
     request["generation"]={"workers":body.generation_workers,"queue_messages":body.generation_queue_messages,"queue_bytes":body.generation_queue_bytes}
-    data.update(trip_provider=trip_provider,generation_workers=body.generation_workers,generation_queue_messages=body.generation_queue_messages,generation_queue_bytes=body.generation_queue_bytes,execution_checkpoint_stats=execution_checkpoints.stats)
-    timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+30 if body.realtime else 120
+    data.update(trip_provider=trip_provider,generation_workers=body.generation_workers,generation_queue_messages=body.generation_queue_messages,generation_queue_bytes=body.generation_queue_bytes,execution_checkpoint_stats=stream.stats if stream else execution_checkpoints.stats)
+    timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+600 if mode=="operations" else (end-start)/1000+30 if body.realtime else 120
     return JOBS.start(run_id,request,data,WORKER,timeout,runner=partial(execute,JOBS))
 
 

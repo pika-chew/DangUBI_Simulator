@@ -1,5 +1,6 @@
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
+  execution_profile?: "small_test" | "operations";
   fleet_version: "fleet-plan-1" | "fleet-plan-2" | "fleet-plan-3" | "fleet-plan-4";
   vehicle_count: number;
   measurement: { start: string; end: string; timezone: "Asia/Seoul" };
@@ -57,7 +58,8 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’ 후 ‘최소·최대 시간 배정’을 선택하면 하루 목표 없이 새 일정을 만듭니다. 원본은 보존합니다.</p>}
     <div className="fields">
       <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-4" ? {fleet_version:"fleet-plan-4",vehicle_variation_percent:undefined,daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??120} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-4">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-4" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
-      {numeric("vehicle_count", "차량 수", 1, 100, "현재 로컬 계획은 최대100대입니다. 설정 자동화가 대규모 생성·전송 지원을 의미하지는 않습니다.")}
+      <label>실행 프로필<select value={v.execution_profile ?? "small_test"} onChange={e=>patch({execution_profile:e.target.value as "small_test"|"operations"})}><option value="small_test">소량 시험</option><option value="operations">운영 · 최대25,000대·30일</option></select></label>
+      {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "운영은 순차 계획·생성을 사용합니다. 입력 가능 범위이며 실제 AWS 처리량과 장기 안정성 보장이 아닙니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
       <label>측정 종료 (KST)<input type="datetime-local" step="1" value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
       <label>Microtrip 주기 (초)<input type="number" min="0.1" max="86400" step="0.1" value={v.interval_ms / 1000} onChange={e => patch({ interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>

@@ -18,6 +18,8 @@ import (
 // 접속 정보는 서버에서만 받으며 결과·실행 기록에는 포함하지 않는다.
 type MQTTProfile struct {
 	LocalBenchmark     bool   `json:"local_benchmark,omitempty"`
+	ExecutionProfile   string `json:"execution_profile,omitempty"`
+	MaxConnecting      int    `json:"max_connecting,omitempty"`
 	Enabled            bool   `json:"enabled"`
 	ContractReviewed   bool   `json:"contract_reviewed"`
 	BrokerURL          string `json:"broker_url"`
@@ -43,6 +45,18 @@ func (p *MQTTProfile) validate() error {
 		return errors.New("MQTT 주소는 ssl://호스트:포트 형식이어야 합니다.")
 	}
 	maxClients, maxMessages, maxSeconds, maxConnect, maxPublish := 20, 100, 30, 5, 70
+	if p.MaxConnecting < 0 || p.MaxConnecting > 1000 {
+		return errors.New("접속 동시 처리 상한을 확인하세요.")
+	}
+	if p.ExecutionProfile != "" && p.ExecutionProfile != "small_test" && p.ExecutionProfile != "operations" {
+		return errors.New("실행 프로필을 확인하세요.")
+	}
+	if p.ExecutionProfile == "operations" {
+		if p.LocalBenchmark || p.MaxConnecting < 1 || p.MaxConnecting > 1000 {
+			return errors.New("운영 접속 동시 처리 상한을 확인하세요.")
+		}
+		maxClients, maxMessages, maxSeconds, maxConnect, maxPublish = 25000, 1000000000000, 2592600, 1000, 20000
+	}
 	if p.LocalBenchmark {
 		if u.Hostname() != "127.0.0.1" && u.Hostname() != "::1" {
 			return errors.New("로컬 측정은 루프백 IP에만 연결할 수 있습니다.")

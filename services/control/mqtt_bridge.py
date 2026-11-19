@@ -47,7 +47,8 @@ class MQTTBridge:
 
     def _write(self,command):
         raw=json.dumps(command,separators=(",",":"),ensure_ascii=False)+"\n"
-        if len(raw.encode())>262144:raise MQTTFailure("MQTT 명령 크기 상한을 초과했습니다.")
+        cap=8388608 if command.get("operation")=="mqtt_stream" else 262144
+        if len(raw.encode())>cap:raise MQTTFailure("MQTT 명령 크기 상한을 초과했습니다.")
         try:
             self.process.stdin.write(raw)
             self.process.stdin.flush()
@@ -105,7 +106,8 @@ class MQTTBridge:
                         self.close_id=self.sequence
                         self.pending[self.sequence]=time.monotonic()
                         self._write({"id":self.sequence,"command":"close"})
-                    deadline=time.monotonic()+2
+                    cleanup_seconds=max(2,self.profile["timeout_ms"]/1000+3) if self.profile.get("execution_profile")=="operations" else 2
+                    deadline=time.monotonic()+cleanup_seconds
                     while not self.closed and time.monotonic()<deadline:self.poll(.05,closing=True)
                 except MQTTFailure:pass
             # 이미 종료했더라도 stdout에 남은 최종 집계를 읽는다.

@@ -25,6 +25,7 @@ class Job:
     stop_requested: bool = False
     pause_requested: bool = False
     wall_limit_seconds: float = 0
+    stop_grace_seconds: float = 2
     timed_out: bool = False
     forced: bool = False
     thread: threading.Thread | None = None
@@ -77,7 +78,7 @@ class JobManager:
                 raise HTTPException(409, detail="실행이 진행 중이거나 종료 중입니다. 완료 후 새 실행을 시작하세요.")
             if mqtt and not self.mqtt_lock.acquire(blocking=False):
                 raise HTTPException(409, detail="다른 MQTT 실행이 진행 중입니다.")
-            job = Job(run_id, result, mqtt, wall_limit_seconds=data.get("mqtt", {}).get("max_duration_seconds", timeout))
+            job = Job(run_id, result, mqtt, wall_limit_seconds=data.get("mqtt", {}).get("max_duration_seconds", timeout),stop_grace_seconds=data.get("stop_grace_seconds",2))
             result["wall_limit_seconds"] = job.wall_limit_seconds
             try:
                 with self.database() as db:
@@ -131,7 +132,7 @@ class JobManager:
                 job.result.update(job_state="stopping")
                 self.save(job)
                 self.signal_stop(job)
-                job.force_timer = threading.Timer(2, self.force, args=(job,))
+                job.force_timer = threading.Timer(job.stop_grace_seconds, self.force, args=(job,))
                 job.force_timer.daemon = True
                 job.force_timer.start()
 
@@ -223,4 +224,4 @@ class JobManager:
             if job:
                 self.request_stop(job)
         if job:
-            job.thread.join(timeout=5)
+            job.thread.join(timeout=job.stop_grace_seconds+3)

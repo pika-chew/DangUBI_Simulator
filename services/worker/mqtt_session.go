@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"regexp"
 	"sync"
 	"time"
@@ -53,20 +54,24 @@ type streamStats struct {
 }
 
 type mqttSession struct {
-	parkingTrace               *parkingTrace
-	connectedAt                time.Time
-	postConnect                durationMetric
-	publishWindows             [12]durationMetric
-	mu, connectMu, publishMu   sync.Mutex
-	parked                     map[string]bool
-	profile                    *MQTTProfile
-	clients                    map[string]mqtt.Client
-	vehicles                   map[string]string
-	seen                       map[string]bool
-	stats                      streamStats
-	metrics                    performanceMetrics
-	connectPacer, publishPacer pacer
-	started                    time.Time
+	connectSlots                 chan struct{}
+	clientConnect, clientPublish map[string]*pacer
+	online                       map[string]bool
+	lastScan                     time.Time
+	parkingTrace                 *parkingTrace
+	connectedAt                  time.Time
+	postConnect                  durationMetric
+	publishWindows               [12]durationMetric
+	mu, connectMu, publishMu     sync.Mutex
+	parked                       map[string]bool
+	profile                      *MQTTProfile
+	clients                      map[string]mqtt.Client
+	vehicles                     map[string]string
+	seen                         map[string]bool
+	stats                        streamStats
+	metrics                      performanceMetrics
+	connectPacer, publishPacer   pacer
+	started                      time.Time
 }
 
 type parkingConnect struct {
@@ -107,6 +112,9 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 	}
 	validID := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 	maxAssignments := 100
+	if p.ExecutionProfile == "operations" {
+		maxAssignments = 25000
+	}
 	if p.LocalBenchmark {
 		maxAssignments = 1000
 	}
@@ -114,6 +122,14 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 		return nil, errors.New("실행/차량 배정을 확인하세요.")
 	}
 	s := &mqttSession{profile: p, clients: map[string]mqtt.Client{}, vehicles: map[string]string{}, seen: map[string]bool{}, parked: map[string]bool{}, started: time.Now()}
+	if p.MaxConnecting > 0 {
+		s.connectSlots = make(chan struct{}, p.MaxConnecting)
+	}
+	if p.ExecutionProfile == "operations" {
+		s.clientConnect = map[string]*pacer{}
+		s.clientPublish = map[string]*pacer{}
+		s.online = map[string]bool{}
+	}
 	s.connectPacer.step = time.Second / time.Duration(p.ConnectPerSecond)
 	if parkingBenchmarkEnabled && p.LocalBenchmark && p.MaxDurationSeconds > 120 {
 		s.parkingTrace = &parkingTrace{make(map[string][]parkingConnect), make(map[string][]parkingSend), make(map[string]time.Time), make(map[string]float64)}
@@ -126,6 +142,10 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 		s.vehicles[a.VehicleID] = a.ClientID
 		if s.clients[a.ClientID] == nil {
 			s.clients[a.ClientID] = newMQTTClient(p, a.ClientID, config)
+			if p.ExecutionProfile == "operations" {
+				s.clientConnect[a.ClientID] = &pacer{step: time.Second}
+				s.clientPublish[a.ClientID] = &pacer{step: time.Second / 100}
+			}
 		}
 	}
 	if len(s.clients) > p.MaxClients {
@@ -137,11 +157,19 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 func (s *mqttSession) snapshot() streamStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.stats.Active = 0
-	for _, c := range s.clients {
-		if c.IsConnectionOpen() {
-			s.stats.Active++
+	// 운영 규모에서는 응답마다 전체 연결을 다시 훑지 않는다. 비동기 단절은 주기적으로 보정한다.
+	if s.profile.ExecutionProfile != "operations" || time.Since(s.lastScan) >= 250*time.Millisecond {
+		s.stats.Active = 0
+		for id, c := range s.clients {
+			open := c.IsConnectionOpen()
+			if s.online != nil {
+				s.online[id] = open
+			}
+			if open {
+				s.stats.Active++
+			}
 		}
+		s.lastScan = time.Now()
 	}
 	s.stats.Peak = max(s.stats.Peak, s.stats.Active)
 	s.stats.Performance = s.metrics.summary(s.stats.Puback, time.Since(s.started))
@@ -181,12 +209,63 @@ func (s *mqttSession) disconnect(id string) {
 			s.parkingTrace.closedAt[id] = time.Now()
 			s.mu.Unlock()
 		}
+		s.refreshClient(id)
 	}
 }
 func (s *mqttSession) close() {
+	if s.profile.ExecutionProfile == "operations" {
+		until := time.Now().Add(time.Duration(s.profile.TimeoutMS) * time.Millisecond)
+		for id, c := range s.clients {
+			s.mu.Lock()
+			s.parked[id] = true
+			if c.IsConnectionOpen() {
+				s.stats.Disconnections++
+			}
+			s.mu.Unlock()
+			c.Disconnect(0)
+		}
+		for time.Now().Before(until) {
+			open := false
+			for _, c := range s.clients {
+				if c.IsConnectionOpen() {
+					open = true
+					break
+				}
+			}
+			if !open {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		s.mu.Lock()
+		s.lastScan = time.Time{}
+		s.mu.Unlock()
+		return
+	}
 	for id := range s.clients {
 		s.disconnect(id)
 	}
+	s.mu.Lock()
+	s.lastScan = time.Time{}
+	s.mu.Unlock()
+}
+
+func (s *mqttSession) refreshClient(id string) {
+	if s.online == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	open := s.clients[id].IsConnectionOpen()
+	if open != s.online[id] {
+		if open {
+			s.stats.Active++
+		} else {
+			s.stats.Active--
+		}
+		s.online[id] = open
+	}
+	s.stats.Peak = max(s.stats.Peak, s.stats.Active)
 }
 
 func (s *mqttSession) connect(ctx context.Context, id string) error {
@@ -197,7 +276,20 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 	if c.IsConnectionOpen() {
 		return nil
 	}
+	if s.connectSlots != nil {
+		select {
+		case s.connectSlots <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		defer func() { <-s.connectSlots }()
+	}
 	before := func() error {
+		if p := s.clientConnect[id]; p != nil {
+			if err := p.wait(ctx); err != nil {
+				return err
+			}
+		}
 		s.connectMu.Lock()
 		err := s.connectPacer.wait(ctx)
 		s.connectMu.Unlock()
@@ -238,6 +330,7 @@ func (s *mqttSession) connect(ctx context.Context, id string) error {
 		s.stats.InitialConnectMS = &elapsed
 	}
 	s.mu.Unlock()
+	s.refreshClient(id)
 	s.snapshot()
 	return nil
 }
@@ -267,6 +360,11 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		}
 		if err = s.connect(ctx, id); err != nil {
 			return err
+		}
+		if p := s.clientPublish[id]; p != nil {
+			if err = p.wait(ctx); err != nil {
+				return err
+			}
 		}
 		// 모든 Client가 같은 속도 제한을 공유한다. 토큰 대기는 잠금 밖이다.
 		s.publishMu.Lock()
@@ -452,7 +550,11 @@ func connectMQTT(ctx context.Context, c mqtt.Client, p *MQTTProfile, before func
 		}
 		c.Disconnect(0)
 		if attempt < p.ReconnectAttempts {
-			if err := sleepUntil(ctx, time.Now().Add(time.Duration(1<<attempt)*100*time.Millisecond)); err != nil {
+			delay := time.Duration(1<<attempt) * 100 * time.Millisecond
+			if p.ExecutionProfile == "operations" {
+				delay = time.Duration(1<<attempt)*time.Second + time.Duration(rand.Int64N(int64(250*time.Millisecond)))
+			}
+			if err := sleepUntil(ctx, time.Now().Add(delay)); err != nil {
 				return err
 			}
 		}

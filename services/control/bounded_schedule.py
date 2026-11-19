@@ -37,8 +37,11 @@ class BoundedSchedule:
         count=len(data["assignments"]);workers=len(pool.sessions)
         self.byte_cap=data.get("generation_queue_bytes",8*1024*1024)
         self.count_cap=data.get("generation_queue_messages",2000)
-        self.frame=max(16384,min(1048576,self.byte_cap//max(1,count+2*workers+1)))
-        self.limit=max(1,min(100,self.count_cap//max(1,count+workers+1)-1))
+        self.sequential=data.get("execution_profile")=="operations"
+        # 운영 경로는 모든 차량의 응답 공간을 미리 예약하지 않는다.
+        # 같은 시각의 차량 수가 큐보다 많아도 뒤 시각의 페이지가 큐를 점유하지 않게 한다.
+        self.frame=min(1048576,self.byte_cap//max(1,2*(workers+1))) if self.sequential else max(16384,min(1048576,self.byte_cap//max(1,count+2*workers+1)))
+        self.limit=1 if self.sequential else max(1,min(100,self.count_cap//max(1,count+workers+1)-1))
         if self.frame<16384 or self.limit<1:raise GenerationFailure("대기열 예산이 차량·Worker 수에 비해 작습니다.")
         self.closed=False
         self.states={};self.busy={};self.inflight={};self.heads=[];self.ready=[[] for _ in pool.sessions]
@@ -110,13 +113,15 @@ class BoundedSchedule:
                 if f is None or not f.done():continue
                 out=f.result();self.pool.release(f);del self.busy[owner];del self.inflight[owner];s["future"]=None
                 items=[(m,False) for m in out["messages"]]
-                if not out["has_more"] and out.get("trip"):items.append((out["trip"],out["synthetic_trip"]))
+                deferred=bool(self.sequential and not out["has_more"] and out.get("trip") and items and out["trip"]["ts"]>items[-1][0]["ts"])
+                if not out["has_more"] and out.get("trip") and not deferred:items.append((out["trip"],out["synthetic_trip"]))
                 used=0
                 for m,synthetic in items:
                     size=len(json.dumps(m,separators=(",",":"),ensure_ascii=False).encode())
                     s["queue"].append((m,synthetic,size));used+=size
                 if used>self.frame or len(items)>self.limit+1:raise GenerationFailure("생성 응답이 예약 예산을 초과했습니다.")
-                self.queued_bytes+=used;self.queued_count+=len(items);s["more"]=out["has_more"];s["offset"]+=len(out["messages"])
+                self.queued_bytes+=used;self.queued_count+=len(items);s["more"]=bool(out["has_more"] or deferred);s["offset"]+=len(out["messages"])
+                s["next_due"]=out["trip"]["ts"] if deferred else None
                 if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
                 elif s["more"]:raise GenerationFailure("빈 페이지가 계속된다고 응답했습니다.")
                 else:self.advance(s)
@@ -160,7 +165,7 @@ class BoundedSchedule:
                 s["queue"].popleft();self.queued_count-=1;self.queued_bytes-=size;self.stats["emitted_messages"]+=1;self.consuming_bytes=size;self.consuming_count=1;self.account()
                 if s["queue"]:s["due"]=s["queue"][0][0]["ts"]
                 elif not s["more"]:self.advance(s)
-                else:s["due"]=message["ts"]+self.data["config"]["interval_ms"]
+                else:s["due"]=s.get("next_due") or message["ts"]+self.data["config"]["interval_ms"]
                 self.track(s)
                 if self.include_boundaries:yield message["ts"],1,s["vehicle"],message,synthetic
                 else:yield message["ts"],s["vehicle"],message,synthetic

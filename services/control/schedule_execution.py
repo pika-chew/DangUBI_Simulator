@@ -13,7 +13,8 @@ def execute(manager, job, data, worker, timeout):
     started_wall_ms = time.time()*1000
     paused_seconds = 0.0
     result = job.result.copy()
-    result.update(assignments=data["assignments"], model_version="schedule-obd-3/journey-8",
+    operations=data.get("execution_profile")=="operations"
+    result.update(assignments=data["assignments"][:100] if operations else data["assignments"],assignment_count=len(data["assignments"]), model_version="schedule-obd-3/journey-8",
                   microtrip_count=0, trip_count=0, schedule_delay_ms=0)
     last_save = 0.0
     result["execution_timing"]={}
@@ -34,8 +35,8 @@ def execute(manager, job, data, worker, timeout):
         p=publisher.state if publisher else {}
         count=g.get("reserved_messages",0)+p.get("reserved_commands",0)
         size=g.get("reserved_bytes",0)+p.get("reserved_bytes",0)
-        b=result.setdefault("buffer_budget",dict(max_messages=data.get("generation_queue_messages",2000)+100,
-                    max_bytes=data.get("generation_queue_bytes",8388608)+1048576,
+        b=result.setdefault("buffer_budget",dict(max_messages=data.get("generation_queue_messages",2000)+data.get("transmission_queue_messages",100),
+                    max_bytes=data.get("generation_queue_bytes",8388608)+data.get("transmission_queue_bytes",1048576),
                     peak_reserved_messages=0,peak_reserved_bytes=0))
         if count>b["max_messages"] or size>b["max_bytes"]:raise GenerationFailure("생성·송신 통합 예약 예산을 초과했습니다.")
         b.update(reserved_messages=count,reserved_bytes=size,generation_reserved_messages=g.get("reserved_messages",0),
@@ -64,7 +65,7 @@ def execute(manager, job, data, worker, timeout):
             generation.close(abort=job.stop_requested or state!="completed")
             result["generation_session"]=dict(generation.stats,cleanup_confirmed=generation.cleaned,forced_termination=generation.forced or job.forced)
             if bounded:bounded.close()
-            if bounded:result["generation_pool"]={"assignments":bounded.assignments,"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
+            if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if operations else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
             if state=="completed" and job.stop_requested:state="failed" if job.timed_out else "stopped"
             if state=="completed" and (not generation.cleaned or not generation.close_acknowledged):
                 state="failed"
@@ -77,7 +78,7 @@ def execute(manager, job, data, worker, timeout):
         # 연결 경계가 몰려도 DB에 차량 수만큼 연속 저장하지 않는다.
         # 최종 상태와 상태 전환은 제한하지 않으며 gate의 중단/일시정지 확인도 유지한다.
         if throttle and not final and result.get("job_state")==state and time.monotonic()-last_save<.1:return
-        if bounded:result["generation_pool"]={"assignments":bounded.assignments,"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
+        if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if operations else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
         budget()
         elapsed = time.monotonic()-started
         result.update(elapsed_ms=int(elapsed*1000), paused_ms=int(paused_seconds*1000),
@@ -148,7 +149,8 @@ def execute(manager, job, data, worker, timeout):
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
-            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget,due_offset=due_offset)
+            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget,due_offset=due_offset,
+                                        queue_capacity=data.get("transmission_queue_messages",100),queue_bytes=data.get("transmission_queue_bytes",1048576))
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break

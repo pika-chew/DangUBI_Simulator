@@ -37,8 +37,9 @@ class RoadMix(Strict):
 
 
 class FleetRequest(Strict):
+    execution_profile: Literal["small_test", "operations"] = "small_test"
     fleet_version: Literal["fleet-plan-1", "fleet-plan-2", "fleet-plan-3", "fleet-plan-4"] = "fleet-plan-1"
-    vehicle_count: int = Field(default=20, ge=1, le=100)
+    vehicle_count: int = Field(default=20, ge=1, le=25000)
     measurement: Measurement
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)
     interval_ms: int = Field(default=2000, ge=100, le=86400000)
@@ -58,6 +59,8 @@ class FleetRequest(Strict):
 
     @model_validator(mode="after")
     def feasible(self):
+        if self.execution_profile=="small_test" and self.vehicle_count>100:
+            raise ValueError("소량 시험은 최대100대입니다. 운영 프로필을 선택하세요.")
         if self.fleet_version == "fleet-plan-4":
             if self.vehicle_variation_percent is not None:
                 raise ValueError("새 배정은 차량 간 운행 시간 편차를 사용하지 않습니다. 해당 항목을 제거하세요.")
@@ -192,6 +195,9 @@ def expand(req):
 
 def preview(req, offset=0, limit=100, vehicle_id=None):
     assigned = allocation(req)
+    if req.execution_profile=="operations":
+        from services.control.fleet_stream import preview as stream_preview
+        return stream_preview(req,assigned,iter_vehicle_days,offset,limit,vehicle_id)
     schedule = selected_schedule(req,[{"vehicle_id":v,"trips":[]} for v in assigned])
     def provide(_req, vehicle):
         return ((instant(t["start"]),instant(t["end"]),t["road_profile"]) for t in iter_vehicle_days(req,vehicle.vehicle_id,assigned[vehicle.vehicle_id]))

@@ -1,0 +1,18 @@
+{
+  "execution_profile": "operations",
+  "enabled": false,
+  "contract_reviewed": false,
+  "broker_url": "ssl://YOUR_IOT_DATA_ENDPOINT:8883",
+  "ca_file": "/run/secrets/AmazonRootCA1.pem",
+  "cert_file": "/run/secrets/device.pem.crt",
+  "key_file": "/run/secrets/private.pem.key",
+  "topic_prefix": "sim",
+  "max_clients": 25000,
+  "max_messages": 1000000000000,
+  "max_duration_seconds": 2592600,
+  "connect_per_second": 1000,
+  "max_connecting": 100,
+  "publish_per_second": 15000,
+  "timeout_ms": 3000,
+  "reconnect_attempts": 2
+}
