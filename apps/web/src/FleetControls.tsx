@@ -55,9 +55,8 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
   const preset = Object.entries(presets).find(([, m]) => JSON.stringify(m) === JSON.stringify(v.pattern_mix))?.[0] ?? "custom";
   return <fieldset disabled={disabled} className="schedule-fieldset">
     <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
-    {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’ 후 ‘최소·최대 시간 배정’을 선택하면 하루 목표 없이 새 일정을 만듭니다. 원본은 보존합니다.</p>}
+    {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’를 하면 현재 최소·최대 시간 배정 방식으로 새 일정을 작성합니다. 원본은 보존합니다.</p>}
     <div className="fields">
-      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-4" ? {fleet_version:"fleet-plan-4",vehicle_variation_percent:undefined,daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??120} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-4">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-4" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
       <label>실행 프로필<select value={v.execution_profile ?? "small_test"} onChange={e=>patch({execution_profile:e.target.value as "small_test"|"operations"})}><option value="small_test">소량 시험</option><option value="operations">운영 · 최대25,000대·30일</option></select></label>
       {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "운영은 순차 계획·생성을 사용합니다. 입력 가능 범위이며 실제 AWS 처리량과 장기 안정성 보장이 아닙니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
@@ -91,6 +90,6 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
       </div>
       <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 다양한 생활 운행에서는 짧은 용무·운행 길이에 맞게 개별 도로 성격도 달라질 수 있습니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
     </details>
-    <p className="note">계획 최대100대·30일·문맥 포함10,000운행, 장기 OBD 상태는 요청당 최대16회·48시간씩 나누어 준비합니다. 최소·최대는 운행 1회 기준이며 주차는 최소30분입니다. 이전 배정의 목표 시간×두 편차는 하루600분 이하여야 합니다. 설정만 바꿔도 이 상한이 확대되지는 않습니다.</p>
+    <p className="note">{v.execution_profile==="operations"?"운영 계획은 최대25,000대·30일이며 실제 처리량은 별도 검증 대상입니다.":"소량 계획은 최대100대·30일·문맥 포함10,000운행이며 실행은1시간·10,000메시지 이하입니다."} 최소·최대 시간은 운행1회 기준이며 주차는 최소30분입니다.</p>
   </fieldset>;
 }

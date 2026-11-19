@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ScheduleExecution } from "./ScheduleExecution";
 import { SchedulePanel } from "./SchedulePanel";
 import { TransmissionPerformance } from "./TransmissionPerformance";
+import { runView } from "./runView";
 import { api, activeStates, Info, DrivingResult, MessageViewer, stateLabel, TransmissionBench, type Catalog, type Result, type SavedRun } from "./SimulationTools";
 import type { PlanInput, PlanRecord, RunRecord, View, WorkspaceRecord } from "./workspaceTypes";
 
@@ -118,7 +119,7 @@ function RunInspector({record,catalog,onRun,onOpenPlan}:{record:RunRecord;catalo
   const live=activeStates.has(result.job_state || "");
   return <div className="run-inspector"><section className="card"><div className="panel-heading"><div><h2>실행 결과</h2><p className="note">{stateLabel(result)} · {record.transport==="mqtt"?"MQTT 실행":"로컬 생성 실행"}</p></div>{live&&<div className="schedule-actions"><button disabled={busy || !["running","paused"].includes(result.job_state || "")} onClick={()=>void control(result.job_state==="paused"?"resume":"pause")}>{result.job_state==="paused"?"실행 재개":"일시정지"}</button><button disabled={busy} onClick={()=>void control("stop")}>실행 중단</button></div>}</div>{error&&<p role="alert" className="error">{error}</p>}<RunMetrics result={result} live={live}/><p className="note">PUBACK는 브로커의 수신 확인입니다. 차량 데이터 조회는 저장된 설정으로 재생성하며 당시 전송 원문이나 후속 저장 완료를 뜻하지 않습니다.</p>{result.errors?.map((e,i)=><p key={i} className="error">{e}</p>)}</section>
   {request.source_plan_key&&<section className="card"><h2>실행 대상 차량 데이터</h2><p className="note">전체 차량 일정을 자동 실행합니다. 원본 일정에서 차량별 그래프·구간 데이터를 조회할 수 있습니다. 실행 샘플은 최대10건입니다.</p><button onClick={()=>onOpenPlan(request.source_plan_key!)}>원본 일정의 차량 데이터 조회</button></section>}
-  {request.generation ? <section className="card"><DrivingResult key={record.id} result={result} catalog={catalog}/></section> : <section className="card"><h2>생성 메시지 샘플</h2><MessageViewer samples={result.samples || []} catalog={catalog}/></section>}
+  {runView(request)==="single_journey" ? <section className="card"><DrivingResult key={record.id} result={result} catalog={catalog}/></section> : <section className="card"><h2>생성 메시지 샘플 · 최대10건</h2><p className="note">현재 실행에서 생성한 표본입니다. 차량별 운행 그래프와 구간별 JSON은 위의 원본 일정 조회에서 확인하세요.</p><MessageViewer samples={result.samples || []} catalog={catalog}/></section>}
   <section className="card"><h2>연결 배정과 성능</h2><p className="note">Client {result.allocated_clients}개 · 연결 성공 {result.connection_count ?? "기록 없음"}회 · 해제 {result.disconnect_count ?? "기록 없음"}회 · {request.config.mapping_mode==="shared"?"연결 풀":"차량별 전체 연결"} · {result.reconnect_count || 0}회 재연결</p><details><summary>차량 → Client 배정표 · 최대100대</summary><div className="table-scroll"><table><thead><tr><th>차량</th><th>Client</th></tr></thead><tbody>{result.assignments?.map(a=><tr key={a.vehicle_id}><td>{a.vehicle_id}</td><td>{a.client_id}</td></tr>)}</tbody></table></div></details><TransmissionPerformance result={result}/></section></div>;
 }
 

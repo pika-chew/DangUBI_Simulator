@@ -993,6 +993,20 @@ def test_workspace_plan_and_existing_run_share_history(client):
     assert client.get("/api/runs/"+old["id"]).json()==old
 
 
+def test_schedule_run_trace_returns_json_guidance_not_internal_error(client):
+    schedule=dict(mode="manual",measurement=dict(start="2026-11-16T13:00:00+09:00",end="2026-11-16T13:00:02+09:00"),
+                  interval_ms=2000,vehicles=[dict(vehicle_id="v000001",trips=[dict(start="2026-11-16T13:00:00+09:00",end="2026-11-16T13:00:02+09:00",road_profile="urban")])])
+    plan=client.post('/api/workspace/plans',json=dict(title="조회 경로 확인",schedule=schedule)).json()
+    started=client.post('/api/workspace/execute',json=dict(plan_key=plan['key'],realtime=False))
+    assert started.status_code==202,started.text
+    run=wait_job(client,started.json()['id'],lambda r:r['job_state'] not in control.ACTIVE)
+    response=client.get('/api/runs/'+run['id']+'/trace/1')
+    assert response.status_code==409
+    assert response.headers['content-type'].startswith('application/json')
+    assert '원본 일정' in response.json()['detail']
+    assert client.get('/api/workspace/records/'+plan['key']).status_code==200
+
+
 def test_workspace_record_delete_is_confirmed_atomic_and_protects_active(client,monkeypatch):
     run=client.post("/api/runs",json=request()).json()
     plan=client.post("/api/workspace/plans",json={"title":"시험 일정","schedule":scheduled_obd_body()["schedule"]}).json()

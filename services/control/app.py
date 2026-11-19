@@ -392,6 +392,8 @@ def get_run(run_id: str):
 def vehicle_trace(run_id: str, vehicle_number: int, start_seconds: float = 0, end_seconds: float | None = None, message_offset: int = 0):
     import math
     run = get_run(run_id)
+    if run["request"].get("source_plan_key") or run["request"].get("schedule_plan"):
+        raise HTTPException(409, detail="일정 실행의 차량 데이터는 원본 일정에서 차량과 운행을 선택해 조회하세요. 이 조회는 단일 운행 실행용입니다.")
     body = RunRequest.model_validate(run["request"])
     if not body.generation or not 1 <= vehicle_number <= body.config.vehicle_count or message_offset < 0 or message_offset > 10000:
         raise HTTPException(422, detail="자동 생성 실행의 차량 번호를 확인하세요.")

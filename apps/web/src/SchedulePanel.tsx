@@ -3,6 +3,8 @@ import type { Message, TracePoint } from "./SimulationTools";
 import { SpeedChart } from "./TelemetryChart";
 import type {PlanRecord, PlanInput, View} from "./workspaceTypes";
 import { TripTimeline } from "./TripTimeline";
+import { readJSONResponse } from "./http";
+import { currentFleet } from "./fleetSettings";
 import { FleetControls, defaultFleet, type FleetConfig } from "./FleetControls";
 
 type Road = "urban" | "highway" | "congested" | "mixed";
@@ -35,9 +37,7 @@ const example = (): Schedule => {
 const pattern = (): NonNullable<Vehicle["pattern"]> => ({ weekdays: [1, 2, 3, 4, 5], day_off_probability: 0.1, baseline_jitter_minutes: 10, slots: [{ start_time: "08:00", duration_min_minutes: 30, duration_max_minutes: 60, departure_jitter_minutes: 10, road_profile: "urban" }, { start_time: "18:00", duration_min_minutes: 30, duration_max_minutes: 60, departure_jitter_minutes: 10, road_profile: "mixed" }] });
 async function post<T>(path: string, body: unknown, signal: AbortSignal): Promise<T> {
   const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
-  const data = await response.json();
-  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : Array.isArray(data.detail) ? data.detail.map((e: string | { loc?: unknown[]; msg?: string }) => typeof e === "string" ? e : `${e.loc?.join(" · ")}: ${e.msg}`).join(" / ") : "요청을 처리하지 못했습니다.");
-  return data;
+  return readJSONResponse<T>(response);
 }
 function Hint({ text }: { text: string }) {
   return <span className="hint"><button type="button" className="info-button" aria-label={text}>i</button><span className="hint-content" role="tooltip">{text}</span></span>;
@@ -138,7 +138,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
     const source=record?.request ?? draftInput;
     setTitle(source?.title || "차량 시뮬레이션");
     setSetup(source?.schedule ? "individual" : "fleet");
-    setFleet(source?.fleet || defaultFleet());
+    setFleet(source?.fleet ? (record ? source.fleet : currentFleet(source.fleet)) : defaultFleet());
     setDraft(source?.schedule || example()); setEditor(0);
     if (!record || !source) return;
     const c=begin("저장된 일정의 차량 목록을 불러오고 있습니다.");
@@ -295,7 +295,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       {plan.anomaly_target_count !== undefined && <p>이상 이벤트 대상 {plan.anomaly_target_count}대 · 실제 발생 차량 수와 다를 수 있습니다.</p>}
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
       <div className="fields">
-        <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} · 운행 {v.observed_trip_count}회</option>)}</select></label>
+        <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 운행 {trips.length}회 · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{v.vehicle_id} · 운행 {v.observed_trip_count}회</option>)}</select></label>
         {frozenFleet?.execution_profile==="operations"&&<label>차량 번호 직접 조회<input type="text" placeholder="v000001" maxLength={7} onKeyDown={e=>{if(e.key==="Enter"&&/^v[0-9]{6}$/.test(e.currentTarget.value))void selectVehicle(e.currentTarget.value);}}/><span className="note">목록은 처음100대입니다. 다른 차량은 번호를 입력한 뒤 Enter로 조회합니다. 선택 차량: {vehicle}</span></label>}
         <label>조회 운행<select disabled={!!busy || !trips.length} value={tripKey} onChange={e => chooseTrip(trips.find(t => t.trip_key === e.target.value), true)}>{!trips.length && <option value="">관측 운행 없음</option>}{trips.map((t, i) => <option key={t.trip_key} value={t.trip_key}>운행 {i + 1} · {clock(t.start_ms)} → {clock(t.end_ms)}</option>)}</select></label>
       </div>

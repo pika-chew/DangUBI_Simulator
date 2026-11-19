@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { SpeedChart } from "./TelemetryChart";
+import { readJSONResponse } from "./http";
 
 type FieldSchema = {
   type: string;
@@ -193,14 +194,7 @@ export async function api<T>(url: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await response.json();
-  if (!response.ok)
-    throw new Error(
-      Array.isArray(data.detail)
-        ? data.detail.join("\n")
-        : data.detail || "요청을 처리하지 못했습니다.",
-    );
-  return data;
+  return readJSONResponse<T>(response);
 }
 export const activeStates = new Set([
   "starting",
