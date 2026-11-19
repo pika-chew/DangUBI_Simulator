@@ -2,6 +2,56 @@
 
 전체 조건 또는 수동 OBD 입력 → 일정/데이터 생성 → 송신 없는 확인 또는 TLS MQTT 전송을 지원합니다. 새 전체 조건 일정은 운행 1회당 최소·최대 시간을 지정하며 하루 목표 시간은 사용하지 않습니다.
 
+## 컨테이너 실행과 ECR 이미지 관리
+
+화면·FastAPI 제어기·Go 생성/송신 Worker를 Linux 이미지 하나에 포함합니다. 제어기는 한 프로세스로 실행하며 여러 컨테이너로 같은 실행을 자동 분산하지 않습니다. 최신 전체 조건 배정의 기본값은 Microtrip 2초·1회 운행 3~120분·일별 미운행 확률20%입니다. 명시적으로 저장한 기존 운행 범위는 유지합니다.
+
+Docker의 Linux 실행 엔진이 준비된 환경에서 저장소 루트에서 실행합니다.
+
+```powershell
+python scripts/container.py build --image dangubi-simulator:local-check
+python scripts/smoke_container.py --image dangubi-simulator:local-check
+docker run --detach --name dangubi --publish 127.0.0.1:8080:8080 --mount type=volume,source=dangubi-data,target=/data --stop-timeout 30 dangubi-simulator:local-check
+```
+
+`smoke_container.py`는 외부 네트워크를 차단한 별도 컨테이너와 임시 볼륨을 만들어 화면·OBD 생성·실행 중 정상 종료·컨테이너 교체 후 기록/조회 캐시 보존을 검사하고 자신이 만든 자원만 정리합니다. 실제 MQTT 접속은 하지 않습니다. Docker context를 지정하려면 빌드 명령은 `python scripts/container.py --context 이름 build ...`, 검사 명령은 `python scripts/smoke_container.py --context 이름 --image ...`로 실행합니다. 기본 context 설정은 변경하지 않습니다.
+
+화면은 http://127.0.0.1:8080 입니다. 종료는 `docker stop --time 30 dangubi`입니다. `/data`의 볼륨을 유지하고 컨테이너를 교체하면 실행 기록과 조회 캐시를 다시 사용할 수 있습니다. 볼륨 삭제는 기록 삭제이므로 주의하세요. 실행 도중 교체하지 말고 정상 종료 후 교체합니다. 강제 종료 시 이전 실행은 중단 상태로 표시하며 자동으로 이어 보내지 않습니다. 기본 이미지에는 인증·HTTPS 계층이 없으므로 AWS에서는 사설 접근 또는 별도 인증된 접근 경로를 구성해야 합니다.
+
+| 환경변수 | 역할 | 컨테이너 기본값 |
+|---|---|---|
+| DANGUBI_DATA_DIR | 실행 기록·조회 캐시 기본 디렉터리 | /data |
+| DANGUBI_DB | 실행 기록 DB 개별 경로 | /data/runs.sqlite3 |
+| DANGUBI_CHECKPOINT_DB | 조회용 상태 캐시 개별 경로 | /data/obd-state.sqlite3 |
+| DANGUBI_WORKER | Go 실행 파일 경로 | /opt/dangubi/bin/worker |
+| DANGUBI_MQTT_PROFILE | MQTT 서버 프로필 경로 | /run/secrets/mqtt.json |
+
+로컬 실행에서 환경변수를 생략하면 기존 `.local` 경로를 사용합니다. 상대 경로는 프로젝트 루트 기준입니다. 데이터 디렉터리보다 개별 DB 경로 설정이 우선합니다. UID/GID10001의 일반 사용자로 실행하므로 호스트 폴더를 연결할 때는 해당 사용자의 쓰기 권한을 준비해야 합니다. 동일 데이터 볼륨을 여러 제어기에 동시에 연결하지 않습니다.
+
+MQTT를 사용할 때 프로필과 인증서를 이미지에 복사하지 않고 읽기 전용으로 연결합니다.
+
+```powershell
+docker run --detach --name dangubi --publish 127.0.0.1:8080:8080 --mount type=volume,source=dangubi-data,target=/data --mount type=bind,source=C:/absolute/private/dangubi,target=/run/secrets,readonly --stop-timeout 30 dangubi-simulator:local-check
+```
+
+호스트 경로는 실제 준비한 디렉터리로 바꾸고, `mqtt.json`의 인증서/키 경로는 컨테이너 안의 `/run/secrets/...`로 지정합니다. Linux 호스트의 소유권/파일 권한도 확인합니다. `enabled`·`contract_reviewed`·서버 상한 및 화면 송신 확인은 기존대로 적용합니다.
+
+검증한 이미지는 준비된 ECR private 저장소로 업로드합니다. AWS CLI와 대상 저장소 접근 권한이 필요합니다. 아래 계정·리전·저장소·태그는 실제 대상으로 바꿉니다.
+
+```powershell
+python scripts/container.py push --image dangubi-simulator:local-check --account 123456789012 --region ap-northeast-2 --repository dangubi-simulator --tag git-COMMIT_ID
+```
+
+업로드 명령은 기존 저장소를 확인하고 로컬 이미지 ID를 태그해 전송합니다. 리소스 생성·배포는 수행하지 않습니다. AWS CLI 프로필은 `--profile 이름`으로 선택하며 비밀 값을 인수로 받지 않습니다. ECR 인증 토큰은 Docker의 표준 입력으로 전달하고 Docker의 자격증명 보관 설정을 사용합니다. 출력되는 `digest_reference`를 배포 버전 식별에 사용하세요. `latest`는 업로드 태그로 허용하지 않습니다. ECR에서도 버전 태그 변경을 막는 정책을 권장합니다. 기본 이미지는 Linux/amd64이며 ARM은 `build --platform linux/arm64`로 별도 빌드·실행 검증합니다. 기반 이미지 버전은 Dockerfile의 ARG에서 지정하며 정식 배포 시 digest 고정도 검토합니다.
+
+`.dockerignore`는 제품 빌드에 필요한 경로만 허용합니다. 로컬 실행 데이터·인증서·개인 키·대화/검토 문서·보조 계산기는 빌드 입력에서 제외합니다. 기본 동작은 송신 없음입니다.
+
+### 운영 목표와 현재 실행 한도
+
+운영 지원 목표는 차량25,000대·실행30일, 연결 풀 기본/차량별 연결 병행, 접속 상한 전체1,000회/초·풀500개를 기준으로 준비합니다. 생성 조건·연결 수·배정은 실행 전 설정하고 실행 중 고정합니다. 발행 지연의 초기 검증 목표는 정상 구간 p95 1초/p99 2초이며 실제 보장 수치가 아닙니다.
+
+현재 공개 일정 실행은 여전히1시간·10,000메시지와 기존 차량 수·MQTT 서버/Go 프로필 제한을 적용합니다. 컨테이너 패키징이 이 한도를 해제하거나25,000대30일 지원을 완성하는 것은 아닙니다. 대규모 운영 프로필·스트리밍/상태 처리·접속 제어 확장과 실제 AWS 계측이 후속 작업입니다. 풀500개의 최대 부하 수용 여부도 PUBACK·발행 지연·배정 부하를 측정해 판단합니다.
+
 ## 실행
 
 Python 3.14 이상, Go 1.26 이상, Node.js 24.22 이상을 준비합니다.

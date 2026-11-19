@@ -12,6 +12,14 @@ OBD 차량 데이터를 생성하고 MQTT 연결 풀 또는 차량별 연결로 
 
 [사용법·기능·제한](docs/USAGE.md)
 
+## 컨테이너
+
+Linux 컨테이너 빌드: `python scripts/container.py build --image dangubi-simulator:local-check`
+
+격리 실행 확인: `python scripts/smoke_container.py --image dangubi-simulator:local-check`
+
+데이터 볼륨 연결과 ECR 업로드는 [컨테이너 사용 안내](docs/USAGE.md#컨테이너-실행과-ecr-이미지-관리)를 참고하세요. AWS 실행 환경은 별도로 선택하며 현재 제품의 전송 상한을 유지합니다.
+
 ## 구성
 
 - `apps/web`: React + TypeScript 관리 화면

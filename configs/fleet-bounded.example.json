@@ -27,5 +27,5 @@
     "mixed": 40
   },
   "trip_min_minutes": 3,
-  "trip_max_minutes": 90
+  "trip_max_minutes": 120
 }

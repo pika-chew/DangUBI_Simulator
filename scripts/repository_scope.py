@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 ALLOWED_ROOTS = {"apps", "services", "contracts", "scripts", "configs", "tests", ".github", ".vscode"}
-ALLOWED_FILES = {"README.md", ".gitignore", ".editorconfig", ".gitattributes", "DangUBI.code-workspace", "docs/USAGE.md"}
+ALLOWED_FILES = {"README.md", ".gitignore", ".editorconfig", ".gitattributes", "DangUBI.code-workspace", "docs/USAGE.md", "Dockerfile", ".dockerignore"}
 FORBIDDEN_PARTS = {"node_modules", ".venv", ".local", "__pycache__", "certs", "secrets", "dist", ".codex", ".agents"}
 
 

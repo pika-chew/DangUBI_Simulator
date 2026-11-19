@@ -34,7 +34,7 @@ export function defaultFleet(): FleetConfig {
   return {
     fleet_version: "fleet-plan-4", vehicle_count: 20,
     measurement: { start, end: iso(localTime(Date.parse(start) + 3 * 86400000)), timezone: "Asia/Seoul" },
-    interval_ms: 2000, seed: 42, trip_min_minutes: 3, trip_max_minutes: 90,
+    interval_ms: 2000, seed: 42, trip_min_minutes: 3, trip_max_minutes: 120,
     daily_variation_percent: 25, departure_jitter_minutes: 30,
     day_off_probability: 0.2, weekend_activity_probability: 0.5,
     anomaly_vehicle_percent: 5, anomaly_events_per_hour: 2, anomaly_intensity: "medium",
@@ -56,7 +56,7 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
     <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’ 후 ‘최소·최대 시간 배정’을 선택하면 하루 목표 없이 새 일정을 만듭니다. 원본은 보존합니다.</p>}
     <div className="fields">
-      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-4" ? {fleet_version:"fleet-plan-4",vehicle_variation_percent:undefined,daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??90} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-4">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-4" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
+      <label>운행 시간 배정<select value={v.fleet_version} onChange={e=>patch(e.target.value==="fleet-plan-4" ? {fleet_version:"fleet-plan-4",vehicle_variation_percent:undefined,daily_driving_minutes:undefined,trip_min_minutes:v.trip_min_minutes??3,trip_max_minutes:v.trip_max_minutes??120} : {fleet_version:e.target.value as FleetConfig["fleet_version"],daily_driving_minutes:v.daily_driving_minutes??120,trip_min_minutes:undefined,trip_max_minutes:undefined})}><option value="fleet-plan-4">최소·최대 시간 배정 · 기본</option>{v.fleet_version!=="fleet-plan-4" && <option value={v.fleet_version}>이전 배정 · 기록 확인</option>}</select></label>
       {numeric("vehicle_count", "차량 수", 1, 100, "현재 로컬 계획은 최대100대입니다. 설정 자동화가 대규모 생성·전송 지원을 의미하지는 않습니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
       <label>측정 종료 (KST)<input type="datetime-local" step="1" value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>

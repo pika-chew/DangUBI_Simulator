@@ -67,7 +67,7 @@ class FleetRequest(Strict):
             if self.daily_driving_minutes is not None:
                 raise ValueError("새 시간 범위 배정에는 하루 목표 시간을 사용하지 않습니다. 최소·최대 운행 시간을 지정하세요.")
             self.trip_min_minutes = 3 if self.trip_min_minutes is None else self.trip_min_minutes
-            self.trip_max_minutes = 90 if self.trip_max_minutes is None else self.trip_max_minutes
+            self.trip_max_minutes = (120 if self.fleet_version == "fleet-plan-4" else 90) if self.trip_max_minutes is None else self.trip_max_minutes
             if self.trip_min_minutes > self.trip_max_minutes:
                 raise ValueError("최소 운행 시간은 최대 운행 시간 이하여야 합니다.")
             return self

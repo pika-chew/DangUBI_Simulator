@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import subprocess
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from services.control.jobs import JobManager, ACTIVE
+from services.control.runtime import RuntimePaths
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -26,11 +26,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = json.loads((ROOT / "contracts/obd-development.json").read_text(encoding="utf-8"))
-WORKER = ROOT / ".local" / ("worker.exe" if os.name == "nt" else "worker")
-DB = Path(os.environ.get("DANGUBI_DB", str(ROOT / ".local/runs.sqlite3")))
-MQTT_PROFILE = Path(os.environ.get("DANGUBI_MQTT_PROFILE", str(ROOT / ".local/mqtt.json")))
+RUNTIME = RuntimePaths.from_env(ROOT)
+WORKER = RUNTIME.worker
+DB = RUNTIME.database
+MQTT_PROFILE = RUNTIME.mqtt_profile
 MQTT_LOCK = threading.Lock()
-CHECKPOINTS = CheckpointStore(ROOT / ".local" / "obd-state.sqlite3")
+CHECKPOINTS = CheckpointStore(RUNTIME.checkpoints)
 @asynccontextmanager
 async def lifespan(_app):
     JOBS.recover()
