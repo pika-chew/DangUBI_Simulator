@@ -27,32 +27,33 @@ import (
 )
 
 type testBroker struct {
-	listener         net.Listener
-	mu               sync.Mutex
-	sockets          []net.Conn
-	ids              map[string]bool
-	connectionCounts map[string]int
-	topicClients     map[string]string
-	clientChanges    int
-	published        int
-	messages         []map[string]any
-	noAck            bool
-	closeOnce        bool
-	closed           bool
-	ackDelay         time.Duration
-	slowSuffix       string
-	discardPayload   bool
-	handling         int
-	peakHandling     int
-	receivedAt       []time.Time
-	receivedIDs      []string
-	receivedTopics   []string
-	measureDigest    bool
-	fingerprint      [32]byte
-	lastTimestamp    map[string]float64
-	lastKind         map[string]float64
-	invalidMeasured  int
-	outOfOrder       int
+	listener          net.Listener
+	mu                sync.Mutex
+	sockets           []net.Conn
+	ids               map[string]bool
+	connectionCounts  map[string]int
+	topicClients      map[string]string
+	clientChanges     int
+	published         int
+	messages          []map[string]any
+	noAck             bool
+	closeOnce         bool
+	closed            bool
+	ackDelay          time.Duration
+	slowSuffix        string
+	discardPayload    bool
+	handling          int
+	peakHandling      int
+	receivedAt        []time.Time
+	receivedIDs       []string
+	receivedTopics    []string
+	measureDigest     bool
+	fingerprint       [32]byte
+	lastTimestamp     map[string]float64
+	lastKind          map[string]float64
+	invalidMeasured   int
+	maxMeasuredTopics int
+	outOfOrder        int
 }
 
 func makeCertificate(t *testing.T, template, parent *x509.Certificate, key, parentKey *ecdsa.PrivateKey) []byte {
@@ -248,7 +249,11 @@ func (b *testBroker) measureMessage(topic string, m map[string]any) {
 		b.invalidMeasured++
 		return
 	}
-	if _, ok := b.lastTimestamp[topic]; !ok && len(b.lastTimestamp) >= 1000 {
+	limit := b.maxMeasuredTopics
+	if limit == 0 {
+		limit = 1000
+	}
+	if _, ok := b.lastTimestamp[topic]; !ok && len(b.lastTimestamp) >= limit {
 		b.invalidMeasured++
 		return
 	}

@@ -7,14 +7,15 @@ FROM ${GO_IMAGE} AS worker-build
 WORKDIR /src
 COPY services/worker/go.mod services/worker/go.sum ./
 RUN go mod download
-COPY services/worker/ ./
+COPY services/worker/*.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/worker .
 
 FROM ${NODE_IMAGE} AS web-build
 WORKDIR /src
 COPY apps/web/package.json apps/web/package-lock.json ./
 RUN npm ci
-COPY apps/web/ ./
+COPY apps/web/src/ ./src/
+COPY apps/web/index.html apps/web/tsconfig.json apps/web/vite.config.ts ./
 RUN npm run build
 
 FROM ${PYTHON_IMAGE} AS runtime
@@ -35,7 +36,7 @@ RUN apt-get update \
     && chown 10001:10001 /data
 COPY services/control/requirements.lock.txt /app/services/control/requirements.lock.txt
 RUN python -m pip install --no-cache-dir -r services/control/requirements.lock.txt
-COPY services/control/ /app/services/control/
+COPY services/control/*.py /app/services/control/
 COPY contracts/ /app/contracts/
 COPY --from=worker-build /out/worker /opt/dangubi/bin/worker
 COPY --from=web-build /src/dist/ /app/apps/web/dist/

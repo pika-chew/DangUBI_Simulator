@@ -6,9 +6,26 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
+
+func TestMeasurementVehicleTrackingBoundaries(t *testing.T) {
+	for _, limit := range []int{1000, 25000} {
+		b := testBroker{}
+		if limit == 25000 {
+			b.maxMeasuredTopics = limit
+		}
+		m := map[string]any{"ts": float64(1), "ty": float64(4), "pld": map[string]any{}}
+		for i := 0; i <= limit; i++ {
+			b.measureMessage(strconv.Itoa(i), m)
+		}
+		if len(b.lastTimestamp) != limit || b.invalidMeasured != 1 {
+			t.Fatalf("차량 추적 한도 %d: 저장 %d 오류 %d", limit, len(b.lastTimestamp), b.invalidMeasured)
+		}
+	}
+}
 
 func TestMeasurementFingerprintMatchesPythonAndDetectsOrder(t *testing.T) {
 	m := map[string]any{"ty": float64(4), "ts": float64(1), "pld": map[string]any{"sp": float64(1.5), "flags": []any{true, nil, "한"}}}
@@ -112,6 +129,9 @@ func TestMQTTMeasurementFixture(t *testing.T) {
 	b.mu.Lock()
 	b.discardPayload = true
 	b.measureDigest = os.Getenv("DANGUBI_MEASURE_DIGEST") == "1"
+	if os.Getenv("DANGUBI_MEASURE_OPERATIONS") == "1" {
+		b.maxMeasuredTopics = 25000
+	}
 	if os.Getenv("DANGUBI_MEASURE_PARKING") == "1" || os.Getenv("DANGUBI_MEASURE_COMPRESSED") == "1" {
 		b.connectionCounts = make(map[string]int)
 	}

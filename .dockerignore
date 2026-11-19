@@ -22,6 +22,8 @@
 !contracts/
 !contracts/*.json
 **/test_*.py
+**/node_modules
+**/dist
 **/*_test.go
 **/__pycache__/**
 **/*.pem

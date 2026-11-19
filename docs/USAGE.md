@@ -767,3 +767,19 @@ API는 기존 `/api/fleets/obd/{vehicle_id}/{trip_key}`와 `/api/schedules/obd/{
 
 ### 설정 info 읽기
 조건 옆 동그란 i를 info라고 부릅니다. 마우스를 올리거나 키보드로 포커스하면 짧은 설정 설명과 변경 효과가 나타나고, 하단 `입력 범위`에 최솟값·최댓값·단위·필요한 합계 조건을 별도로 표시합니다. 차량 수는 소량/운영 프로필에 따라 범위가 바뀝니다. 계획 기간과 실행 기간은 구분하며, 실제 MQTT의 Client 상한은 선택한 일정과 현재 서버 설정을 함께 반영합니다. 숫자 범위 표시는 기존 제한을 설명하는 것이며 생성 조건·실행 상한 자체를 변경하지 않습니다.
+
+### 운영 경로의 목표 규모 계측
+
+`scripts/measure_operations.py`는 임시 DB·Worker·인증서·루프백 MQTT 브로커를 사용하며 AWS에 연결하지 않습니다. Python 개발 의존성과 Go가 필요합니다.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/measure_operations.py --stage generation --vehicles 25000 --clients 500 --window-seconds 60 --wall-seconds 30 --output .local/operations-generation.json
+```
+
+실제 로컬 MQTT 발행·PUBACK·수신 지문을 확인하려면 `--stage mqtt`로 바꿉니다. `--clients 500`은 연결 풀, `--clients 25000`은 차량별 연결입니다. 두 방식은 순차 실행하세요. `--workers`는1/2/4, `--phase aligned`는 동시 출발, `--phase spread`는 출발 시각을2초 안에 분산합니다. 실제 사용자 조건의 운행 분포 시험이 아니라 실제 OBD 생성기를 쓰는 시험용 동시 운행 부하입니다. 운행은3분, 관측은 최대60초여서 이 시험에는 정상 종료 Trip이 없습니다.
+
+`--wall-seconds`는10~120초의 실행 시간 한도이며 기본60초입니다. `--rss-mib`는256~4096MiB의 표본 RSS 중단 기준으로, 순간 초과를 막는 운영체제 메모리 제한은 아닙니다. 한도에 도달하면 중단·정리하고 부모도 별도 시간 한도에서 하위 프로세스를 회수합니다. 브로커는 전체 메시지 원문 대신 건수·차량별 마지막 시각·지문을 집계합니다.
+
+결과는 `.local`에만 저장합니다. `completed_within_budget`는 전체 완료, `broker_integrity_verified`는 정상 완료와 전체 수신 일치, `observed_delivery_consistent`는 처리한 부분의 수신 일치입니다. 부분 일치를 전체 성공으로 해석하지 마세요. 생성 전용에는 스키마 검증·전송이 없으며 송신 시험에는 검증·지문 계산 비용이 포함됩니다. 250ms 실행 조회·자원 수집도 측정에 영향을 줍니다. RSS/CPU는 제어기와 생성·송신 Worker만 포함하고 브로커·Docker 엔진은 제외합니다.
+
+Windows에서 한 송신 주소·한 브로커 주소로 수만 개 연결을 열면 TCP 임시 포트가 먼저 고갈될 수 있습니다. 접속 실패를 AWS 연결 한계로 해석할 수 없으며 Linux·분리된 송수신 환경에서 별도 확인해야 합니다. 이 짧은 시험은30일 안정성이나 AWS 처리량을 보장하지 않습니다.
