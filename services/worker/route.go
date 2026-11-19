@@ -178,7 +178,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		}
 		if timedEvents && event != "" {
 			longitudinal := (end - v) / dt
-			if dt < .5 || (event == "급가속" && longitudinal < 3) || (event == "급감속" && longitudinal > -3) || (event == "급회전" && min(v*v, end*end)*math.Abs(curvature) < 3) {
+			if dt < .5 || (event == "급가속" && longitudinal < 3) || ((event == "급감속" || event == "급정지") && longitudinal > -3) || (event == "급회전" && min(v*v, end*end)*math.Abs(curvature) < 3) {
 				event = ""
 			}
 			if event != "" {
@@ -186,6 +186,9 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			}
 		}
 		s := motionSegment{Start: t, End: t + dt, V0: v, V1: end, Grade: grade, Curvature: curvature, Road: road, Reason: reason, Event: event, Before: totals}
+		if g.ModelVersion == journeyVersion {
+			s.Event = maneuverEvent(s)
+		}
 		p.Segments = append(p.Segments, s)
 		totals = advance(s, dt)
 		t += dt
@@ -282,16 +285,27 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		}
 		harshAccel, harshBrake, harshLateral := 3.3, 3.8, 3.4
 		if timedEvents {
+			pending := clock.next <= t && v <= 5/3.6
 			ready := clock.due(t)
+			if g.ModelVersion == journeyVersion && pending {
+				ready = true
+			}
 			if ready && p.Eligible && t >= lastEventEnd+30 {
 				harshAccel, harshBrake, harshLateral = eventStrength(g.AnomalyIntensity, g.Weather == "rain", eventRNG)
-				event = chooseEvent(eventRNG, road, v, flowFactor, turn, harshAccel, harshBrake, harshLateral)
+				if g.ModelVersion == journeyVersion {
+					event = chooseJourneyEvent(eventRNG, road, v, flowFactor, turn, harshAccel, harshBrake, harshLateral)
+				} else {
+					event = chooseEvent(eventRNG, road, v, flowFactor, turn, harshAccel, harshBrake, harshLateral)
+				}
 			}
 			if event == "급가속" {
 				target = min(road.Limit/3.6, max(target, v+4+eventRNG.Float64()*4))
 			}
-			if event == "급감속" {
+			if event == "급감속" || event == "급정지" {
 				target = max(0, v-4-eventRNG.Float64()*6)
+				if event == "급정지" {
+					target = 0
+				}
 				reason = "앞차·정차 상황의 강한 감속"
 			}
 			if routeUntil < p.Duration && routeUntil-t <= 60 {
@@ -299,11 +313,23 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 			}
 			target = min(target, decel*max(0, p.Duration-t-3)/3)
 		}
-		if turn || event == "급회전" {
+		if event == "급유턴" {
+			if routeUntil-t > 30 && p.Duration-t > 40 {
+				uturn = true
+				turn = true
+				radius = 12
+			} else {
+				event = ""
+			}
+		}
+		if turn || event == "급회전" || event == "급유턴" {
 			turn = true
 			lateral := 1.2
-			if event == "급회전" {
+			if event == "급회전" || event == "급유턴" {
 				lateral = harshLateral
+			}
+			if event == "급유턴" {
+				target = min(road.Limit/3.6, math.Sqrt(lateral*radius))
 			}
 			target = min(target, math.Sqrt(lateral*radius))
 			if target > 1 {
@@ -320,7 +346,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 		if event == "급가속" && target > v {
 			a = harshAccel
 		}
-		if event == "급감속" && target < v {
+		if (event == "급감속" || event == "급정지") && target < v {
 			a = harshBrake
 		}
 		transition := math.Abs(target-v) / a
@@ -331,7 +357,7 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 				entering.Limit = max(road.Limit, v*3.6)
 			}
 			realEvent := ""
-			if event == "급가속" && target > v || event == "급감속" && target < v {
+			if event == "급가속" && target > v || (event == "급감속" || event == "급정지") && target < v {
 				realEvent = event
 			}
 			appendSegment(transition, target, entering, "목표 속도 전환 · "+reason, grade, 0, realEvent)
@@ -356,15 +382,23 @@ func getRouteScenario(req Request, index int) *scenarioPlan {
 				turnReason = "저속 유턴"
 			}
 			hold = min(hold, angle/math.Abs(curvature)/max(v, .1))
+			if event == "급유턴" {
+				hold = min(angle/math.Abs(curvature)/max(v, .1), max(0, p.Duration-t-v/decel-2))
+			}
 		}
 		realEvent := ""
 		if curvature != 0 && v*v*math.Abs(curvature) >= 3 {
 			realEvent = "급회전"
+			if event == "급유턴" {
+				realEvent = "급유턴"
+			}
 		}
 		if timedEvents {
 			// 가감속 중 지나간 후보는 버리고 다음 후보 시각까지만 정속 구간을 만든다.
 			clock.due(t)
-			hold = min(hold, clock.next-t)
+			if event != "급유턴" {
+				hold = min(hold, clock.next-t)
+			}
 		} else {
 			hold = max(.1, hold)
 		}

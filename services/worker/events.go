@@ -78,3 +78,29 @@ func chooseEvent(rng *rand.Rand, road roadContext, v, flow float64, turn bool, a
 	}
 	return kinds[rng.Intn(len(kinds))]
 }
+
+// 일정 운행의 추가 기동 후보. 기존 후보 시계/대상 차량/회복 간격 안에서만 선택한다.
+func chooseJourneyEvent(rng *rand.Rand, road roadContext, v, flow float64, turn bool, accel, brake, lateral float64) string {
+	kinds := []string{}
+	open := road.Name == "도심 도로" || road.Name == "간선 도로" || road.Name == "외곽 간선 · 제한표지" || road.Name == "지정 간선 · 제한표지" || road.Name == "고속 도로"
+	if open && !turn && flow >= .65 && road.Limit/3.6-v >= 4 && accel >= 3 {
+		kinds = append(kinds, "급가속") // 저속 출발 여부는 실제 생성 후 판정한다.
+	}
+	if v >= 8 && (flow < 1 || road.StopChance > 0) && brake >= 3 {
+		kinds = append(kinds, "급감속")
+		if road.Name == "도심 도로" && !turn {
+			kinds = append(kinds, "급정지")
+		}
+	}
+	if turn && road.Name == "도심 도로" && v >= 5 && lateral >= 3 {
+		kinds = append(kinds, "급회전")
+		// 실제 지도상의 유턴 허용 지점이 아닌 합성 도심 교차로 상황이다.
+		if flow >= .65 && v <= 30/3.6 {
+			kinds = append(kinds, "급유턴")
+		}
+	}
+	if len(kinds) == 0 {
+		return ""
+	}
+	return kinds[rng.Intn(len(kinds))]
+}

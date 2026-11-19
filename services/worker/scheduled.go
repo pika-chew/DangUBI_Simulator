@@ -92,7 +92,7 @@ func scheduledPage(input Request, cache *scheduledCache, executionOnly bool) (Re
 			last = -1
 		}
 	}
-	out := &ScheduledOutput{Model: "schedule-obd-3/journey-8", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
+	out := &ScheduledOutput{Model: "schedule-obd-4/journey-8-events-2", MicroCount: max(int64(0), last-first+1), Messages: []map[string]any{}, Trace: []TracePoint{}}
 	if !executionOnly {
 		_, _, _, out.EventsUntilQueryEnd = scenarioAt(r, 0, float64(s.UntilMS-s.StartMS)/1000)
 	}

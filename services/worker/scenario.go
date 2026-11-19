@@ -270,12 +270,16 @@ func scenarioAt(req Request, index int, t float64) (motionTotals, float64, Motio
 	totals := advance(s, dt)
 	v := s.V0 + (s.V1-s.V0)*dt/(s.End-s.Start)
 	context := MotionContext{Road: s.Road.Name, Reason: s.Reason, SpeedLimit: s.Road.Limit, Grade: s.Grade * 100, Acceleration: (s.V1 - s.V0) / (s.End - s.Start), Lateral: v * v * math.Abs(s.Curvature), Heading: math.Mod(totals.Heading*180/math.Pi+36000, 360), Eligible: p.Eligible, Style: p.Style, Weather: p.Weather}
-	if s.Event != "" && dt > 0 {
+	if s.Event != "" && dt > 0 && (!completedManeuver(s.Event) || t >= s.End) {
 		context.Event = s.Event
 	}
 	events := 0
 	for _, seg := range p.Segments {
-		if seg.Event != "" && t >= seg.Start+min(1, seg.End-seg.Start) {
+		confirmedAt := seg.Start + min(1, seg.End-seg.Start)
+		if completedManeuver(seg.Event) {
+			confirmedAt = seg.End
+		}
+		if seg.Event != "" && t >= confirmedAt {
 			events++
 		}
 	}
