@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from fastapi import HTTPException
+from services.control.transmission_goal import assess
 
 ACTIVE = {"starting", "running", "pausing", "paused", "resuming", "stopping"}
 
@@ -44,6 +45,7 @@ class JobManager:
             return self.active.id if self.active else None
 
     def save(self, job):
+        job.result["transmission_goal"] = assess(job.result)
         with self.database() as db:
             db.execute("UPDATE runs SET result=? WHERE id=?", (json.dumps(job.result), job.id))
 
@@ -55,6 +57,7 @@ class JobManager:
                 if result.get("job_state") in ACTIVE:
                     result.update(job_state="interrupted", state="interrupted", connection_cleanup_confirmed=False,
                                   errors=["제어 API가 재시작되어 이전 실행의 최종 상태를 확인할 수 없습니다. 자동 재실행하지 않습니다."])
+                    result["transmission_goal"] = assess(result)
                     db.execute("UPDATE runs SET result=? WHERE id=?", (json.dumps(result), run_id))
 
     def start(self, run_id, request, data, worker, timeout, runner=None):
@@ -67,6 +70,7 @@ class JobManager:
                       payload_bytes=0, connected_clients=0, active_clients=0, mqtt_published=0, puback_count=0,
                       publish_attempts=0, unconfirmed_messages=0, reconnect_count=0, elapsed_ms=0,
                       unsent_messages=planned if mqtt else 0, samples=[], errors=[], connection_cleanup_confirmed=False)
+        result["transmission_goal"] = assess(result)
         created = datetime.now(timezone.utc).isoformat()
         with self.lock:
             if self.closing or self.active:

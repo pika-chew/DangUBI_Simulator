@@ -192,6 +192,7 @@ def test_background_completion_and_no_network(client):
     run = wait_job(client, response.json()["id"], lambda r: r["job_state"] == "completed")
     assert run["result"]["processed_messages"] == 6
     assert run["result"]["puback_count"] == 0
+    assert run["result"]["transmission_goal"]["status"] == "not_applicable"
     assert run["result"]["remaining_messages"] == 0
     assert run["result"]["elapsed_ms"] >= 190
     assert client.post("/api/jobs/" + run["id"] + "/stop").json() == run
@@ -219,6 +220,7 @@ def test_worker_failure_saved_and_recovery(client, monkeypatch, tmp_path):
     control.JOBS.recover()
     recovered = client.get("/api/jobs/" + failed["id"]).json()
     assert recovered["result"]["job_state"] == "interrupted"
+    assert recovered["result"]["transmission_goal"]["status"] == "incomplete"
     assert recovered["result"]["connection_cleanup_confirmed"] is False
     assert control.JOBS.active_id() is None
 

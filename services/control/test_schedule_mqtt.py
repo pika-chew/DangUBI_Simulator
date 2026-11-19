@@ -87,6 +87,13 @@ def test_schedule_mqtt_mapping_lifetimes_and_payload(mqtt_client,mode,lifetime,w
     assert r["job_state"]=="completed",r
     assert r["processed_messages"]==r["planned_messages"]==r["mqtt_published"]==r["puback_count"]==6
     assert r["unconfirmed_messages"]==r["active_clients"]==0
+    goal=r["transmission_goal"]
+    measured=r["performance"]["schedule"]
+    assert goal["status"] in {"passed","exceeded"},goal
+    assert goal["sample_count"]==measured["count"]==6
+    assert 0<=goal["within_1s_count"]<=goal["within_2s_count"]<=6
+    assert measured["p99_upper_ms"]>=measured["p95_upper_ms"]
+    assert (goal["status"]=="passed")==bool(measured["within_1s_count"]*100>=6*95 and measured["within_2s_count"]*100>=6*99)
     assert r["connection_cleanup_confirmed"] and r["reconnect_count"]==0
     assert r["connected_clients"]==(1 if mode=="shared" else 3)
     assert r["connection_count"]==(2 if mode=="shared" and lifetime=="while_driving" else 1 if mode=="shared" else 3)

@@ -8,6 +8,7 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from services.control.jobs import JobManager, ACTIVE
 from services.control.runtime import RuntimePaths
+from services.control.transmission_goal import assess
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -250,6 +251,8 @@ def call_worker(body: RunRequest, operation: str, run_id: str):
         raise HTTPException(502, detail="Worker 응답을 확인하지 못했습니다.")
     if process.returncode or "error" in result:
         raise HTTPException(422, detail=result.get("error", "Worker 처리에 실패했습니다."))
+    if operation == "mqtt":
+        result["transmission_goal"] = assess(result)
     return result
 
 

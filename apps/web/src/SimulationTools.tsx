@@ -86,8 +86,20 @@ type TimingSummary = {
   mean_ms: number;
   max_ms: number;
   p95_upper_ms: number;
+  p99_upper_ms?: number;
+  within_1s_count?: number;
+  within_2s_count?: number;
+  over_5s_count?: number;
 };
 export type Result = {
+  transmission_goal?: {
+    status: "passed" | "exceeded" | "incomplete" | "pending" | "unavailable" | "not_applicable";
+    reason: string;
+    sample_count?: number;
+    within_1s_count?: number;
+    within_2s_count?: number;
+    over_5s_count?: number;
+  };
   buffer_budget?: {
     max_messages:number;max_bytes:number;reserved_messages:number;reserved_bytes:number;
     peak_reserved_messages:number;peak_reserved_bytes:number;
