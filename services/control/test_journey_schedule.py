@@ -118,4 +118,7 @@ def test_new_fleet_removes_vehicle_coefficient_and_preserves_legacy_schedule():
     # 새 예제의 기본 범위와 독립적으로 이전 3~90분 일정의 지문을 검증한다.
     body.update(fleet_version="fleet-plan-3",vehicle_count=2,vehicle_variation_percent=20,trip_max_minutes=90)
     schedule=expand(FleetRequest(**body))[0]
-    assert hashlib.sha256(schedule.model_dump_json().encode()).hexdigest()=="869b084ca26842f237248868606deb28fd929cd659a50d7c225274279e6cf8dd"
+    assert schedule.include_em is True
+    # 출력 정책 메타데이터를 제외해 em 옵션 도입 전 운행 일정의 지문을 비교한다.
+    legacy=schedule.model_dump_json(exclude={"include_em"})
+    assert hashlib.sha256(legacy.encode()).hexdigest()=="869b084ca26842f237248868606deb28fd929cd659a50d7c225274279e6cf8dd"

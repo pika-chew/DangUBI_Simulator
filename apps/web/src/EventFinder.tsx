@@ -2,9 +2,9 @@ import {useEffect,useRef,useState,type ReactNode} from "react";
 import type {Message} from "./SimulationTools";
 import {readJSONResponse} from "./http";
 
-const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지"];
+const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","","과속"];
 const clock=(ms:number)=>new Date(ms).toLocaleString("ko-KR",{timeZone:"Asia/Seoul",hour12:false});
-type Evidence={kind:string;start_ms:number;end_ms:number;start_speed_kmh:number;end_speed_kmh:number;acceleration_mps2:number;angle_deg:number;lateral_mps2:number;road:string};
+type Evidence={kind:string;start_ms:number;end_ms:number;start_speed_kmh:number;end_speed_kmh:number;acceleration_mps2:number;angle_deg:number;lateral_mps2:number;road:string;speed_limit_kmh:number};
 type Row={sequence:number;message:Message;evidence:Evidence[]};
 type Search={rows:Row[];next_offset:number;total:number;scanned:number;nonzero:number;zero:number;missing:number;complete:boolean};
 type SearchResponse={status:string;event_search?:Search;restoration?:{checkpoint_epoch:number;completed_preceding_trips:number;total_preceding_trips:number}};
@@ -51,7 +51,7 @@ export function EventFinder({path,body,disabled,onSelect,renderMessages,vehicle}
     <h3>선택 운행 이벤트 찾기</h3>
     <p className="note">현재 Microtrip 페이지와 관계없이 선택 운행의 전체 관측 범위를 검색합니다. 메시지를 추가 저장하지 않으며 실제 전송 성공 여부와는 구분합니다.</p>
     {!supported&&<p className="note">검색 기능은 서버·Worker 갱신 후 사용할 수 있습니다.</p>}
-    <div className="schedule-actions"><label>이벤트 종류 <select value={filter} onChange={e=>reset(Number(e.target.value))}><option value={0}>전체 이벤트</option>{names.map((name,bit)=><option key={bit} value={1<<bit}>{name}</option>)}</select></label>
+    <div className="schedule-actions"><label>이벤트 종류 <select value={filter} onChange={e=>reset(Number(e.target.value))}><option value={0}>전체 이벤트</option>{names.map((name,bit)=>name&&<option key={bit} value={1<<bit}>{name}</option>)}</select></label>
       <button disabled={disabled||running||!supported} onClick={()=>void search()}>이벤트 찾기</button>
       {running&&<button onClick={()=>{active.current?.abort();setPhase("cancelled");setNote("검색을 취소했습니다. 완료된 검색 구간만 집계합니다.");}}>검색 취소</button>}
       {phase==="partial"&&<button disabled={disabled} onClick={()=>void search(true)}>다음 구간 검색</button>}
@@ -64,7 +64,7 @@ export function EventFinder({path,body,disabled,onSelect,renderMessages,vehicle}
     {!!rows.length&&<div className="table-scroll"><table><thead><tr><th>시각 (KST)</th><th>이벤트</th><th>em</th><th>확인</th></tr></thead><tbody>{rows.map(row=><tr key={row.message.ts} className={picked===row?"is-selected":""}><td>{clock(row.message.ts)}</td><td>{names.filter((_,bit)=>(Number(row.message.pld.em)&(1<<bit))!==0).join(", ")}</td><td>{Number(row.message.pld.em)}</td><td><button disabled={disabled||running} onClick={()=>{setPicked(row);onSelect(row.message.ts);}}>앞뒤 30초 보기</button></td></tr>)}</tbody></table></div>}
     <p className="note">표는 최대100건씩 표시합니다. 이벤트 포함 메시지 수는 독립 사건 수가 아닙니다. 지속 이벤트는 여러 메시지에 나타날 수 있습니다.</p>
     {picked&&<><h4>선택 이벤트 · {clock(picked.message.ts)}</h4><p className="note">개발 모형의 판정 근거입니다. 가감속은 부호로 구분하며 완료 기동은 완료 시각을 포함하는 메시지에 기록됩니다.</p>
-      <div className="table-scroll"><table><thead><tr><th>기동</th><th>도로</th><th>시작 → 종료</th><th>속도 (km/h)</th><th>가감속 (m/s²)</th><th>방향 변화 (°)</th><th>횡가속도 (m/s²)</th></tr></thead><tbody>{picked.evidence.map((e,i)=><tr key={i}><td>{e.kind}</td><td>{e.road}</td><td>{clock(e.start_ms)} → {clock(e.end_ms)}</td><td>{e.start_speed_kmh.toFixed(1)} → {e.end_speed_kmh.toFixed(1)}</td><td>{e.acceleration_mps2.toFixed(2)}</td><td>{e.angle_deg.toFixed(1)}</td><td>{e.lateral_mps2.toFixed(2)}</td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>기동</th><th>도로</th><th>시작 → 종료</th><th>속도 (km/h)</th><th>제한속도 (km/h)</th><th>가감속 (m/s²)</th><th>방향 변화 (°)</th><th>횡가속도 (m/s²)</th></tr></thead><tbody>{picked.evidence.map((e,i)=><tr key={i}><td>{e.kind}</td><td>{e.road}</td><td>{clock(e.start_ms)} → {clock(e.end_ms)}</td><td>{e.start_speed_kmh.toFixed(1)} → {e.end_speed_kmh.toFixed(1)}</td><td>{e.speed_limit_kmh.toFixed(1)}</td><td>{e.acceleration_mps2.toFixed(2)}</td><td>{e.angle_deg.toFixed(1)}</td><td>{e.lateral_mps2.toFixed(2)}</td></tr>)}</tbody></table></div>
       {renderMessages([picked.message],vehicle,picked.sequence-1)}</>}
   </section>;
 }

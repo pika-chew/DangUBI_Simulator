@@ -5,7 +5,7 @@ import math
 import random
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import field_validator, Field, model_validator
 from services.control.schedule import Strict, Measurement, ScheduleRequest, KST, instant, plan
 from services.control.journey_schedule import varied_day
 from services.control.schedule_obd import ScheduledOBDRequest, generate, key_for
@@ -37,7 +37,7 @@ class RoadMix(Strict):
 
 
 class FleetRequest(Strict):
-    include_em: bool = False
+    include_em: bool = True
     execution_profile: Literal["small_test", "operations"] = "small_test"
     fleet_version: Literal["fleet-plan-1", "fleet-plan-2", "fleet-plan-3", "fleet-plan-4"] = "fleet-plan-1"
     vehicle_count: int = Field(default=20, ge=1, le=25000)
@@ -60,6 +60,7 @@ class FleetRequest(Strict):
 
     @model_validator(mode="after")
     def feasible(self):
+        self.include_em = True
         if self.execution_profile=="small_test" and self.vehicle_count>100:
             raise ValueError("소량 시험은 최대100대입니다. 운영 프로필을 선택하세요.")
         if self.fleet_version == "fleet-plan-4":
@@ -87,7 +88,15 @@ class FleetOBDRequest(Strict):
     checkpoint_epoch: int | None = Field(default=None, ge=0)
     force_end_trip: bool = False
     search_events: bool = False
-    event_mask: int = Field(default=0, ge=0, le=127)
+    event_mask: int = Field(default=0, ge=0, le=383)
+
+    @field_validator("event_mask")
+    @classmethod
+    def reserved_event_bit(cls, value):
+        if value & 128:
+            raise ValueError("bit7은 예약 비트입니다. 과속은 bit8(256)을 사용하세요.")
+        return value
+
 
 
 def rng(req, *parts):

@@ -1,7 +1,6 @@
 {
   "title": "시험용 이벤트 확인 · 고빈도 조건",
   "fleet": {
-    "include_em": true,
     "execution_profile": "operations",
     "fleet_version": "fleet-plan-4",
     "vehicle_count": 1,

@@ -179,7 +179,7 @@ func position(lat, lon, distance float64) (float64, float64) {
 
 func automaticMessage(req Request, index, seq int) (map[string]any, string) {
 	message, state := automaticMessageBody(req, index, seq)
-	if req.Generation.IncludeEM && message["ty"].(float64) == 4 {
+	if message["ty"].(float64) == 4 {
 		mask := 0
 		if modelVersion(req.Generation) != generatorVersion {
 			t := float64(offsetMS(req, seq)) / 1000

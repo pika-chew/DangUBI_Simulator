@@ -33,11 +33,8 @@ def test_em_fleet_query_and_operating_stream_match_without_altering_schedule():
     disabled=obd(FleetOBDRequest(fleet=off),vehicle,key,WORKER,None,None,0,100)
     enabled=obd(FleetOBDRequest(fleet=on),vehicle,key,WORKER,None,None,0,100)
     assert disabled["trip"]==enabled["trip"]
-    stripped=copy.deepcopy(enabled["messages"])
-    for message in stripped:
-        assert isinstance(message["pld"].pop("em"),int)
-    assert stripped==disabled["messages"]
-    assert all("em" not in m["pld"] for m in disabled["messages"])
+    assert enabled["messages"]==disabled["messages"]
+    assert all(isinstance(m["pld"]["em"],int) for m in disabled["messages"])
     stream=FleetExecution(on,WORKER)
     session=GenerationSession(WORKER)
     try:
@@ -84,7 +81,7 @@ def test_em_single_journey_preview_preserves_other_fields(client,monkeypatch):
     for old,new in zip(a,b):
         message=new["message"]
         control.validate_message(message)
-        if message["ty"]==4:assert message["pld"].pop("em")==0
+        if message["ty"]==4:assert message["pld"]["em"]==0
         assert old==new
 
 
@@ -100,4 +97,4 @@ def test_em_selection_reaches_local_mqtt_publication(mqtt_client,monkeypatch):
         assert result["processed_messages"]==result["mqtt_published"]==result["puback_count"]==6
         micro=[s["message"] for s in result["samples"] if s["message"]["ty"]==4]
         assert len(micro)==3
-        assert all(("em" in m["pld"])==include for m in micro)
+        assert all("em" in m["pld"] for m in micro)

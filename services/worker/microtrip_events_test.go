@@ -27,7 +27,7 @@ func TestMicrotripEventIntervalAndBits(t *testing.T) {
 	}
 }
 
-func TestMicrotripEMTogglePreservesDataAndCachedPages(t *testing.T) {
+func TestMicrotripMandatoryEMAndCachedPages(t *testing.T) {
 	s := sessionInput(1800)
 	s.AnomalyEligible = true
 	s.AnomalyEventsPerHour = 60
@@ -58,11 +58,10 @@ func TestMicrotripEMTogglePreservesDataAndCachedPages(t *testing.T) {
 		for i, m := range on.Scheduled.Messages {
 			p := m["pld"].(map[string]any)
 			mask, ok := p["em"].(int)
-			if !ok || mask < 0 || mask > 127 {
+			if !ok || mask < 0 || mask > 383 || mask&128 != 0 {
 				t.Fatal("비트마스크 없음/범위 초과")
 			}
 			found = found || mask != 0
-			delete(p, "em")
 			if !reflect.DeepEqual(m, off.Scheduled.Messages[i]) {
 				t.Fatal("em 이외의 주행 데이터 변경")
 			}

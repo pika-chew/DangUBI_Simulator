@@ -125,7 +125,12 @@ class ConnectionConfig(BaseModel):
 
 
 class Generation(BaseModel):
-    include_em: bool = False
+    @model_validator(mode="after")
+    def mandatory_em(self):
+        self.include_em = True
+        return self
+
+    include_em: bool = True
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
     profile: Literal["urban", "highway", "congested", "mixed"]
     model_version: Literal["combustion-demo-1", "combustion-scenario-2", "combustion-route-3", "combustion-korea-4", "combustion-powertrain-5", "combustion-events-6"] = "combustion-demo-1"

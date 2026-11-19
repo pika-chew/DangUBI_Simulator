@@ -37,7 +37,7 @@ func TestEventSearchMatchesEveryActualMicrotripAndPages(t *testing.T) {
 				break
 			}
 		}
-		for _, filter := range []int{0, 1, 8, 64, 1 | 8 | 64} {
+		for _, filter := range []int{0, 1, 8, 64, 256, 1 | 8 | 64 | 256} {
 			found := []map[string]any{}
 			nonzero, zero := int64(0), int64(0)
 			cursor := int64(0)
@@ -101,7 +101,7 @@ func TestEventSearchDistinguishesDisabledEmptyAndZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := a.Scheduled.EventSearch; p.Missing != 2 || p.Zero != 0 || !p.Complete {
+	if p := a.Scheduled.EventSearch; p.Missing != 0 || p.Zero != 2 || !p.Complete {
 		t.Fatal(p)
 	}
 	s.IncludeEM = true

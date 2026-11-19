@@ -56,6 +56,9 @@ func intervalEventMask(segments []motionSegment, from, until float64) int {
 	first := sort.Search(len(segments), func(i int) bool { return segments[i].End > from })
 	for i := first; i < len(segments) && segments[i].Start <= until; i++ {
 		s := segments[i]
+		if a, b, ok := overspeedSpan(s); ok && math.Max(a, from) < math.Min(b, until) {
+			mask |= 1 << 8
+		}
 		event := maneuverEvent(s)
 		// 출발 속도/정지 도달/유턴 각도는 실제 기동 완료 시점에 확정한다.
 		if completedManeuver(event) && s.End > until {
@@ -82,4 +85,27 @@ func intervalEventMask(segments []motionSegment, from, until float64) int {
 		}
 	}
 	return mask
+}
+
+// 과속은 기존 기동 라벨/대상 비율과 별개로 실제 속도를 모형의 적용 제한속도와 비교한다.
+// 경계의 부동소수점 오차를 제외하기 위해 0.01km/h를 초과해야 하며 별도 지속시간 문턱은 없다.
+func overspeedSpan(s motionSegment) (float64, float64, bool) {
+	if s.End <= s.Start || s.Road.Limit <= 0 {
+		return 0, 0, false
+	}
+	limit := (s.Road.Limit + .01) / 3.6
+	if math.Max(s.V0, s.V1) <= limit {
+		return 0, 0, false
+	}
+	a, b := s.Start, s.End
+	if s.V1 != s.V0 {
+		cross := s.Start + (limit-s.V0)/(s.V1-s.V0)*(s.End-s.Start)
+		if s.V0 <= limit {
+			a = math.Max(a, cross)
+		}
+		if s.V1 <= limit {
+			b = math.Min(b, cross)
+		}
+	}
+	return a, b, a < b
 }

@@ -15,6 +15,7 @@ type EventEvidence struct {
 	Angle        float64 `json:"angle_deg"`
 	Lateral      float64 `json:"lateral_mps2"`
 	Road         string  `json:"road"`
+	Limit        float64 `json:"speed_limit_kmh"`
 }
 type EventSearchRow struct {
 	Sequence int64           `json:"sequence"`
@@ -39,18 +40,18 @@ func searchEventMessages(s *ScheduledInput, r Request, first, last int64, messag
 	start := min(last+1, first+int64(s.Offset))
 	out := &EventSearchPage{Rows: []EventSearchRow{}, Total: total}
 	cursor := start
-	if !s.IncludeEM {
-		out.Missing = last + 1 - start
-		out.Scanned = out.Missing
-		out.NextOffset = total
-		out.Complete = true
-		return out
-	}
 	segments := getScenario(r, 0).Segments
 	step := float64(s.IntervalMS) / 1000
 	type span struct{ low, high int64 }
 	ranges := []span{}
 	for _, seg := range segments {
+		if a, b, ok := overspeedSpan(seg); ok {
+			lo := max(first, int64(1), int64(math.Ceil(a/step)))
+			hi := min(last, int64(math.Ceil(b/step)))
+			if lo <= hi {
+				ranges = append(ranges, span{lo, hi})
+			}
+		}
 		kind := maneuverEvent(seg)
 		if kind == "" {
 			continue
@@ -96,14 +97,14 @@ func searchEventMessages(s *ScheduledInput, r Request, first, last int64, messag
 					for i := idx; i < len(segments) && segments[i].Start <= t; i++ {
 						seg := segments[i]
 						kind := maneuverEvent(seg)
-						if intervalEventMask([]motionSegment{seg}, from, t) == 0 {
-							continue
+						bits := intervalEventMask([]motionSegment{seg}, from, t)
+						if bits&127 != 0 {
+							row.Evidence = append(row.Evidence, searchEvidence(seg, s.StartMS, seg.Start, math.Min(seg.End, t), kind))
 						}
-						end := math.Min(seg.End, t)
-						dt := end - seg.Start
-						acceleration := (seg.V1 - seg.V0) / (seg.End - seg.Start)
-						endSpeed := seg.V0 + acceleration*dt
-						row.Evidence = append(row.Evidence, EventEvidence{Kind: kind, StartMS: s.StartMS + int64(math.Round(seg.Start*1000)), EndMS: s.StartMS + int64(math.Round(end*1000)), StartSpeed: seg.V0 * 3.6, EndSpeed: endSpeed * 3.6, Acceleration: acceleration, Angle: math.Abs(seg.Curvature) * (seg.V0 + endSpeed) / 2 * dt * 180 / math.Pi, Lateral: math.Min(seg.V0*seg.V0, endSpeed*endSpeed) * math.Abs(seg.Curvature), Road: seg.Road.Name})
+						if bits&(1<<8) != 0 {
+							a, b, _ := overspeedSpan(seg)
+							row.Evidence = append(row.Evidence, searchEvidence(seg, s.StartMS, math.Max(a, from), math.Min(b, t), "과속"))
+						}
 					}
 					out.Rows = append(out.Rows, row)
 				}
@@ -120,4 +121,12 @@ done:
 	out.Zero = out.Scanned - out.Nonzero
 	out.Complete = cursor > last
 	return out
+}
+
+func searchEvidence(seg motionSegment, startMS int64, from, until float64, kind string) EventEvidence {
+	acceleration := (seg.V1 - seg.V0) / (seg.End - seg.Start)
+	v0 := seg.V0 + acceleration*(from-seg.Start)
+	v1 := seg.V0 + acceleration*(until-seg.Start)
+	dt := until - from
+	return EventEvidence{Kind: kind, StartMS: startMS + int64(math.Round(from*1000)), EndMS: startMS + int64(math.Round(until*1000)), StartSpeed: v0 * 3.6, EndSpeed: v1 * 3.6, Acceleration: acceleration, Angle: math.Abs(seg.Curvature) * (v0 + v1) / 2 * dt * 180 / math.Pi, Lateral: math.Min(v0*v0, v1*v1) * math.Abs(seg.Curvature), Road: seg.Road.Name, Limit: seg.Road.Limit}
 }

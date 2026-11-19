@@ -14,7 +14,7 @@ def execute(manager, job, data, worker, timeout):
     paused_seconds = 0.0
     result = job.result.copy()
     operations=data.get("execution_profile")=="operations"
-    result.update(assignments=data["assignments"][:100] if operations else data["assignments"],assignment_count=len(data["assignments"]), model_version="schedule-obd-4/journey-8-events-2",
+    result.update(assignments=data["assignments"][:100] if operations else data["assignments"],assignment_count=len(data["assignments"]), model_version="schedule-obd-5/journey-8-events-3",
                   microtrip_count=0, trip_count=0, schedule_delay_ms=0)
     last_save = 0.0
     result["execution_timing"]={}

@@ -3,7 +3,6 @@ import type { Message, TracePoint } from "./SimulationTools";
 import { EventFinder } from "./EventFinder";
 import { SpeedChart } from "./TelemetryChart";
 import type {PlanRecord, PlanInput, View} from "./workspaceTypes";
-import { EMControl } from "./EMControl";
 import { TripTimeline } from "./TripTimeline";
 import { readJSONResponse } from "./http";
 import { currentFleet } from "./fleetSettings";
@@ -72,6 +71,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
   const [rangeEnd, setRangeEnd] = useState("");
   const [force, setForce] = useState(false);
   const [eventTime,setEventTime]=useState<number|undefined>();
+  const detailsRef=useRef<HTMLElement|null>(null);
   const [restoration, setRestoration] = useState<Restoration | null>(null);
   const [cache, setCache] = useState<CacheStats | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
@@ -81,6 +81,11 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
   const [error, setError] = useState("");
   const request = useRef<AbortController | null>(null);
   const trip = trips.find(t => t.trip_key === tripKey);
+  useEffect(()=>{
+    if(eventTime===undefined||!loaded||eventTime<loaded.start||eventTime>loaded.end)return;
+    const frame=requestAnimationFrame(()=>detailsRef.current?.scrollIntoView({behavior:"smooth",block:"start"}));
+    return ()=>cancelAnimationFrame(frame);
+  },[loaded?.start,loaded?.end,eventTime]);
   useEffect(() => {
     void cacheAction("GET");
     return () => { request.current?.abort(); cacheID.current++; };
@@ -242,7 +247,6 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         <div className="fields">
           <label>측정 시작<input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
           <label>측정 종료<input type="datetime-local" step="1" value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
-          <EMControl value={draft.include_em} onChange={value=>edit({...draft,include_em:value})} />
           <label>일정 방식<select value={draft.mode} onChange={e => { const mode = e.target.value as Schedule["mode"]; edit({ ...draft, mode, vehicles: draft.vehicles.map(v => mode === "manual" ? { vehicle_id: v.vehicle_id, trips: [] } : { vehicle_id: v.vehicle_id, pattern: pattern(), overrides: {} }) }); }}><option value="manual">직접 지정</option><option value="patterned">자동 일정 · 개발 예시</option></select></label>
           <label>Microtrip 주기 (초)<input type="number" min="0.1" max="86400" step="0.1" value={draft.interval_ms / 1000} onChange={e => edit({ ...draft, interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
           <label>seed <Hint text="같은 설정과 seed로 같은 일정을 재생성합니다. 날짜별 편차가 있어도 조회할 때마다 무작위로 바뀌지 않습니다." /><input type="number" value={draft.seed} onChange={e => edit({ ...draft, seed: Number(e.target.value) })} /></label>
@@ -312,7 +316,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         <label className="schedule-check"><input type="checkbox" disabled={!!busy || !trip.continues_after_window} checked={force} onChange={e => { setForce(e.target.checked); clearOBD(); }} />측정 종료 시 시험용 Trip 생성 <Hint text="운행이 측정 끝 이후까지 계속될 때 그 시각까지의 시험 요약을 만듭니다. 정상 종료와 구분하며 이 화면에서는 전송하지 않습니다. 이후 실제 운행 상태를 변경하지 않습니다." /></label>
         {!trip.continues_after_window && <p className="note">선택 운행은 측정 기간 안에 정상 종료하므로 시험용 Trip 옵션이 비활성화됩니다.</p>}
         <EventFinder key={[record?.key,draftToken,vehicle,tripKey,force].join(":")} vehicle={vehicle} path={"/api/"+(frozenFleet?"fleets":"schedules")+"/obd/"+vehicle+"/"+tripKey} body={{...(frozenFleet?{fleet:frozenFleet}:{schedule:frozen}),force_end_trip:force}} disabled={!!busy} renderMessages={renderMessages} onSelect={ts=>{setEventTime(ts);void query(Math.max(trip.observed_start_ms,ts-30000),Math.min(trip.observed_end_ms,ts+30000));}} />
-        <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>{summary ? "선택 운행 다시 조회" : "선택 운행 OBD 생성·조회"}</button>
+        <button className="primary" disabled={!!busy} onClick={() => void query(undefined, undefined, 0, true)}>{summary ? "OBD 상세 다시 조회" : "OBD 상세 조회"}</button>
         <p className="note">운행 막대나 조회 운행을 선택하면 상세 데이터가 자동 조회됩니다. 먼저 가까운 중간 상태에서 이어 계산합니다. 처음 조회하는 먼 구간은 요청당 최대16회·48시간의 운행을 나누어 준비한 뒤 자동으로 조회합니다.</p>
         {restoration && <div className="schedule-status" role="status">
           <p>중간 상태 준비 · {restoration.completed_preceding_trips} / {restoration.total_preceding_trips}회 완료</p>
@@ -322,12 +326,15 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
         </div>}
       </>}
     </section>}
-    {summary && trip && <section className="card" hidden={view !== "data"}>
+    {(summary || loaded) && trip && <section ref={detailsRef} className="card" hidden={view !== "data"}>
       <h2>차량 데이터</h2>
-      <p>{vehicle} · {clock(trip.start_ms)} 출발 · 모델 {summary.model}</p>
-      <p className="note">출발 위치 {summary.initial_state.lat.toFixed(6)}, {summary.initial_state.lon.toFixed(6)} · 초기 총주행거리 {(summary.initial_state.odometer_m / 1000).toFixed(3)} km.</p>
+      <p>{vehicle} · {clock(trip.start_ms)} 출발 · 모델 {(summary ?? loaded!.data).model}</p>
+      <p className="note">출발 위치 {(summary ?? loaded!.data).initial_state.lat.toFixed(6)}, {(summary ?? loaded!.data).initial_state.lon.toFixed(6)} · 초기 총주행거리 {((summary ?? loaded!.data).initial_state.odometer_m / 1000).toFixed(3)} km.</p>
+      {summary && <>
       <div className={`schedule-trip-status ${summary.synthetic_trip ? "synthetic" : ""}`}><b>{summary.trip ? summary.synthetic_trip ? "시험용 종료 Trip" : "정상 종료 Trip" : "종료 Trip 없음"}</b><p>{summary.trip ? summary.synthetic_trip ? "측정 종료까지의 값만 집계한 시험 요약입니다. 실제 운행 종료가 아닙니다." : "실제 출발부터 종료까지의 전체 운행 요약입니다. 아래 조회 구간을 좁혀도 이 요약은 바뀌지 않습니다." : "이 운행은 측정 종료 이후에도 계속됩니다. 종료 전에는 정상 Trip을 생성하지 않습니다."}</p></div>
       {summary.trip && <details><summary>Trip 요약 · 총주행시간 {duration(Number(summary.trip.pld.edt)-Number(summary.trip.pld.stt))} · 표/JSON 보기</summary>{renderMessages([summary.trip], vehicle)}</details>}
+      </>}
+      {!summary&&<p className="note">선택한 구간의 상세 결과입니다. 전체 운행의 Trip 요약은 ‘전체 관측 구간 보기’로 확인할 수 있습니다.</p>}
       <h3>Microtrip 구간 조회</h3>
       <fieldset disabled={!!busy} className="schedule-fieldset"><div className="fields">
         <label>조회 시작 (KST)<input type="datetime-local" step="0.001" value={rangeStart} onChange={e => setRangeStart(e.target.value)} /></label>

@@ -95,7 +95,7 @@ func TestKoreaAnomalyRespectsWeatherCapAndReplay(t *testing.T) {
 	}
 }
 
-func TestPreviousModelsKeepPublishedOutput(t *testing.T) {
+func TestPreviousModelsKeepPhysicalOutput(t *testing.T) {
 	expected := map[string]string{
 		powertrainVersion: "950757b4c15772001313a254325a0a5ee54670ec7f07fbd0647241e0f90e5c81",
 		koreaVersion:      "4be852b58ca24333a961bc62e7a1b47af57fc92f0981b8afe3e194780d09c8a9",
@@ -111,6 +111,10 @@ func TestPreviousModelsKeepPublishedOutput(t *testing.T) {
 		out, err := process(r)
 		if err != nil {
 			t.Fatal(err)
+		}
+		// 필수 em 추가를 제외한 이전 물리값/Trip/상태표의 기존 지문은 유지한다.
+		for _, sample := range out.Samples {
+			delete(sample.Message["pld"].(map[string]any), "em")
 		}
 		data, _ := json.Marshal(map[string]any{"samples": out.Samples, "trip_summaries": out.TripSummaries, "trace": out.Trace, "scenario": out.Scenario})
 		if fmt.Sprintf("%x", sha256.Sum256(data)) != hash {

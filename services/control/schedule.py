@@ -90,7 +90,7 @@ class Vehicle(Strict):
 
 
 class ScheduleRequest(Strict):
-    include_em: bool = False
+    include_em: bool = True
     schedule_version: Literal["schedule-plan-1"] = "schedule-plan-1"
     mode: Literal["manual", "patterned"]
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)
@@ -100,6 +100,7 @@ class ScheduleRequest(Strict):
 
     @model_validator(mode="after")
     def modes(self):
+        self.include_em = True
         if sum(len(v.trips or []) for v in self.vehicles) > 10000:
             raise ValueError("직접 지정 운행은 실행 전체 최대10,000회입니다.")
         if len({v.vehicle_id for v in self.vehicles}) != len(self.vehicles):

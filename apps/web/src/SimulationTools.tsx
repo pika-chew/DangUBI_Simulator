@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { SpeedChart } from "./TelemetryChart";
-import { EMControl } from "./EMControl";
 import { readJSONResponse } from "./http";
 
 type FieldSchema = {
@@ -716,7 +715,6 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                             </select>
                           </label>
                         )}
-                        <EMControl value={generation.include_em} onChange={value=>setGeneration({...generation,include_em:value})} />
                         {[
                           "combustion-powertrain-5",
                           "combustion-events-6",
@@ -1414,7 +1412,7 @@ export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample
   function display(key:string,value:unknown) {
     if (value === undefined || value === null) return "—";
     if (key === "em" && typeof value === "number") {
-      const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지"];
+      const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","","과속"];
       return `${value} · 0x${value.toString(16).toUpperCase().padStart(2,"0")} · ${names.filter((_,bit)=>(value & (1<<bit))!==0).join(", ") || "이벤트 없음"}`;
     }
     if (["ts","clt","stt","edt"].includes(key) && typeof value === "number") return new Date(value).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"})+" · UTC ms "+value;

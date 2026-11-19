@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+from fastapi import HTTPException
 from pathlib import Path
 
 from services.control.test_app import client,control,scheduled_obd_body
@@ -52,10 +53,40 @@ def test_schedule_search_distinguishes_missing_and_zero(client,monkeypatch):
     url="/api/schedules/obd/"+t["vehicle_id"]+"/"+t["trip_key"]
     body["search_events"]=True
     off=client.post(url,json=body).json()["event_search"]
-    assert off["missing"]==off["total"] and off["zero"]==0 and off["complete"]
+    assert off["missing"]==0 and off["zero"]==off["total"] and off["complete"]
     body["schedule"]["include_em"]=True
     on=client.post(url,json=body).json()["event_search"]
     assert on["zero"]==on["total"] and on["missing"]==0 and on["complete"]
     bad=copy.deepcopy(body);bad["event_mask"]=128
     assert client.post(url,json=bad).status_code==422
     assert client.get("/api/health").json()["features"]["microtrip_event_search"]
+
+
+def test_event_thirty_second_detail_query_needs_no_whole_trip_query(client,monkeypatch):
+    monkeypatch.setattr(control,"WORKER",WORKER)
+    source=json.loads((ROOT/"apps/web/src/event-inspection.example.json").read_text(encoding="utf-8"))["fleet"]
+    t=client.post("/api/fleets/preview",json=source).json()["trips"][0]
+    url="/api/fleets/obd/"+t["vehicle_id"]+"/"+t["trip_key"]
+    search=client.post(url,json={"fleet":source,"search_events":True}).json()["event_search"]
+    chosen=search["rows"][0]["message"]
+    start=max(t["observed_start_ms"],chosen["ts"]-30000)
+    end=min(t["observed_end_ms"],chosen["ts"]+30000)
+    response=client.post(url+f"?start_ms={start}&end_ms={end}",json={"fleet":source})
+    assert response.status_code==200,response.text
+    data=response.json()
+    assert data["trace"] and data["messages"] and chosen in data["messages"]
+    assert all(start<=m["ts"]<=end for m in data["messages"])
+    assert client.get("/api/runs").json()==[]
+
+
+def test_microtrip_schema_requires_em_and_reserves_bit_seven():
+    body=copy.deepcopy(control.CATALOG["profiles"]["4"]["example"])
+    body["pld"]["em"]=256|32
+    control.validate_message(body)
+    import pytest
+    body["pld"]["em"]=128
+    with pytest.raises(HTTPException) as error:control.validate_message(body)
+    assert error.value.status_code==422
+    del body["pld"]["em"]
+    with pytest.raises(HTTPException) as error:control.validate_message(body)
+    assert error.value.status_code==422
