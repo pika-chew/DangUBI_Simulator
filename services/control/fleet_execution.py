@@ -55,7 +55,7 @@ class FleetExecution:
             if not selected and observed_row(vehicle,a,b,cursor["current"]["road_profile"],self.start,self.end,self.req.interval_ms) is not None:
                 raise GenerationFailure("운영 운행은 계획의 순서대로 생성해야 합니다.")
             payload=dict(start_ms=a,end_ms=b,from_ms=max(a,self.start) if selected else b,
-                         until_ms=min(b,self.end) if selected else b,interval_ms=self.req.interval_ms,
+                         until_ms=min(b,self.end) if selected else b,interval_ms=self.req.interval_ms,include_em=self.req.include_em,
                          offset=offset if selected else 0,limit=limit if selected else 1,
                          tid=int(cursor["key"][:12],16),seed=int(hashlib.sha256(f"{self.req.seed}|{cursor['key']}".encode()).hexdigest()[:7],16),
                          profile=cursor["current"]["road_profile"],**{k:cursor["initial"][k] for k in ("lat","lon","odometer_m")},

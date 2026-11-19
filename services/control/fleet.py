@@ -37,6 +37,7 @@ class RoadMix(Strict):
 
 
 class FleetRequest(Strict):
+    include_em: bool = False
     execution_profile: Literal["small_test", "operations"] = "small_test"
     fleet_version: Literal["fleet-plan-1", "fleet-plan-2", "fleet-plan-3", "fleet-plan-4"] = "fleet-plan-1"
     vehicle_count: int = Field(default=20, ge=1, le=25000)
@@ -183,7 +184,7 @@ def iter_vehicle_days(req, vehicle, fixed):
 
 
 def selected_schedule(req, vehicles):
-    return ScheduleRequest(mode="manual", measurement=req.measurement, seed=req.seed, interval_ms=req.interval_ms, vehicles=vehicles)
+    return ScheduleRequest(mode="manual", measurement=req.measurement, seed=req.seed, interval_ms=req.interval_ms, include_em=req.include_em, vehicles=vehicles)
 
 
 def expand(req):

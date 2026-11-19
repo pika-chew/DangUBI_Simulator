@@ -11,6 +11,7 @@ const generatorVersion = "combustion-demo-1"
 
 // 실차 보정 전의 재현 가능한 개발 모델. 단위는 제품 사용 안내에 명시한다.
 type Generation struct {
+	IncludeEM             bool              `json:"include_em,omitempty"`
 	Continuity            *EngineContinuity `json:"continuity,omitempty"`
 	AnomalyIntensity      string            `json:"anomaly_intensity,omitempty"`
 	EngineStart           string            `json:"engine_start,omitempty"`
@@ -177,6 +178,19 @@ func position(lat, lon, distance float64) (float64, float64) {
 }
 
 func automaticMessage(req Request, index, seq int) (map[string]any, string) {
+	message, state := automaticMessageBody(req, index, seq)
+	if req.Generation.IncludeEM && message["ty"].(float64) == 4 {
+		mask := 0
+		if modelVersion(req.Generation) != generatorVersion {
+			t := float64(offsetMS(req, seq)) / 1000
+			mask = intervalEventMask(getScenario(req, index).Segments, math.Max(0, t-float64(req.Config.IntervalMS)/1000), t)
+		}
+		message["pld"].(map[string]any)["em"] = mask
+	}
+	return message, state
+}
+
+func automaticMessageBody(req Request, index, seq int) (map[string]any, string) {
 	if isPowertrain(req.Generation.ModelVersion) {
 		return powertrainMessage(req, index, seq)
 	}

@@ -71,7 +71,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
     worker_id = digest(worker)
     before=time.perf_counter()
     scope = hashlib.sha256(json.dumps({"source":SOURCE_ID,"worker":worker_id,
-        "seed":req.seed,"interval_ms":req.interval_ms,"measurement":req.measurement.model_dump(),
+        "seed":req.seed,"interval_ms":req.interval_ms,"include_em":req.include_em,"measurement":req.measurement.model_dump(),
         "vehicle":({"vehicle_id":vehicle_id} if cache_context is not None else vehicle_data),"initial":dict(state,coolant_c=coolant),
         "anomaly":anomaly,"context":cache_context},sort_keys=True,separators=(",", ":")).encode()).hexdigest()
     resume_start, epoch = 0, None
@@ -107,7 +107,7 @@ def generate(body, vehicle_id, trip_key, worker: Path, start_ms, end_ms, offset,
         initial=dict(state,coolant_c=coolant,heading_rad=heading)
         selected=i==len(chain)-1
         key=key_for(vehicle_id,departure,arrival,road)
-        payload={"start_ms":departure,"end_ms":arrival,"from_ms":low if selected else arrival,"until_ms":high if selected else arrival,"interval_ms":req.interval_ms,"offset":offset if selected else 0,"limit":limit if selected else 1,"tid":int(key[:12],16),"seed":int(hashlib.sha256(f"{req.seed}|{key}".encode()).hexdigest()[:7],16),"profile":road,**state,"continuity":{"vehicle_seed":vehicle_seed,"coolant_c":coolant,"heading_rad":heading},"force_end":body.force_end_trip if selected else False}
+        payload={"start_ms":departure,"end_ms":arrival,"from_ms":low if selected else arrival,"until_ms":high if selected else arrival,"interval_ms":req.interval_ms,"include_em":req.include_em,"offset":offset if selected else 0,"limit":limit if selected else 1,"tid":int(key[:12],16),"seed":int(hashlib.sha256(f"{req.seed}|{key}".encode()).hexdigest()[:7],16),"profile":road,**state,"continuity":{"vehicle_seed":vehicle_seed,"coolant_c":coolant,"heading_rad":heading},"force_end":body.force_end_trip if selected else False}
         if anomaly:
             payload.update(anomaly)
         remaining=deadline-time.monotonic()

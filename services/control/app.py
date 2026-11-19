@@ -125,6 +125,7 @@ class ConnectionConfig(BaseModel):
 
 
 class Generation(BaseModel):
+    include_em: bool = False
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
     profile: Literal["urban", "highway", "congested", "mixed"]
     model_version: Literal["combustion-demo-1", "combustion-scenario-2", "combustion-route-3", "combustion-korea-4", "combustion-powertrain-5", "combustion-events-6"] = "combustion-demo-1"
@@ -295,7 +296,7 @@ def health():
     except HTTPException:
         mqtt_ready = False
         limits = None
-    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "execution_profiles":PROFILES,"aws_connected": False, "active_job_id": JOBS.active_id()}
+    return {"status": "ready", "worker_ready": WORKER.is_file(), "default_transport": "dry_run", "mqtt_ready": mqtt_ready, "mqtt_limits": limits, "execution_profiles":PROFILES,"features":{"microtrip_em":True},"aws_connected": False, "active_job_id": JOBS.active_id()}
 
 
 @app.get("/api/schema")

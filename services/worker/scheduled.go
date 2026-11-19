@@ -11,6 +11,7 @@ type EngineContinuity struct {
 	Heading     float64 `json:"heading_rad"`
 }
 type ScheduledInput struct {
+	IncludeEM            bool             `json:"include_em,omitempty"`
 	AnomalyEligible      bool             `json:"anomaly_eligible"`
 	AnomalyEventsPerHour float64          `json:"anomaly_events_per_hour"`
 	AnomalyIntensity     string           `json:"anomaly_intensity"`
@@ -70,6 +71,7 @@ func scheduledPage(input Request, cache *scheduledCache, executionOnly bool) (Re
 	if s.AnomalyEligible {
 		r.Generation.AnomalyVehiclePercent = 100
 	}
+	r.Generation.IncludeEM = s.IncludeEM
 	r.Generation.AnomalyEventsPerHour = s.AnomalyEventsPerHour
 	r.Generation.AnomalyIntensity = s.AnomalyIntensity
 	if cache != nil {

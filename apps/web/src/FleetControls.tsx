@@ -1,5 +1,7 @@
+import { EMControl } from "./EMControl";
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
+  include_em?: boolean;
   execution_profile?: "small_test" | "operations";
   fleet_version: "fleet-plan-1" | "fleet-plan-2" | "fleet-plan-3" | "fleet-plan-4";
   vehicle_count: number;
@@ -57,6 +59,7 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
     <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’를 하면 현재 최소·최대 시간 배정 방식으로 새 일정을 작성합니다. 원본은 보존합니다.</p>}
     <div className="fields">
+      <EMControl value={v.include_em} onChange={value=>patch({include_em:value})} />
       <label>실행 프로필<select value={v.execution_profile ?? "small_test"} onChange={e=>patch({execution_profile:e.target.value as "small_test"|"operations"})}><option value="small_test">소량 시험</option><option value="operations">운영 · 최대25,000대·30일</option></select></label>
       {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "운영은 순차 계획·생성을 사용합니다. 입력 가능 범위이며 실제 AWS 처리량과 장기 안정성 보장이 아닙니다.")}
       <label>측정 시작 (KST)<input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>

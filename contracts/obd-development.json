@@ -94,7 +94,7 @@
               },
               "em": {
                 "type": "integer",
-                "title": "이벤트 · 표현 미확정",
+                "title": "주기 내 이상 이벤트 · 정수 비트마스크(개발 규격)",
                 "default": 0,
                 "minimum": 0,
                 "maximum": 127

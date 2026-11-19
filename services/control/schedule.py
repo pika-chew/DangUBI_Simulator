@@ -90,6 +90,7 @@ class Vehicle(Strict):
 
 
 class ScheduleRequest(Strict):
+    include_em: bool = False
     schedule_version: Literal["schedule-plan-1"] = "schedule-plan-1"
     mode: Literal["manual", "patterned"]
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)

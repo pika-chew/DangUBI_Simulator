@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { SpeedChart } from "./TelemetryChart";
+import { EMControl } from "./EMControl";
 import { readJSONResponse } from "./http";
 
 type FieldSchema = {
@@ -37,6 +38,7 @@ export type Config = {
 };
 type Assignment = { vehicle_id: string; client_id: string };
 export type Generation = {
+  include_em?: boolean;
   profile: "urban" | "highway" | "congested" | "mixed";
   model_version?: string;
   weather?: "dry" | "rain";
@@ -714,6 +716,7 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                             </select>
                           </label>
                         )}
+                        <EMControl value={generation.include_em} onChange={value=>setGeneration({...generation,include_em:value})} />
                         {[
                           "combustion-powertrain-5",
                           "combustion-events-6",
@@ -1406,10 +1409,14 @@ export function Info({ name }: { name: string }) {
 export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample[];catalog:Catalog;localOnly?:boolean}) {
   const [table,setTable]=useState(true);
   const [picked,setPicked]=useState(0);
-  const [inspect,setInspect]=useState(samples.length===1);
+  const [inspect,setInspect]=useState(true);
   const current=samples[Math.min(picked,Math.max(0,samples.length-1))];
   function display(key:string,value:unknown) {
     if (value === undefined || value === null) return "—";
+    if (key === "em" && typeof value === "number") {
+      const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지"];
+      return `${value} · 0x${value.toString(16).toUpperCase().padStart(2,"0")} · ${names.filter((_,bit)=>(value & (1<<bit))!==0).join(", ") || "이벤트 없음"}`;
+    }
     if (["ts","clt","stt","edt"].includes(key) && typeof value === "number") return new Date(value).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"})+" · UTC ms "+value;
     if (typeof value === "number") return value.toLocaleString("ko-KR",{maximumFractionDigits:6});
     return typeof value === "object" ? JSON.stringify(value) : String(value);
@@ -1419,7 +1426,7 @@ export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample
   return <div className="message-viewer">
     <div className="view-switch" role="group" aria-label="메시지 보기 형식"><button aria-pressed={table} onClick={()=>setTable(true)}>표로 보기</button><button aria-pressed={!table} onClick={()=>setTable(false)}>JSON으로 보기</button><span className="note">현재 페이지 {samples.length}건 · 행을 선택해 전체 항목 확인</span>{table && samples.length===1 && !inspect && <button onClick={()=>{setPicked(0);setInspect(true);}}>상세표 다시 열기</button>}</div>
     {!samples.length ? <p className="empty-state">표시할 메시지가 없습니다.</p> : !table ? <pre className="json-view">{JSON.stringify(samples.map(s=>s.message),null,2)}</pre> : <div className={`message-split ${inspect ? "with-inspector" : ""}`}>
-      <div className="table-scroll message-index"><table><thead><tr><th>선택</th><th>시각 (KST)</th><th>차량</th><th>종류</th><th>속도 (km/h)</th><th>RPM</th><th>거리 (m)</th></tr></thead><tbody>{samples.map((s,i)=><tr key={s.vehicle_id+":"+s.sequence} className={picked===i && inspect ? "is-selected" : ""}><td><button aria-label={`메시지 ${s.sequence} 상세`} aria-pressed={picked===i && inspect} onClick={()=>{setPicked(i);setInspect(true);}}>{s.sequence}</button></td><td title={String(s.message.ts)}>{new Date(s.message.ts).toLocaleTimeString("ko-KR",{timeZone:"Asia/Seoul",hour12:false})}</td><td>{s.vehicle_id}</td><td>{s.synthetic_trip ? "시험용 Trip" : s.message.ty===3 ? "Trip" : "Microtrip"}</td><td title={s.message.ty===3 ? "전체 운행 평균 속도" : "현재 속도"}>{display("",s.message.ty===3 ? s.message.pld.mesp : s.message.pld.sp)}</td><td>{display("",s.message.pld.rpm)}</td><td>{display("",s.message.ty===3 ? s.message.pld.dis : s.message.pld.cdit)}</td></tr>)}</tbody></table></div>
+      <div className="table-scroll message-index"><table><thead><tr><th>선택</th><th>시각 (KST)<br/><code>ts</code></th><th>차량</th><th>종류<br/><code>ty</code></th><th>속도 (km/h)<br/><code>sp / mesp</code></th><th>RPM<br/><code>rpm</code></th><th>거리 (m)<br/><code>cdit / dis</code></th></tr></thead><tbody>{samples.map((s,i)=><tr key={s.vehicle_id+":"+s.sequence} className={picked===i && inspect ? "is-selected" : ""}><td><button aria-label={`메시지 ${s.sequence} 상세`} aria-pressed={picked===i && inspect} onClick={()=>{setPicked(i);setInspect(true);}}>{s.sequence}</button></td><td title={String(s.message.ts)}>{new Date(s.message.ts).toLocaleTimeString("ko-KR",{timeZone:"Asia/Seoul",hour12:false})}</td><td>{s.vehicle_id}</td><td>{s.synthetic_trip ? "시험용 Trip" : s.message.ty===3 ? "Trip" : "Microtrip"}</td><td title={s.message.ty===3 ? "전체 운행 평균 속도" : "현재 속도"}>{display("",s.message.ty===3 ? s.message.pld.mesp : s.message.pld.sp)}</td><td>{display("",s.message.pld.rpm)}</td><td>{display("",s.message.ty===3 ? s.message.pld.dis : s.message.pld.cdit)}</td></tr>)}</tbody></table></div>
       {inspect && current && <section className="message-detail"><div className="panel-heading"><h4>{current.vehicle_id} · {current.synthetic_trip ? "시험용 Trip" : profile?.title || "메시지"}</h4><button onClick={()=>setInspect(false)} aria-label="메시지 상세 닫기">×</button></div><div className="table-scroll"><table><thead><tr><th>항목</th><th>필드</th><th>값</th></tr></thead><tbody>{rows.map(([key,title,value])=><tr key={key}><td>{title}</td><td><code>{key}</code></td><td>{display(key,value)}</td></tr>)}</tbody></table></div>{!localOnly && <details><summary>로컬 배정·참고 토픽</summary><p className="note">Client {current.client_id} · {current.topic}<br/>재생성 조회의 토픽은 당시 전송 토픽을 보장하지 않습니다.</p></details>}</section>}
     </div>}
     <p className="note">표는 한국어 항목명과 소수 최대6자리로 표시합니다. JSON에는 OBD 본문만 표시하며 로컬 설명정보를 넣지 않습니다.</p>
