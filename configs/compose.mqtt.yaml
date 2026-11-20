@@ -1,0 +1,10 @@
+# 실제 접속 파일은 호스트의 비공개 디렉터리에 보관한다.
+services:
+  simulator:
+    volumes:
+      - type: bind
+        source: ${DANGUBI_SECRETS_DIR:?DANGUBI_SECRETS_DIR에 비공개 디렉터리의 절대 경로를 지정하세요}
+        target: /run/secrets
+        read_only: true
+        bind:
+          create_host_path: false

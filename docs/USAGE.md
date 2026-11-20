@@ -882,3 +882,43 @@ AWS 안의 시험 실행과 실제 전송 확인은 사용자가 직접 수행�
 ### 설정 이름·info·프로필 상한 위치
 
 실행 프로필의info는 프로필 용도와 전환 시 기본값 적용만 짧게 설명합니다. 최대 범위는 실행 프로필 선택 상자 바로 아래의 프로필명 실행 프로필 상한에서 전체 실행/실제MQTT를 나누어 확인합니다. 전체 조건과 연결·전송 설정의info는 각 설정명 옆에 표시하며 제목 줄·입력 높이·행 간격을 통일했습니다. 설정 영역의 실제 폭이600px 이하이면 한 열로 배치합니다. 기본값·상한·생성/전송 동작은 바뀌지 않습니다.
+
+
+### Docker 호스트 수동 실행 패키지
+
+AWS 실행 환경을 고르기 전에 공통 제품 이미지와 Docker 호스트용 실행 설정을 사용할 수 있습니다. 이 구성은 ECS 등 AWS 전용 배포 정의나 자원 생성 기능을 포함하지 않습니다. 실제 AWS 시험·전송은 사용자가 직접 진행합니다.
+
+1. `configs/container.env.example`을 `.local/container.env`에 복사합니다. 이미 파일이 있으면 덮어쓰지 말고 직접 검토합니다. DANGUBI_IMAGE에는 검증한 태그 또는 ECR digest_reference를 지정합니다. 이번 기능 코드의 이미지 예시는 dangubi-simulator:git-e276df6입니다. 다른 코드 버전을 빌드하면 그 버전의 태그를 사용하세요.
+2. 기본 포트8081은 기존 로컬8080과 분리하며 호스트127.0.0.1에만 엽니다. CPU4개 상한·메모리4GiB는 초기 실행 설정이며25,000대 성능 보장값이 아닙니다. 필요하면 env의 DANGUBI_HTTP_PORT/CPUS/MEMORY를 조정합니다.
+3. 접속 정보 없이 먼저 실행합니다. 이 단계에서는 실제 MQTT를 사용할 수 없으며 UI에서 생성 확인을 진행합니다. 아래 명령은 저장소 루트에서 실행하고 같은 project-name을 유지합니다. Docker Desktop을 쓸 때만 --context desktop-linux를 사용하고 Linux 호스트에서는 해당 옵션을 생략하거나 실제 context를 지정합니다.
+
+```powershell
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml config --quiet
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml up --detach
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml ps
+```
+
+화면은 http://127.0.0.1:8081 입니다. 원격 호스트에서는 인증된 접근 경로를 별도로 준비하며 포트를 공용으로 열지 않습니다. 데이터는 프로젝트의 simulator-data 이름 있는 볼륨에 저장합니다. 동일 데이터 볼륨에 여러 제어기를 동시에 연결하지 않습니다. 제어기는1개, 내부 생성Worker는 실행 설정으로 선택합니다.
+
+실제 MQTT를 사용할 때 env의 DANGUBI_SECRETS_DIR에 **Docker 호스트의 비공개 절대 경로**를 지정합니다. Windows예시는 C:/absolute/private/dangubi, Linux예시는 /absolute/private/dangubi입니다. 이 폴더에 mqtt.json·CA·인증서·키 파일을 준비하고 프로필 내 경로는 /run/secrets/...로 지정합니다. 파일을 읽을 UID10001 권한을 확인합니다. 예제의 큰 메시지/시간 상한을 그대로 쓰지 말고 시험 범위와 접속/정리 여유를 정하세요.
+
+```powershell
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml -f configs/compose.mqtt.yaml config --quiet
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml -f configs/compose.mqtt.yaml up --detach
+```
+
+MQTT설정을 추가하거나 이미지/자원 설정을 바꾸기 전에는 실행중인 작업을 정상 중단하고 컨테이너를 정지합니다. override는 비공개 폴더를 읽기 전용으로 연결하고 없는 호스트 폴더를 자동 생성하지 않습니다. UI에서 서버 설정 확인→실제MQTT선택→송신 확인→일정 실행을 직접 해야 전송합니다. 프로필 준비 상태는 실제 브로커 접속 성공/토픽 권한을 보장하지 않습니다.
+
+실행이 끝나면 작업 기록의 연결 배정과 성능에서 측정 JSON을 저장합니다. 기본값은 자동 재시작 없음이며 중단한 전송을 자동으로 이어 보내지 않습니다. 컨테이너 종료·제거와 데이터 볼륨 삭제는 구분합니다. `compose down`은 기본적으로 이름 있는 볼륨을 유지하고 `--volumes`는 삭제하므로 기록을 보존하려면 사용하지 않습니다. [Docker 공식 설명](https://docs.docker.com/reference/cli/docker/compose/down/)
+
+```powershell
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml stop
+docker --context desktop-linux compose --env-file .local/container.env --project-name dangubi-manual -f configs/compose.yaml logs --tail 100 simulator
+```
+
+MQTT override로 실행했다면 동일한 -f configs/compose.mqtt.yaml도 종료/조회 명령에 포함합니다. 이미지 교체는 작업중단→stop→env의 새 검증 이미지 지정→같은 프로젝트로up→기록 확인 순서입니다. `up`은 변경된 설정/이미지에 따라 컨테이너를 교체할 수 있으므로 실행 중 변경하지 않습니다. [Docker 공식 설명](https://docs.docker.com/reference/cli/docker/compose/up/)
+
+로그는10MiB×3개로 순환 보관하고 원문 메시지를 로그에 추가하지 않습니다. 이 제한은 컨테이너 stdout 로그이며 DB 용량이나 메시지 과금 상한이 아닙니다. 원시 메시지 전체/IoT Core 이후 저장 여부는 별도 수집 시스템의 범위입니다. 오류 시 확인할 항목은 ps상태·health·프로필 준비·읽기권한·측정예정건수 대비PUBACK·응답미확인·정리확인입니다. 필요할 때 저장한 측정JSON을 기준으로 개선을 진행합니다.
+
+
+`python scripts/dev.py test`는 현재Go소스로 임시Worker를 새로 빌드하고 테스트용Worker/DB/조회캐시/비활성MQTT경로를 전달합니다. 사용자 서버의 .local/worker 또는 기존 접속 설정을 덮어쓰지 않습니다. 이전 개인 후보파일이 없어도 Linux/Windows에서 같은 경로 규칙을 사용합니다. Node화면회귀는 `node --test scripts/*.test.mjs`, 실행도구검사는 `python -m unittest scripts.test_container scripts.test_dev`이며 GitHub Actions에도 포함합니다.

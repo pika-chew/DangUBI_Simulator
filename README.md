@@ -33,3 +33,5 @@ Linux 컨테이너 빌드: `python scripts/container.py build --image dangubi-si
 실행 시작 즉시 ID를 받고 진행 상태를 조회하거나 일시중지·재개·중단할 수 있습니다. 실제 시간/가상시간 실행을 선택하며, 진행·중단 결과는 로컬 SQLite에 기록합니다. 현재 단일 API 프로세스에서 비동기 실행 한 개만 지원합니다. 일시중지 중 시뮬레이션 상태를 보존하며 전체 안전 제한시간은 계속 적용합니다. 운영 일정은 차량 배정을 한 번 계산하고 제한된 메시지 큐와 차량별 마지막 상태로 처리합니다. 실제 AWS 용량과30일 연속 안정성을 보장하지는 않습니다.
 
 검증: `python scripts/dev.py test`
+
+수동 컨테이너 실행은 `configs/compose.yaml`, 인증서 연결은 `configs/compose.mqtt.yaml`, 환경 설정 예시는 `configs/container.env.example`을 사용합니다. 시작·중단·기록 보존·이미지 교체 절차는 [제품 사용 안내](docs/USAGE.md)에 있습니다. 이 설정은 AWS 리소스를 생성하지 않습니다.
