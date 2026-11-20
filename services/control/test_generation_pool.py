@@ -1,3 +1,4 @@
+from services.control.runtime import RuntimePaths
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -66,7 +67,7 @@ def test_bounded_queue_waits_for_slow_owner_and_preserves_all_messages():
 def test_real_workers_match_every_legacy_message_and_clean_up():
     import os
     from services.control.schedule_obd import ScheduledOBDRequest,generate
-    worker=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")
+    worker=RuntimePaths.from_env(Path(__file__).resolve().parents[2]).worker
     req=ScheduleRequest(mode="manual",measurement={"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:34:00+09:00"},vehicles=[{"vehicle_id":f"v{i:06d}","trips":[{"start":"2026-11-17T13:00:00+09:00","end":"2026-11-17T13:02:00+09:00","road_profile":"mixed"},{"start":"2026-11-17T13:32:00+09:00","end":"2026-11-17T13:34:00+09:00","road_profile":"urban"}]} for i in range(1,9)])
     provider=provider_for(SimpleNamespace(fleet=None,schedule=req))
     expected=[];old_cache=ExecutionCheckpoints()
@@ -103,7 +104,7 @@ def test_parked_vehicles_replay_four_trips_with_continuous_state():
     from services.control.schedule import instant
     from services.control.schedule_obd import ScheduledOBDRequest, generate
 
-    worker=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")
+    worker=RuntimePaths.from_env(Path(__file__).resolve().parents[2]).worker
     start=datetime.fromisoformat("2026-11-17T13:00:00+09:00")
     vehicles=[]
     for index in range(72):
@@ -172,7 +173,7 @@ def test_parked_vehicles_replay_four_trips_with_continuous_state():
 
 def test_worker_failure_stops_all_processes():
     import os
-    worker=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")
+    worker=RuntimePaths.from_env(Path(__file__).resolve().parents[2]).worker
     job=SimpleNamespace(stop_requested=False,pause_requested=False,processes=[])
     pool=GenerationPool(worker,job,SimpleNamespace(lock=threading.RLock()),4)
     f=pool.submit(0,lambda session:session.page({"limit":101}))

@@ -19,3 +19,5 @@ jobs:
       - run: python scripts/repository_scope.py
       - run: python scripts/dev.py prepare
       - run: python scripts/dev.py test
+      - run: node --test scripts/*.test.mjs
+      - run: python -m unittest scripts.test_container scripts.test_dev

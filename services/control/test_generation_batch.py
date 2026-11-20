@@ -13,8 +13,9 @@ from services.control.generation_pool import GenerationPool
 from services.control.generation_session import GenerationSession
 from services.control.test_generation_pool import FakePool
 from services.control import fleet_execution
+from services.control.runtime import RuntimePaths
 
-WORKER=Path(os.environ.get("DANGUBI_TEST_WORKER",Path(__file__).resolve().parents[2]/".local/worker-candidate.exe"))
+WORKER=Path(os.environ.get("DANGUBI_TEST_WORKER",RuntimePaths.from_env(Path(__file__).resolve().parents[2]).worker))
 REFERENCE=Path(os.environ.get("DANGUBI_REFERENCE_WORKER",WORKER))
 
 

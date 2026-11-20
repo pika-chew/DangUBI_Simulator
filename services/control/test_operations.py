@@ -65,7 +65,7 @@ def test_streaming_plan_matches_previous_model_and_selected_scope():
 @pytest.mark.parametrize("interval",[60000,70000])
 def test_sequential_real_obd_matches_replay_across_trips_and_pages(tmp_path,interval):
     req=fleet(interval_ms=interval)
-    worker=ROOT/".local"/("worker.exe" if os.name=="nt" else "worker")
+    worker=control.WORKER
     stream=FleetExecution(req,worker)
     cache=CheckpointStore(tmp_path/"reference.sqlite3")
     with_session=GenerationSession(worker)
@@ -158,7 +158,7 @@ def test_operating_profile_actual_mtls_and_large_initial_assignment_frame(mqtt_c
     # 실제 접속은 하지 않고 25,000대 배정의 초기 프레임과 종료 응답만 왕복한다.
     assignments=[dict(vehicle_id=f"v{i:06d}",client_id=f"sim-large-assignment-frame-c{i%500:03d}") for i in range(25000)]
     assert len(json.dumps(assignments).encode())>1048576
-    bridge=MQTTBridge(ROOT/".local/worker.exe",dict(mqtt=profile,assignments=assignments),SimpleNamespace(id="large-frame-check",stop_requested=False))
+    bridge=MQTTBridge(control.WORKER,dict(mqtt=profile,assignments=assignments),SimpleNamespace(id="large-frame-check",stop_requested=False))
     try:
         bridge.receive()
         assert bridge.stats['active_clients']==0

@@ -8,6 +8,7 @@ import sys
 import tarfile
 import urllib.request
 import json
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = ROOT / ".local"
@@ -63,6 +64,23 @@ def build():
     run(npm_args() + ["run", "build"], cwd=ROOT / "apps/web")
 
 
+def test():
+    LOCAL.mkdir(exist_ok=True)
+    env = dict(os.environ, GOCACHE=str(LOCAL / "go-cache"), GOMODCACHE=str(LOCAL / "go-mod"))
+    run(["go", "test", "./..."], cwd=ROOT / "services/worker", env=env)
+    # 사용자 서버의 Worker를 덮어쓰거나 이전 후보 파일을 재사용하지 않는다.
+    with tempfile.TemporaryDirectory(prefix="worker-test-", dir=LOCAL) as folder:
+        worker = Path(folder) / ("worker.exe" if os.name == "nt" else "worker")
+        run(["go", "build", "-o", worker, "."], cwd=ROOT / "services/worker", env=env)
+        data = Path(folder) / "data"
+        env.update(DANGUBI_WORKER=str(worker), DANGUBI_TEST_WORKER=str(worker),
+                   DANGUBI_DATA_DIR=str(data), DANGUBI_DB=str(data / "runs.sqlite3"),
+                   DANGUBI_CHECKPOINT_DB=str(data / "states.sqlite3"),
+                   DANGUBI_MQTT_PROFILE=str(data / "disabled-mqtt.json"))
+        run([PYTHON, "-m", "pytest", "services/control", "-q"], env=env)
+        run([PYTHON, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_measure*.py"], env=env)
+
+
 def main():
     parser = argparse.ArgumentParser(description="DangUBI 로컬 첫 실행본")
     parser.add_argument("action", choices=["prepare", "build", "run", "test"])
@@ -72,12 +90,7 @@ def main():
     elif args.action == "build":
         build()
     elif args.action == "test":
-        env = os.environ.copy()
-        env["GOCACHE"] = str(LOCAL / "go-cache")
-        env["GOMODCACHE"] = str(LOCAL / "go-mod")
-        run(["go", "test", "./..."], cwd=ROOT / "services/worker", env=env)
-        run([PYTHON, "-m", "pytest", "services/control", "-q"])
-        run([PYTHON, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_measure*.py"])
+        test()
     else:
         if not WORKER.is_file() or not (ROOT / "apps/web/dist/index.html").is_file():
             raise SystemExit("먼저 python scripts/dev.py prepare를 실행하세요.")

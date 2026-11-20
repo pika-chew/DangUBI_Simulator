@@ -6,8 +6,9 @@ import subprocess
 
 import pytest
 from services.control.generation_session import GenerationSession,GenerationFailure
+from services.control.runtime import RuntimePaths
 
-WORKER=Path(__file__).resolve().parents[2]/".local"/("worker.exe" if os.name=="nt" else "worker")
+WORKER=RuntimePaths.from_env(Path(__file__).resolve().parents[2]).worker
 
 
 def payload():
