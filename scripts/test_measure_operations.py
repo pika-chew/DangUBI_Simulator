@@ -1,6 +1,6 @@
 """계측 조건과 피크 일정의 경계·원상복원을 검증한다."""
 import unittest
-from scripts.measure_operations import validate,feasibility,peak_schedule,compact_assignments
+from scripts.measure_operations import validate,feasibility,peak_schedule,compact_assignments,finish_broker
 from services.control.fleet import FleetRequest,preview
 from services.control import fleet,fleet_execution
 
@@ -10,6 +10,18 @@ def case(**patch):
     value.update(patch);return value
 
 class OperationsMeasurementTests(unittest.TestCase):
+    def test_broker_report_is_read_after_writer_exits(self):
+        import tempfile,json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as name:
+            profile=Path(name)/"mqtt.json";report=Path(str(profile)+".report")
+            report.touch()
+            class Broker:
+                def wait(self,timeout):
+                    self.waited=True;report.write_text(json.dumps({"received":1}));return 0
+            broker=Broker()
+            self.assertEqual(finish_broker(broker,profile),{"received":1})
+            self.assertTrue(broker.waited)
     def test_display_sample_does_not_replace_total_assignment_count(self):
         pool=dict(assignments=[{}]*100,assignment_count=25000)
         compact_assignments(pool)

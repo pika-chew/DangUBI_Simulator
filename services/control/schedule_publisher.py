@@ -1,9 +1,9 @@
 """일정 송신의 한정 대기열. 고정 Client마다 명령 한 개만 진행한다."""
 from collections import deque
-import json
 import time
 
 from services.control.mqtt_bridge import MQTTFailure
+from services.control.message_codec import encode_command
 
 
 class SchedulePublisher:
@@ -28,7 +28,7 @@ class SchedulePublisher:
 
     def enqueue(self,command,gate,**fields):
         client=self.clients[fields["vehicle_id"]] if command=="publish" else fields["client_id"]
-        size=len(json.dumps(dict(command=command,**fields),ensure_ascii=False,separators=(",",":")).encode())
+        size=len(encode_command(dict(command=command,**fields)).encode())
         if size>self.state["queue_byte_capacity"]:raise MQTTFailure("한 메시지가 송신 대기열 바이트 상한을 초과했습니다.")
         full=False
         while self.reserved_count>=self.state["queue_capacity"] or self.reserved_bytes+size>self.state["queue_byte_capacity"]:

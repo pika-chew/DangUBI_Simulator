@@ -4,6 +4,7 @@ import queue
 import subprocess
 import threading
 import time
+from services.control.message_codec import encode_command
 
 
 class MQTTFailure(Exception):
@@ -46,7 +47,7 @@ class MQTTBridge:
             except queue.Full:pass
 
     def _write(self,command):
-        raw=json.dumps(command,separators=(",",":"),ensure_ascii=False)+"\n"
+        raw=encode_command(command)+"\n"
         cap=8388608 if command.get("operation")=="mqtt_stream" else 262144
         if len(raw.encode())>cap:raise MQTTFailure("MQTT 명령 크기 상한을 초과했습니다.")
         try:

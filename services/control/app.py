@@ -24,11 +24,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jsonschema import Draft202012Validator
+from services.control.message_codec import compile_check,prepare_message
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = json.loads((ROOT / "contracts/obd-development.json").read_text(encoding="utf-8"))
 MESSAGE_VALIDATORS = {key: Draft202012Validator(profile["schema"]) for key,profile in CATALOG["profiles"].items()}
+MESSAGE_CHECKS = {key: compile_check(profile["schema"]) for key,profile in CATALOG["profiles"].items()}
 RUNTIME = RuntimePaths.from_env(ROOT)
 WORKER = RUNTIME.worker
 DB = RUNTIME.database
@@ -229,15 +231,19 @@ async def input_error(_request: Request, exc: RequestValidationError):
 def validate_message(message: dict[str, Any]):
     if type(message.get("ty")) is not int or message["ty"] not in (3, 4):
         raise HTTPException(422, detail=["ty: 개발용 OBD 타입은 3 또는 4입니다."])
-    errors = sorted(MESSAGE_VALIDATORS[str(message["ty"])].iter_errors(message), key=lambda e: str(e.path))
+    key=str(message["ty"])
+    check=MESSAGE_CHECKS[key]
+    errors = [] if check is not None and check(message) else sorted(MESSAGE_VALIDATORS[key].iter_errors(message), key=lambda e: str(e.path))
     if errors:
         descriptions = {"required": "필수 항목이 누락됐습니다.", "type": "자료형을 확인하세요.", "minimum": "허용 최솟값 미만입니다.", "maximum": "허용 최댓값을 초과했습니다.", "additionalProperties": "규격에 없는 항목이 포함됐습니다.", "pattern": "값의 표현 형식을 확인하세요.", "maxLength": "허용 길이를 초과했습니다.", "const": "허용되지 않은 값입니다."}
         raise HTTPException(422, detail=[f"{' / '.join(map(str, e.path)) or '메시지'}: {descriptions.get(e.validator, '입력값을 확인하세요.')}" for e in errors[:20]])
     payload = message["pld"]
     if message["ty"] == 3 and payload["stt"] > payload["edt"]:
         raise HTTPException(422, detail=["Trip 시작 시각은 종료 시각 이하여야 합니다."])
-    if len(json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode()) > 131072:
+    encoded=prepare_message(message)
+    if encoded.size > 131072:
         raise HTTPException(422, detail=["메시지는 128KiB 이하여야 합니다."])
+    return encoded
 
 
 def prepare_worker(body: RunRequest, operation: str, run_id: str):

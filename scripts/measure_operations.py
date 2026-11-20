@@ -37,6 +37,14 @@ def compact_assignments(pool):
         shown=pool.pop("assignments")
         pool.setdefault("assignment_count",len(shown))
 
+
+def finish_broker(broker,profile_path):
+    Path(str(profile_path)+".done").touch()
+    if broker.wait(timeout=5)!=0:raise RuntimeError("로컬 브로커가 정상 종료되지 않았습니다.")
+    report=Path(str(profile_path)+".report")
+    if not report.exists():raise RuntimeError("브로커 최종 보고서가 없습니다.")
+    return json.loads(report.read_text(encoding="utf-8"))
+
 @contextmanager
 def peak_schedule(case):
     from services.control import fleet,fleet_execution
@@ -78,9 +86,10 @@ def child(case,folder):
     original_validate=control.validate_message
     def check(message):
         nonlocal sent_digest,validated,validation_seconds
-        t=time.perf_counter();original_validate(message);validation_seconds+=time.perf_counter()-t
+        t=time.perf_counter();encoded=original_validate(message);validation_seconds+=time.perf_counter()-t
         sent_digest=(sent_digest+int.from_bytes(hashlib.sha256(canonical(message)).digest(),"big"))%(1<<256)
         validated+=1
+        return encoded
     control.validate_message=check
     original_bridge=schedule_execution.MQTTBridge
     original_execute=schedule_execution.execute
@@ -175,12 +184,7 @@ def child(case,folder):
             resources=sampler.finish(time.monotonic()-sampler.started);sampler=None
         broker_report=None
         if broker:
-            Path(str(profile_path)+".done").touch()
-            report=Path(str(profile_path)+".report")
-            for _ in range(250):
-                if report.exists():break
-                time.sleep(.02)
-            if report.exists():broker_report=json.loads(report.read_text())
+            broker_report=finish_broker(broker,profile_path)
         complete=result["job_state"]=="completed" and result["processed_messages"]==result["planned_messages"]
         fingerprint=f"{sent_digest:064x}"
         observed_consistent=bool(broker_report and validated==result["puback_count"]==result["processed_messages"]==broker_report["received"]

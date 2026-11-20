@@ -128,14 +128,15 @@ def execute(manager, job, data, worker, timeout):
     due_offset=data.get("due_offset",lambda ts:ts-data["measurement_start_ms"])
 
     def consume(timestamp,vehicle,message,synthetic):
+        encoded=None
         if mqtt:
             if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
-            data["validate_message"](message)
-            if not publisher.enqueue("publish",gate,vehicle_id=vehicle,message=message):return
+            encoded=data["validate_message"](message)
+            if not publisher.enqueue("publish",gate,vehicle_id=vehicle,message=encoded if encoded is not None else message):return
         due=due_offset(timestamp)
         sequences[vehicle]=sequences.get(vehicle,0)+1
         result["processed_messages"]+=1
-        result["payload_bytes"]+=len(json.dumps(message,separators=(",",":"),ensure_ascii=False).encode())
+        result["payload_bytes"]+=encoded.size if encoded is not None else len(json.dumps(message,separators=(",",":"),ensure_ascii=False).encode())
         result["trip_count" if message["ty"]==3 else "microtrip_count"]+=1
         result["simulation_time_ms"]=int(due)
         if data["realtime"]:
