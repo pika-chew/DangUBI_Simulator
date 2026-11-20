@@ -83,9 +83,49 @@ def child(case,folder):
         validated+=1
     control.validate_message=check
     original_bridge=schedule_execution.MQTTBridge
+    original_execute=schedule_execution.execute
+    execution_profile=[]
+    if os.environ.get("DANGUBI_MEASURE_EXECUTION_PROFILE")=="1":
+        def profiled_execute(*args,**kwargs):
+            import cProfile,pstats
+            profile=cProfile.Profile()
+            try:return profile.runcall(original_execute,*args,**kwargs)
+            finally:
+                rows=pstats.Stats(profile).stats
+                for (filename,line,name),value in sorted(rows.items(),key=lambda item:item[1][2],reverse=True)[:25]:
+                    execution_profile.append(dict(function=f"{Path(filename).name}:{line}:{name}",calls=value[1],self_seconds=value[2],inclusive_seconds=value[3]))
+        schedule_execution.execute=profiled_execute
+    bridge_timing={"write_calls":0,"write_seconds":0.,"poll_calls":0,"poll_seconds":0.,
+                   "responses":0,"response_bytes":0,"decode_seconds":0.,"full_stats_responses":0}
     class Bridge(original_bridge):
         def __init__(self,*args,**kwargs):
             super().__init__(*args,**kwargs);processes.append(("sender",self.process))
+        def _write(self,*args,**kwargs):
+            t=time.perf_counter()
+            try:return super()._write(*args,**kwargs)
+            finally:
+                bridge_timing["write_calls"]+=1;bridge_timing["write_seconds"]+=time.perf_counter()-t
+        def poll(self,*args,**kwargs):
+            t=time.perf_counter()
+            try:return super().poll(*args,**kwargs)
+            finally:
+                bridge_timing["poll_calls"]+=1;bridge_timing["poll_seconds"]+=time.perf_counter()-t
+        def _read(self):
+            import queue
+            try:
+                while line:=self.process.stdout.readline(262145):
+                    size=len(line.encode("utf-8"))
+                    if size>262144:break
+                    t=time.perf_counter();reply=json.loads(line)
+                    bridge_timing["decode_seconds"]+=time.perf_counter()-t
+                    bridge_timing["responses"]+=1;bridge_timing["response_bytes"]+=size
+                    if reply.get("stats_complete",True):bridge_timing["full_stats_responses"]+=1
+                    self.responses.put(reply,timeout=2)
+                    line=None;reply=None
+            except (ValueError,OSError,queue.Full):pass
+            finally:
+                try:self.responses.put(None,timeout=2)
+                except queue.Full:pass
     schedule_execution.MQTTBridge=Bridge
     result=None;resources=None;reason=None;prepare_seconds=0.;elapsed=0.
     try:
@@ -150,6 +190,7 @@ def child(case,folder):
         keys=["job_state","planned_messages","processed_messages","remaining_messages","unsent_messages","mqtt_published","puback_count","publish_attempts","unconfirmed_messages","errors",
               "payload_bytes","microtrip_count","trip_count","peak_active_clients","connected_clients","connection_count","disconnect_count",
               "generation_pool","generation_session","execution_timing","transmission","performance","transmission_goal","buffer_budget",
+              "publish_rate_wait_ms","publish_rate_overshoot_ms",
               "connection_cleanup_confirmed","execution_cleanup_confirmed","execution_timing","schedule_delay_ms","simulation_time_ms"]
         report=dict(case=case,scope="운영 API/실제 OBD 생성기/순차 실행기. 시험용 동시 출발 일정이며 실제 운행 분포가 아님.",
             environment=dict(platform=sys.platform,python=sys.version.split()[0],worker_sha256=hashlib.sha256(worker.read_bytes()).hexdigest()),
@@ -162,6 +203,10 @@ def child(case,folder):
             broker=broker_report,resources=resources,result={k:result[k] for k in keys if k in result})
         report["resources"]["scope"]="제어기와 생성/송신 프로세스의 표본 RSS 합계·CPU. 시험 브로커·Docker 엔진·호스트 전체 사용량은 제외."
         report["measurement_overhead"]="250ms마다 실행 조회·RSS 표본을 수집합니다. MQTT는 스키마 검증·본문 지문 계산을 포함하며 dry_run과 비용이 다릅니다."
+        report["bridge_timing"]=bridge_timing
+        report["bridge_timing_scope"]="write/poll은 호출 경과 시간, decode는 별도 수신 스레드 시간입니다. 서로 겹칠 수 있어 합산 CPU 시간으로 해석하지 않습니다. 함수 프로파일을 켠 실행은 처리량 비교에서 제외합니다."
+        report["execution_profile"]=execution_profile
+        report["execution_profile_enabled"]=bool(execution_profile)
         pool=report["result"].get("generation_pool")
         compact_assignments(pool)
         (folder/"result.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
@@ -172,6 +217,7 @@ def child(case,folder):
             try:broker.wait(timeout=5)
             except subprocess.TimeoutExpired:broker.kill();broker.wait()
         control.validate_message=original_validate;schedule_execution.MQTTBridge=original_bridge
+        schedule_execution.execute=original_execute
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

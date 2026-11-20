@@ -15,6 +15,8 @@ class SchedulePublisher:
         self.queues={client:deque() for client in sorted(set(self.clients.values()))}
         self.active={}
         self.busy=set()
+        self.ready=deque()
+        self.ready_set=set()
         self.reserved_bytes=0
         self.reserved_count=0
         self.state=result["transmission"]={
@@ -34,12 +36,17 @@ class SchedulePublisher:
             if not gate():return False
             time.sleep(.01)
         self.queues[client].append((command,fields,size))
+        self._ready(client)
         self.reserved_count+=1;self.reserved_bytes+=size
         if command=="publish":
             self.state["queued_messages"]+=1
             self.state["peak_queued"]=max(self.state["peak_queued"],self.state["queued_messages"])
         self._budget()
         return True
+
+    def _ready(self,client):
+        if client not in self.busy and client not in self.ready_set and self.queues[client]:
+            self.ready.append(client);self.ready_set.add(client)
 
     def _budget(self):
         self.state.update(reserved_bytes=self.reserved_bytes,reserved_commands=self.reserved_count)
@@ -58,18 +65,23 @@ class SchedulePublisher:
             if identifier not in self.active:raise MQTTFailure("송신 완료 명령을 확인하지 못했습니다.")
             client,command,size=self.active.pop(identifier)
             self.busy.remove(client)
+            self._ready(client)
             self.reserved_count-=1;self.reserved_bytes-=size
             if command=="publish":
                 self.state["in_flight"]-=1
             self._budget()
         if not allow_start:return
         # 매 순회에 Client당 하나씩 허용한다. 동일 Client의 차량들은 한 순서를 공유한다.
-        for client,queue in self.queues.items():
-            if not queue or client in self.busy:continue
+        for _ in range(len(self.ready)):
+            client=self.ready.popleft();self.ready_set.remove(client)
+            queue=self.queues[client]
             command,fields,size=queue[0]
             if command=="publish":
                 fields=dict(fields,due_at_ms=int(due_origin_ms+self.due_offset(fields["message"]["ts"])))
-            identifier=self.bridge.submit(command,**fields)
+            try:identifier=self.bridge.submit(command,**fields)
+            except MQTTFailure:
+                self._ready(client)
+                raise
             queue.popleft()
             self.active[identifier]=(client,command,size)
             self.busy.add(client)
@@ -90,6 +102,7 @@ class SchedulePublisher:
                     self.state["discarded_queued"]+=1
                     self.state["discarded_queued_bytes"]+=size
         self.active.clear();self.busy.clear()
+        self.ready.clear();self.ready_set.clear()
         self.reserved_count=0;self.reserved_bytes=0
         self.state.update(queued_messages=0,in_flight=0)
         self._budget()

@@ -10,6 +10,60 @@ import (
 	"time"
 )
 
+func TestOperationsStreamCompactCountersAndFinalDetails(t *testing.T) {
+	_, profile := localBroker(t, false, false)
+	profile.ExecutionProfile = "operations"
+	profile.MaxConnecting = 100
+	profile.ConnectPerSecond, profile.PublishPerSecond = 1000, 15000
+	req := request("dedicated", 1)
+	req.MQTT = profile
+	req.Assignments = []Assignment{{"v000001", "detail-c1"}}
+	input, send := io.Pipe()
+	output, receive := io.Pipe()
+	defer input.Close()
+	defer send.Close()
+	defer output.Close()
+	go func() { defer receive.Close(); serveMQTTStream(req, input, receive) }()
+	encoder, decoder := json.NewEncoder(send), json.NewDecoder(output)
+	read := func() map[string]any {
+		var reply map[string]any
+		if err := decoder.Decode(&reply); err != nil || reply["ok"] != true {
+			t.Fatal(err, reply)
+		}
+		return reply
+	}
+	if read()["stats_complete"] != true {
+		t.Fatal("초기 상세 누락")
+	}
+	encoder.Encode(streamCommand{ID: 1, Command: "connect", ClientID: "detail-c1"})
+	read()
+	compact := 0
+	for i := 1; i <= 20; i++ {
+		encoder.Encode(streamCommand{ID: int64(i + 1), Command: "publish", VehicleID: "v000001", Message: req.Message})
+		reply := read()
+		stats := reply["stats"].(map[string]any)
+		if reply["id"] != float64(i+1) || stats["puback_count"] != float64(i) {
+			t.Fatal("개별 완료 집계", reply)
+		}
+		if reply["stats_complete"] == false {
+			compact++
+			if _, ok := stats["performance"]; ok {
+				t.Fatal("상세 반복 전달")
+			}
+		}
+	}
+	encoder.Encode(streamCommand{ID: 22, Command: "close"})
+	last := read()
+	stats := last["stats"].(map[string]any)
+	if compact == 0 || last["closed"] != true || last["stats_complete"] != true || stats["active_clients"] != float64(0) {
+		t.Fatal("최종 상세/정리", last)
+	}
+	perf := stats["performance"].(map[string]any)
+	if perf["ack"].(map[string]any)["count"] != float64(20) {
+		t.Fatal("최종 표본 누락", perf)
+	}
+}
+
 func TestScaleSessionIsLoopbackOnlyAndNormalAssignmentsStayLimited(t *testing.T) {
 	_, p := localBroker(t, false, false)
 	p.LocalBenchmark = true
@@ -121,10 +175,15 @@ func TestParkingTraceKeepsBothSessionsAndFirstMicrotrips(t *testing.T) {
 }
 
 func TestMQTTStreamParallelCancellation(t *testing.T) {
-	for _, mode := range []string{"stop", "eof", "duplicate_client", "oversized"} {
+	for _, mode := range []string{"stop", "eof", "duplicate_client", "oversized", "operations_stop", "operations_eof"} {
 		t.Run(mode, func(t *testing.T) {
 			broker, profile := localBroker(t, true, false)
 			profile.TimeoutMS = 2000
+			if mode == "operations_stop" || mode == "operations_eof" {
+				profile.ExecutionProfile = "operations"
+				profile.MaxConnecting = 2
+				profile.PublishPerSecond = 15000
+			}
 			req := request("dedicated", 2)
 			req.MQTT = profile
 			req.Assignments = []Assignment{{"v000001", "stream-a"}, {"v000002", "stream-b"}}
@@ -170,9 +229,9 @@ func TestMQTTStreamParallelCancellation(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			switch mode {
-			case "stop":
+			case "stop", "operations_stop":
 				enc.Encode(streamCommand{Command: "stop"})
-			case "eof":
+			case "eof", "operations_eof":
 				send.Close()
 			case "duplicate_client":
 				enc.Encode(streamCommand{ID: 5, Command: "publish", VehicleID: "v000001", Message: req.Message})

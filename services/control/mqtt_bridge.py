@@ -73,7 +73,8 @@ class MQTTBridge:
             return None
         if not isinstance(reply,dict):raise MQTTFailure("MQTT 세션이 최종 응답 없이 종료되었습니다.")
         if not isinstance(reply.get("stats"),dict):raise MQTTFailure("MQTT 집계 응답 형식을 확인하세요.")
-        self.stats=reply["stats"]
+        # 상세 통계가 없는 완료 응답도 누적 카운터는 즉시 반영한다.
+        self.stats.update(reply["stats"])
         identifier=reply.get("id")
         if type(identifier) is not int or identifier<0 or identifier!=0 and identifier not in self.pending:
             raise MQTTFailure("MQTT 응답 ID를 확인하지 못했습니다.")

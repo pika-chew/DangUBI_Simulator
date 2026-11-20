@@ -24,6 +24,39 @@ class Bridge:
         return {"id":identifier}
 
 
+def test_pump_only_visits_ready_clients_and_preserves_queued_successor():
+    class NoScan(dict):
+        def items(self):raise AssertionError("유휴 Client 전체 탐색")
+    bridge=Bridge()
+    publisher=SchedulePublisher(bridge,{}, {f"v{i}":f"c{i}" for i in range(500)})
+    publisher.queues=NoScan(publisher.queues)
+    for ts in (1,2):publisher.enqueue("publish",lambda:True,vehicle_id="v250",message={"ts":ts})
+    publisher.pump()
+    assert len(bridge.sent)==1 and len(publisher.ready)==0
+    bridge.replies=[1]
+    publisher.pump(allow_start=False)
+    assert list(publisher.ready)==["c250"] and len(bridge.sent)==1
+    publisher.pump()
+    assert bridge.sent[-1][2]["message"]["ts"]==2
+
+
+def test_compact_reply_keeps_details_and_final_reply_replaces_them():
+    import queue,time
+    from services.control.mqtt_bridge import MQTTBridge
+    bridge=MQTTBridge.__new__(MQTTBridge)
+    bridge.stats={"puback_count":10,"performance":{"schedule":{"count":10}}}
+    bridge.pending={1:time.monotonic(),2:time.monotonic()}
+    bridge.responses=queue.Queue()
+    bridge.close_id=2
+    bridge.responses.put(dict(id=1,ok=True,stats={"puback_count":11}))
+    bridge.poll()
+    assert bridge.stats["puback_count"]==11 and bridge.stats["performance"]["schedule"]["count"]==10
+    bridge.responses.put(dict(id=2,ok=True,closed=True,stats={"puback_count":12,"active_clients":0,"performance":{"schedule":{"count":12}}}))
+    bridge.poll()
+    assert bridge.close_acknowledged and bridge.cleaned
+    assert bridge.stats["performance"]["schedule"]["count"]==12
+
+
 def test_client_lanes_preserve_shared_vehicle_order_and_disconnect():
     bridge=Bridge();result={}
     publisher=SchedulePublisher(bridge,result,{"a":"c1","b":"c1","c":"c2"})

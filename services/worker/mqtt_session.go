@@ -34,23 +34,25 @@ type streamCommand struct {
 }
 
 type streamStats struct {
-	Connected           int                         `json:"connected_clients"`
-	Active              int                         `json:"active_clients"`
-	Peak                int                         `json:"peak_active_clients"`
-	Attempts            int                         `json:"publish_attempts"`
-	Published           int                         `json:"mqtt_published"`
-	Puback              int                         `json:"puback_count"`
-	Unconfirmed         int                         `json:"unconfirmed_messages"`
-	Reconnects          int                         `json:"reconnect_count"`
-	Connections         int                         `json:"connection_count"`
-	Disconnections      int                         `json:"disconnect_count"`
-	ScheduleDelay       int64                       `json:"schedule_delay_ms"`
-	InitialConnectMS    *int64                      `json:"initial_connect_ms,omitempty"`
-	PostConnectSchedule DurationSummary             `json:"post_connect_schedule"`
-	PublishWindows      map[int]DurationSummary     `json:"publish_windows,omitempty"`
-	ParkingConnects     map[string][]parkingConnect `json:"parking_connects,omitempty"`
-	ParkingFirstSends   map[string][]parkingSend    `json:"parking_first_sends,omitempty"`
-	Performance         *PerformanceSummary         `json:"performance"`
+	PublishRateWaitMS      float64                     `json:"publish_rate_wait_ms"`
+	PublishRateOvershootMS float64                     `json:"publish_rate_overshoot_ms"`
+	Connected              int                         `json:"connected_clients"`
+	Active                 int                         `json:"active_clients"`
+	Peak                   int                         `json:"peak_active_clients"`
+	Attempts               int                         `json:"publish_attempts"`
+	Published              int                         `json:"mqtt_published"`
+	Puback                 int                         `json:"puback_count"`
+	Unconfirmed            int                         `json:"unconfirmed_messages"`
+	Reconnects             int                         `json:"reconnect_count"`
+	Connections            int                         `json:"connection_count"`
+	Disconnections         int                         `json:"disconnect_count"`
+	ScheduleDelay          int64                       `json:"schedule_delay_ms"`
+	InitialConnectMS       *int64                      `json:"initial_connect_ms,omitempty"`
+	PostConnectSchedule    DurationSummary             `json:"post_connect_schedule"`
+	PublishWindows         map[int]DurationSummary     `json:"publish_windows,omitempty"`
+	ParkingConnects        map[string][]parkingConnect `json:"parking_connects,omitempty"`
+	ParkingFirstSends      map[string][]parkingSend    `json:"parking_first_sends,omitempty"`
+	Performance            *PerformanceSummary         `json:"performance"`
 }
 
 type mqttSession struct {
@@ -71,6 +73,7 @@ type mqttSession struct {
 	stats                        streamStats
 	metrics                      performanceMetrics
 	connectPacer, publishPacer   pacer
+	publishLimiter               *publishLimiter
 	started                      time.Time
 }
 
@@ -135,6 +138,9 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 		s.parkingTrace = &parkingTrace{make(map[string][]parkingConnect), make(map[string][]parkingSend), make(map[string]time.Time), make(map[string]float64)}
 	}
 	s.publishPacer.step = time.Second / time.Duration(p.PublishPerSecond)
+	if p.ExecutionProfile == "operations" && p.PublishPerSecond > 1000 {
+		s.publishLimiter = newPublishLimiter(p.PublishPerSecond)
+	}
 	for _, a := range req.Assignments {
 		if !validID.MatchString(a.VehicleID) || !validID.MatchString(a.ClientID) || s.vehicles[a.VehicleID] != "" {
 			return nil, errors.New("고정 배정표를 확인하세요.")
@@ -187,6 +193,20 @@ func (s *mqttSession) snapshot() streamStats {
 		}
 	}
 	return s.stats
+}
+
+// 각 명령의 실제 완료 카운터는 즉시 전달하고 상세 히스토그램은 주기적으로 전달한다.
+func (s *mqttSession) counts() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.stats
+	return map[string]any{
+		"connected_clients": v.Connected, "active_clients": v.Active, "peak_active_clients": v.Peak,
+		"publish_attempts": v.Attempts, "mqtt_published": v.Published, "puback_count": v.Puback,
+		"unconfirmed_messages": v.Unconfirmed, "reconnect_count": v.Reconnects,
+		"connection_count": v.Connections, "disconnect_count": v.Disconnections,
+		"schedule_delay_ms": v.ScheduleDelay, "initial_connect_ms": v.InitialConnectMS,
+	}
 }
 
 func (s *mqttSession) disconnect(id string) {
@@ -368,7 +388,19 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		}
 		// 모든 Client가 같은 속도 제한을 공유한다. 토큰 대기는 잠금 밖이다.
 		s.publishMu.Lock()
-		if err = s.publishPacer.wait(ctx); err != nil {
+		waitStarted := time.Now()
+		expectedWait := max(time.Duration(0), time.Until(s.publishPacer.next))
+		if s.publishLimiter != nil {
+			expectedWait, err = s.publishLimiter.wait(ctx)
+		} else {
+			err = s.publishPacer.wait(ctx)
+		}
+		waited := time.Since(waitStarted)
+		s.mu.Lock()
+		s.stats.PublishRateWaitMS += float64(waited) / float64(time.Millisecond)
+		s.stats.PublishRateOvershootMS += float64(max(time.Duration(0), waited-expectedWait)) / float64(time.Millisecond)
+		s.mu.Unlock()
+		if err != nil {
 			s.publishMu.Unlock()
 			return err
 		}
@@ -430,8 +462,17 @@ func serveMQTTStream(req Request, input io.Reader, w io.Writer) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.MQTT.MaxDurationSeconds)*time.Second)
 	defer cancel()
 	defer s.close()
+	lastDetails := time.Time{}
 	respond := func(id int64, err error, closed ...bool) {
-		reply := map[string]any{"id": id, "ok": err == nil, "stats": s.snapshot()}
+		full := req.MQTT.ExecutionProfile != "operations" || id == 0 || err != nil || len(closed) > 0 || time.Since(lastDetails) >= 100*time.Millisecond
+		var stats any
+		if full {
+			stats = s.snapshot()
+			lastDetails = time.Now()
+		} else {
+			stats = s.counts()
+		}
+		reply := map[string]any{"id": id, "ok": err == nil, "stats": stats, "stats_complete": full}
 		if len(closed) > 0 {
 			reply["closed"] = closed[0]
 		}
