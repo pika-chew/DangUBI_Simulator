@@ -55,13 +55,14 @@ def test_wire_body_is_snapshot_and_has_exact_utf8_size():
     message["ts"]+=2000
     command=dict(id=1,command="publish",vehicle_id="v000001",message=wire,due_at_ms=1000)
     raw=encode_command(command)
-    assert json.loads(raw)["message"]["pld"]["sp"]!=99
+    assert json.loads(raw)["message_raw"]["pld"]["sp"]!=99
     assert wire.size==len(wire.text.encode("utf-8"))
     assert wire.size>len(wire.text)
     assert wire["ts"]==json.loads(wire.text)["ts"]
     with pytest.raises(FrozenInstanceError):wire.text="{}"
     assert json.loads(encode_command({"id":1,"command":"connect"}))=={"id":1,"command":"connect"}
-    assert json.loads(encode_command({"message":wire}))["message"]==json.loads(wire.text)
+    assert json.loads(encode_command({"message":wire}))["message_raw"]==json.loads(wire.text)
+    assert json.loads(encode_command({"message":wire},raw=False))["message"]==json.loads(wire.text)
 
 
 def test_wire_queue_reserves_bytes_and_releases_after_ack():
@@ -73,6 +74,6 @@ def test_wire_queue_reserves_bytes_and_releases_after_ack():
     expected=len(encode_command(dict(command="publish",vehicle_id="a",message=wire)).encode("utf-8"))
     assert publisher.reserved_bytes==expected
     publisher.pump(origin_ms=100000)
-    assert json.loads(encode_command(bridge.sent[0][2]))["message"]==json.loads(wire.text)
+    assert json.loads(encode_command(bridge.sent[0][2]))["message_raw"]==json.loads(wire.text)
     bridge.replies=[1];publisher.pump(allow_start=False)
     assert publisher.reserved_bytes==publisher.reserved_count==0

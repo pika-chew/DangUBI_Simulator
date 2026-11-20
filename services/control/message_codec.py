@@ -21,12 +21,13 @@ def prepare_message(message):
     return WireMessage(raw,len(raw.encode("utf-8")),message["ts"])
 
 
-def encode_command(command):
+def encode_command(command,raw=True):
     message=command.get("message")
     if isinstance(message,WireMessage):
         base=json.dumps({k:v for k,v in command.items() if k!="message"},ensure_ascii=False,separators=(",",":"))
         separator="," if base!="{}" else ""
-        return base[:-1]+separator+'"message":'+message.text+'}'
+        key='"message_raw":' if raw else '"message":'
+        return base[:-1]+separator+key+message.text+'}'
     return json.dumps(command,ensure_ascii=False,separators=(",",":"))
 
 

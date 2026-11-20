@@ -25,12 +25,13 @@ func newMQTTClient(p *MQTTProfile, id string, config *tls.Config) mqtt.Client {
 }
 
 type streamCommand struct {
-	ID        int64          `json:"id"`
-	Command   string         `json:"command"`
-	ClientID  string         `json:"client_id,omitempty"`
-	VehicleID string         `json:"vehicle_id,omitempty"`
-	Message   map[string]any `json:"message,omitempty"`
-	DueAtMS   int64          `json:"due_at_ms,omitempty"`
+	ID         int64           `json:"id"`
+	Command    string          `json:"command"`
+	ClientID   string          `json:"client_id,omitempty"`
+	VehicleID  string          `json:"vehicle_id,omitempty"`
+	Message    map[string]any  `json:"message,omitempty"`
+	MessageRaw json.RawMessage `json:"message_raw,omitempty"`
+	DueAtMS    int64           `json:"due_at_ms,omitempty"`
 }
 
 type streamStats struct {
@@ -370,13 +371,9 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		if id == "" {
 			return errors.New("차량 또는 발행 상한을 확인하세요.")
 		}
-		m := c.Message
-		ty, ok := m["ty"].(float64)
-		_, payload := m["pld"].(map[string]any)
-		_, timestamp := m["ts"].(float64)
-		encoded, err := json.Marshal(m)
-		if !ok || (ty != 3 && ty != 4) || !payload || !timestamp || len(m) != 3 || err != nil || len(encoded) > 131072 {
-			return errors.New("OBD 본문을 확인하세요.")
+		encoded, ty, timestamp, tid, err := streamPayload(c, s.parkingTrace != nil)
+		if err != nil {
+			return err
 		}
 		if err = s.connect(ctx, id); err != nil {
 			return err
@@ -414,10 +411,9 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		if c.DueAtMS > 0 {
 			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
 			if trace := s.parkingTrace; trace != nil && ty == 4 && len(trace.firstSends[c.VehicleID]) < 2 {
-				tid, _ := m["pld"].(map[string]any)["tid"].(float64)
 				if tid != trace.lastTrip[c.VehicleID] {
 					trace.lastTrip[c.VehicleID] = tid
-					trace.firstSends[c.VehicleID] = append(trace.firstSends[c.VehicleID], parkingSend{id, m["ts"].(float64), delay})
+					trace.firstSends[c.VehicleID] = append(trace.firstSends[c.VehicleID], parkingSend{id, timestamp, delay})
 				}
 			}
 			if s.profile.LocalBenchmark && s.parkingTrace == nil {
@@ -473,6 +469,9 @@ func serveMQTTStream(req Request, input io.Reader, w io.Writer) {
 			stats = s.counts()
 		}
 		reply := map[string]any{"id": id, "ok": err == nil, "stats": stats, "stats_complete": full}
+		if id == 0 && err == nil && len(closed) == 0 {
+			reply["capabilities"] = map[string]bool{"raw_message": true}
+		}
 		if len(closed) > 0 {
 			reply["closed"] = closed[0]
 		}

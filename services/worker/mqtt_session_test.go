@@ -32,14 +32,20 @@ func TestOperationsStreamCompactCountersAndFinalDetails(t *testing.T) {
 		}
 		return reply
 	}
-	if read()["stats_complete"] != true {
+	initial := read()
+	if initial["stats_complete"] != true || initial["capabilities"].(map[string]any)["raw_message"] != true {
 		t.Fatal("초기 상세 누락")
 	}
 	encoder.Encode(streamCommand{ID: 1, Command: "connect", ClientID: "detail-c1"})
 	read()
 	compact := 0
 	for i := 1; i <= 20; i++ {
-		encoder.Encode(streamCommand{ID: int64(i + 1), Command: "publish", VehicleID: "v000001", Message: req.Message})
+		command := streamCommand{ID: int64(i + 1), Command: "publish", VehicleID: "v000001", Message: req.Message}
+		if i%2 == 1 {
+			command.MessageRaw, _ = json.Marshal(req.Message)
+			command.Message = nil
+		}
+		encoder.Encode(command)
 		reply := read()
 		stats := reply["stats"].(map[string]any)
 		if reply["id"] != float64(i+1) || stats["puback_count"] != float64(i) {

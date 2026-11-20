@@ -24,6 +24,7 @@ class MQTTBridge:
         self.close_id=None
         self.sequence=0
         self.pending={}
+        self.raw_supported=False
         self.limit=len(set(a["client_id"] for a in data["assignments"]))
         self.responses=queue.Queue(maxsize=self.limit+2)
         self.process=subprocess.Popen([str(worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
@@ -47,7 +48,7 @@ class MQTTBridge:
             except queue.Full:pass
 
     def _write(self,command):
-        raw=encode_command(command)+"\n"
+        raw=encode_command(command,raw=self.raw_supported)+"\n"
         cap=8388608 if command.get("operation")=="mqtt_stream" else 262144
         if len(raw.encode())>cap:raise MQTTFailure("MQTT 명령 크기 상한을 초과했습니다.")
         try:
@@ -69,7 +70,8 @@ class MQTTBridge:
         try:reply=self.responses.get(timeout=wait)
         except queue.Empty:
             budget=self.profile["max_duration_seconds"]+2
-            if not closing and self.pending and time.monotonic()-min(self.pending.values())>budget:
+            # 단조 시각 순서로 삽입하고 응답 ID만 제거하므로 첫 항목이 가장 오래됐다.
+            if not closing and self.pending and time.monotonic()-next(iter(self.pending.values()))>budget:
                 raise MQTTFailure("MQTT 명령 응답 제한시간을 초과했습니다.")
             return None
         if not isinstance(reply,dict):raise MQTTFailure("MQTT 세션이 최종 응답 없이 종료되었습니다.")
@@ -94,6 +96,8 @@ class MQTTBridge:
             reply=self.poll(.05)
             if reply is not None:
                 if reply.get("id")!=0:raise MQTTFailure("MQTT 초기 응답 ID를 확인하세요.")
+                capabilities=reply.get("capabilities",{})
+                self.raw_supported=isinstance(capabilities,dict) and capabilities.get("raw_message") is True
                 return self.stats
         raise MQTTFailure("MQTT 초기 응답을 확인하지 못했습니다.")
 

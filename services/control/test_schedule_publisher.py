@@ -57,6 +57,25 @@ def test_compact_reply_keeps_details_and_final_reply_replaces_them():
     assert bridge.stats["performance"]["schedule"]["count"]==12
 
 
+def test_oldest_pending_deadline_does_not_scan_all_entries(monkeypatch):
+    import queue
+    from services.control.mqtt_bridge import MQTTBridge
+    b=MQTTBridge.__new__(MQTTBridge);b.profile={"max_duration_seconds":60};b.stats={};b.responses=queue.Queue()
+    clock=[100.];monkeypatch.setattr("services.control.mqtt_bridge.time.monotonic",lambda:clock[0])
+    class FirstOnly(dict):
+        def values(self):
+            for i,value in enumerate(super().values()):
+                if i:raise AssertionError("전체 pending 탐색")
+                yield value
+    b.pending=FirstOnly({1:99.,2:99.1,3:99.2})
+    assert b.poll() is None
+    b.responses.put(dict(id=2,ok=True,stats={}));b.poll()
+    assert b.poll() is None and list(b.pending)==[1,3]
+    b.responses.put(dict(id=1,ok=True,stats={}));b.poll()
+    clock[0]=200.
+    with pytest.raises(MQTTFailure):b.poll()
+
+
 def test_client_lanes_preserve_shared_vehicle_order_and_disconnect():
     bridge=Bridge();result={}
     publisher=SchedulePublisher(bridge,result,{"a":"c1","b":"c1","c":"c2"})
