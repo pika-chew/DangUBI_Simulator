@@ -803,3 +803,23 @@ OBD 검사는 계약에서 준비한 규칙으로 정상 데이터를 확인합�
 원문 전달을 지원하는 Worker에는 준비한 JSON 본문을 전달합니다. Go는 루트 항목·종류·시각·payload 객체·128KiB 한도를 확인한 뒤 이 본문 바이트를 그대로 발행합니다. Python의 전체 계약 검사와 개별 명령·Client 순서·PUBACK 처리는 유지합니다. Worker가 초기 응답에서 지원을 명시하지 않으면 기존 본문 형식으로 전달하므로 이전 Worker와도 연결할 수 있습니다. 별도 사용자 설정은 없으며 제어기와 Worker가 같은 버전인 이미지를 권장합니다.
 
 대기 명령은 단조 시각 순서로 등록하고 완료 ID를 제거합니다. 응답 대기 제한시간은 남은 첫 명령을 기준으로 확인해 전체 대기 명령 목록을 반복 탐색하지 않습니다. 내부 명령은 개별 전달하며 묶음 전달용 추가 버퍼는 사용하지 않습니다.
+
+
+### Linux 컨테이너에서 계측 비용 분리
+
+제품 이미지를 먼저 빌드한 뒤 시험 전용 이미지를 별도로 만듭니다. 기본 제품 기준 이미지는 `dangubi-simulator:git-6244df3`이며 다른 버전은 `--build-arg BASE_IMAGE=...`로 지정합니다. 시험 이미지는 배포용 이미지가 아닙니다.
+
+```powershell
+docker --context desktop-linux build -f configs/measurement.Dockerfile -t dangubi-measure:6244df3-normalized .
+.\.venv\Scripts\python.exe scripts/measure_container.py --instrumentation full --output .local/linux-full.json
+.\.venv\Scripts\python.exe scripts/measure_container.py --instrumentation counts --output .local/linux-counts.json
+.\.venv\Scripts\python.exe scripts/measure_container.py --instrumentation counts --sample-ms 1000 --output .local/linux-sample1000.json
+```
+
+명령은 순서대로 실행합니다. 기본 조건은25,000대·풀500·생성 Worker1·2초 주기·관측60초·실행 한도30초·발행 상한15,000/s입니다. 컨테이너는 CPU4개 상한·메모리4GiB 제한·외부 네트워크 없음·읽기 전용·일반 사용자로 실행하며 임시 DB/인증서/브로커를 내부에만 만듭니다. CPU4개는 사용량 상한이며 전용 코어 예약을 뜻하지 않습니다. 제어기/생성/송신 표본 RSS3GiB 초과 시 중단을 요청하며 컨테이너4GiB 제한에는 브로커 등도 포함됩니다. 종료 후 이번 명령이 만든 컨테이너를 제거합니다.
+
+`full`은 제품 규격 검사·개별 PUBACK에 더해 시험용 본문 지문·차량별 순서까지 확인합니다. `counts`는 시험용 지문·순서 계산만 생략하고 규격 검사·개별 PUBACK·연결/발행/큐 제한을 유지합니다. `counts`의 `broker_integrity_verified`와 `observed_delivery_consistent`는 미검사(null)이며 `observed_count_consistent`로 건수 일치·정리 확인을 구분합니다. 건수 일치가 본문 일치를 보장하지는 않습니다.
+
+`--sample-ms`는 실행 조회·RSS 수집 주기(250~1,000ms, 기본250)입니다. 수집 주기를 늘리면 순간 피크를 놓칠 수 있고 RSS/시간 한도의 중단 요청 시점에도 영향을 주므로 실제 적용 주기를 결과와 함께 비교합니다. `--execution-profile --wall-seconds 10`은 실행 스레드 함수 진단용입니다. 이 실행의 처리량은 성능 비교에서 제외하며, `execution_profile_timing_consistent=false`이면 함수별 시간·비율을 병목 근거로 사용하지 않습니다. 다른 스레드와 브로커의 함수 프로파일은 포함하지 않습니다.
+
+결과에는 실제 시험 이미지 ID와 기반 제품 revision을 기록합니다. revision은 시험 도구 자체의 버전을 뜻하지 않습니다. `--window-seconds 2 --wall-seconds 60`은50,000건 완송 확인용으로,60초 관측의 부분 처리량과 직접 비교하지 않습니다. Windows와 Linux 자원 조건이 다르면 수치 차이를 운영체제 효과로 단정하지 않습니다. AWS 처리량·30일 안정성·25,000개 연결을 입증하는 시험도 아닙니다.

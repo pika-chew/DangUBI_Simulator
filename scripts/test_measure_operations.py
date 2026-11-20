@@ -10,6 +10,35 @@ def case(**patch):
     value.update(patch);return value
 
 class OperationsMeasurementTests(unittest.TestCase):
+    def test_prebuilt_worker_requires_only_the_requested_stage_files(self):
+        import os,tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts.measure_operations import build
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{"DANGUBI_MEASURE_BIN_DIR":folder}):
+            suffix=".exe" if os.name=="nt" else ""
+            worker=Path(folder)/("operations-worker"+suffix)
+            worker.touch()
+            self.assertEqual(build("generation")[0],worker.resolve())
+            with self.assertRaises(ValueError):build("mqtt")
+
+    def test_instrumentation_modes_preserve_default_and_reject_unknown(self):
+        self.assertEqual(validate(case())["instrumentation"],"full")
+        self.assertEqual(validate(case(instrumentation="counts"))["instrumentation"],"counts")
+        with self.assertRaises(ValueError):validate(case(instrumentation="skip-validation"))
+        self.assertEqual(validate(case(sample_ms=1000))["sample_ms"],1000)
+        with self.assertRaises(ValueError):validate(case(sample_ms=1001))
+
+    def test_container_is_bounded_and_isolated(self):
+        from scripts.measure_container import run_arguments
+        command=run_arguments("measurement-image","isolated-name","counts",60,30)
+        for option,value in [("--network","none"),("--memory","4g"),("--cpus","4"),("--instrumentation","counts")]:
+            self.assertEqual(command[command.index(option)+1],value)
+        self.assertIn("--read-only",command)
+        self.assertNotIn("--volume",command)
+        with self.assertRaises(ValueError):run_arguments("image","name","full",61,30)
+        with self.assertRaises(ValueError):run_arguments("image","name","full",60,30,1001)
+
     def test_broker_report_is_read_after_writer_exits(self):
         import tempfile,json
         from pathlib import Path

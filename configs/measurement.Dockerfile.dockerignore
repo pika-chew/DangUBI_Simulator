@@ -1,0 +1,14 @@
+**
+!services/
+!services/worker/
+!services/worker/*.go
+!services/worker/go.mod
+!services/worker/go.sum
+!scripts/
+!scripts/measure_operations.py
+!scripts/measure_schedule.py
+!scripts/measure_mqtt.py
+!scripts/measurement_process.py
+!configs/
+!configs/measurement.Dockerfile
+!configs/measurement.Dockerfile.dockerignore
