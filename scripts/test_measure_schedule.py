@@ -52,7 +52,9 @@ class ScheduleMeasurementTest(unittest.TestCase):
         measurement.validate_config(dict(cases=[c],repeats=1))
         with self.assertRaises(ValueError):measurement.validate_config(dict(cases=[dict(c,local_scale=False)]))
         with self.assertRaises(ValueError):measurement.validate_config(dict(cases=[dict(c,vehicles=1001)]))
-        with self.assertRaises(ValidationError):ScheduleExecutionRequest(plan_key="test",client_count=1000)
+        # 실행 요청은 운영 범위도 수용하며 소량 제한은 선택한 일정/서버 프로필에서 검사한다.
+        self.assertEqual(ScheduleExecutionRequest(plan_key="test",client_count=25000).client_count,25000)
+        with self.assertRaises(ValidationError):ScheduleExecutionRequest(plan_key="test",client_count=25001)
         with self.assertRaises(ValidationError):MQTTProfile(broker_url="ssl://127.0.0.1:1",ca_file="a",cert_file="b",key_file="c",max_clients=1000)
         self.assertEqual(ScheduleRequest.model_fields["vehicles"].metadata[1].max_length,100)
 
