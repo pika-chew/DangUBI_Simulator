@@ -1,4 +1,6 @@
 import {InfoHint} from "./InfoHint";
+import {defaultFleet,profileGuide,type ExecutionProfile} from "./fleetSettings";
+export {defaultFleet} from "./fleetSettings";
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
   include_em?: boolean;
@@ -31,23 +33,12 @@ const presets: Record<string, Mix> = {
   commute: { commute: 80, daytime: 10, flexible: 10 },
   flexible: { commute: 20, daytime: 30, flexible: 50 },
 };
-export function defaultFleet(): FleetConfig {
-  const day = localTime(Date.now()).slice(0, 10);
-  const start = `${day}T00:00:00+09:00`;
-  return {
-    fleet_version: "fleet-plan-4", vehicle_count: 20,
-    measurement: { start, end: iso(localTime(Date.parse(start) + 3 * 86400000)), timezone: "Asia/Seoul" },
-    interval_ms: 2000, seed: 42, trip_min_minutes: 3, trip_max_minutes: 120,
-    daily_variation_percent: 25, departure_jitter_minutes: 30,
-    day_off_probability: 0.2, weekend_activity_probability: 0.5,
-    anomaly_vehicle_percent: 5, anomaly_events_per_hour: 2, anomaly_intensity: "medium",
-    pattern_mix: { ...presets.mixed }, road_mix: { urban: 35, highway: 20, congested: 5, mixed: 40 },
-  };
-}
 const Help=InfoHint;
 const units:Partial<Record<keyof FleetConfig,string>>={vehicle_count:"대",trip_min_minutes:"분/회",trip_max_minutes:"분/회",daily_driving_minutes:"분/일",vehicle_variation_percent:"%",daily_variation_percent:"%",departure_jitter_minutes:"분",anomaly_vehicle_percent:"%",anomaly_events_per_hour:"회/운행 1시간"};
 
 export function FleetControls({ value: v, onChange, disabled }: { value: FleetConfig; onChange: (next: FleetConfig) => void; disabled: boolean }) {
+  const profile=v.execution_profile??"small_test";
+  const guide=profileGuide[profile];
   const patch = (p: Partial<FleetConfig>) => onChange({ ...v, ...p });
   const numeric = (key: keyof FleetConfig, title: string, min: number, max: number, hint?: string, step = 1) => <label key={key}>
     <span className="label-line">{title} <Help label={title} text={hint??"값을 높이면 적용량이 늘어납니다."} range={min.toLocaleString("ko-KR")+"~"+max.toLocaleString("ko-KR")+(units[key]??" · 정수")} /></span>
@@ -55,13 +46,13 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
   </label>;
   const preset = Object.entries(presets).find(([, m]) => JSON.stringify(m) === JSON.stringify(v.pattern_mix))?.[0] ?? "custom";
   return <fieldset disabled={disabled} className="schedule-fieldset">
-    <p className="note">차량을 한 대씩 등록할 필요가 없습니다. 전체 조건으로 명부·생활패턴·날짜별 운행과 도로 성격을 자동 배정합니다. 아래 기본값은 한국 실차 통계가 아닌 개발 예시입니다.</p>
+    <p className="context-note"><b>{guide.summary}</b></p>
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’를 하면 현재 최소·최대 시간 배정 방식으로 새 일정을 작성합니다. 원본은 보존합니다.</p>}
     <div className="fields">
-      <label>실행 프로필 <Help label="실행 프로필" text="소량 시험은 짧은 확인용, 운영은 많은 차량·장기간 실행용입니다." range={v.execution_profile==="operations"?"계획·실행 최대25,000대·30일":"계획100대·30일·10,000운행 / 실행1시간·10,000메시지"} /><select value={v.execution_profile ?? "small_test"} onChange={e=>patch({execution_profile:e.target.value as "small_test"|"operations"})}><option value="small_test">소량 시험</option><option value="operations">운영 · 최대25,000대·30일</option></select></label>
+      <label>실행 프로필 <Help label="실행 프로필" text={guide.info} range={guide.range} /><select value={profile} onChange={e=>onChange(defaultFleet(e.target.value as ExecutionProfile,Date.parse(v.measurement.start)))}><option value="small_test">소량 시험 · 빠른 생성 확인</option><option value="operations">운영 · 일정 생성·전송</option></select></label>
       {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "데이터를 만들 차량 수입니다. 늘리면 생성량과 처리 부하가 커집니다.")}
-      <label>측정 시작 (KST) <Help label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발 시각과는 다릅니다." range="시작 < 종료 · 기간 최대30일 · 1970~2100년" /><input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
-      <label>측정 종료 (KST) <Help label="측정 종료" text="데이터를 관측할 마지막 시각입니다. 늦출수록 관측량이 늘어납니다." range="기간 최대30일 · 소량 실행은 최대1시간" /><input type="datetime-local" step="1" value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
+      <label>측정 시작 (KST) <Help label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발 시각과는 다릅니다." range={`시작 < 종료 · ${profile==="operations"?"최대30일":"전체 실행 최대1시간"} · 1970~2100년`} /><input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
+      <label>측정 종료 (KST) <Help label="측정 종료" text="데이터를 관측할 마지막 시각입니다. 늦출수록 관측량이 늘어납니다." range={profile==="operations"?"측정 기간 최대30일":"전체 실행 최대1시간·10,000건. 기간 축소만으로 실제MQTT 제한 충족을 보장하지 않음"} /><input type="datetime-local" step="1" min={local(v.measurement.start)} max={Number.isFinite(Date.parse(v.measurement.start))?localTime(Date.parse(v.measurement.start)+guide.maxDays*86400000):undefined} value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
       <label>Microtrip 주기 (초) <Help label="Microtrip 주기" text="운행 중 메시지를 만드는 간격입니다. 짧을수록 데이터와 전송량이 늘어납니다." range="0.1~86,400초" /><input type="number" min="0.1" max="86400" step="0.1" value={v.interval_ms / 1000} onChange={e => patch({ interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
       <label>운행 성격 <Help label="운행 성격" text="출퇴근·주간·비정기 차량의 구성을 바꿉니다. 차량별 시간표는 자동 배정합니다." /><select value={preset} onChange={e => patch({ pattern_mix: { ...presets[e.target.value] } })}>
         <option value="mixed">혼합 · 출퇴근60% / 주간20% / 비정기20%</option>
@@ -91,6 +82,6 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
       </div>
       <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 다양한 생활 운행에서는 짧은 용무·운행 길이에 맞게 개별 도로 성격도 달라질 수 있습니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
     </details>
-    <p className="note">{v.execution_profile==="operations"?"운영 계획은 최대25,000대·30일이며 실제 처리량은 별도 검증 대상입니다.":"소량 계획은 최대100대·30일·문맥 포함10,000운행이며 실행은1시간·10,000메시지 이하입니다."} 최소·최대 시간은 운행1회 기준이며 주차는 최소30분입니다.</p>
+    <p className="note">프로필 전환 시 해당 기본값을 적용합니다. 운행 시간은 1회 기준 · 최소 주차30분.</p>
   </fieldset>;
 }

@@ -236,7 +236,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       {cacheError && <p className="error" role="alert">{cacheError}</p>}
     </details>
     <section className="card" hidden={view !== "settings"}>
-      <div className="panel-heading"><div><h2>생성 조건</h2><p className="note">전체 조건을 지정한 뒤 일정을 기록하고 차량 데이터를 탐색합니다.</p></div><div className="config-actions"><button className="primary" disabled={!!busy || readOnly} onClick={()=>void preview()}>일정 생성·기록</button><button disabled={!!busy || readOnly} onClick={()=>{if(setup==="fleet") editFleet(defaultFleet()); else {edit(example());setEditor(0);}}}>초기값</button></div></div>
+      <div className="panel-heading"><div><h2>생성 조건</h2><p className="note">전체 조건을 지정한 뒤 일정을 기록하고 차량 데이터를 탐색합니다.</p></div><div className="config-actions"><button className="primary" disabled={!!busy || readOnly} onClick={()=>void preview()}>일정 생성·기록</button><button disabled={!!busy || readOnly} onClick={()=>{if(setup==="fleet") editFleet(defaultFleet(fleet.execution_profile??"small_test")); else {edit(example());setEditor(0);}}}>초기값</button></div></div>
       <label>작업 이름<input value={title} disabled={!!busy || readOnly} maxLength={80} onChange={e=>setTitle(e.target.value)} /></label>
       {readOnly && <p className="context-note">저장된 설정은 고정됩니다. 상단의 ‘설정 복사’로 새 작업을 만들 수 있습니다.</p>}
       <label>설정 범위<select disabled={!!busy || readOnly} value={setup} onChange={e => { resetResults(); setSetup(e.target.value as "fleet" | "individual"); }}><option value="fleet">전체 조건 자동 배정 · 기본</option><option value="individual">개별 차량 설정 · 점검용</option></select></label>
