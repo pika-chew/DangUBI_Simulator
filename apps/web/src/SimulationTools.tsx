@@ -95,6 +95,10 @@ type TimingSummary = {
   over_5s_count?: number;
 };
 export type Result = {
+  initial_connect_ms?: number;
+  execution_timing?: {
+    preparation_ms?:number;replay_ms?:number;measurement_wait_ms?:number;drain_ms?:number;cleanup_ms?:number;
+  };
   transmission_goal?: {
     status: "passed" | "exceeded" | "incomplete" | "pending" | "unavailable" | "not_applicable";
     reason: string;
