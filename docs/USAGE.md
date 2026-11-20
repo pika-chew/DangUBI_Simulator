@@ -922,3 +922,23 @@ MQTT override로 실행했다면 동일한 -f configs/compose.mqtt.yaml도 종�
 
 
 `python scripts/dev.py test`는 현재Go소스로 임시Worker를 새로 빌드하고 테스트용Worker/DB/조회캐시/비활성MQTT경로를 전달합니다. 사용자 서버의 .local/worker 또는 기존 접속 설정을 덮어쓰지 않습니다. 이전 개인 후보파일이 없어도 Linux/Windows에서 같은 경로 규칙을 사용합니다. Node화면회귀는 `node --test scripts/*.test.mjs`, 실행도구검사는 `python -m unittest scripts.test_container scripts.test_dev`이며 GitHub Actions에도 포함합니다.
+
+### EC2 단일 호스트 실행 준비
+
+EC2 한 대에서 Docker로 실행하며, 이미지는 같은 리전의 ECR에 보관하는 구성입니다. 서버 유형·실제 계정 설정·7일 지속 성능은 배포 전 확인합니다. 아래 예시는 x86_64 Linux, 4 vCPU·16GiB 호스트를 가정하며 제품의 처리량 보장값이 아닙니다. 생성·일정·전송 로직이나 기존 운영 기본값은 바꾸지 않습니다.
+
+`configs/ec2.env.example`을 호스트의 비공개 설정으로 복사하고 검증한 ECR 이미지 digest, 비공개 인증서 디렉터리를 지정합니다. 컨테이너 메모리는12GiB로 제한해 호스트와 Docker에 여유를 남깁니다. 8GiB 호스트에 이 설정을 그대로 적용하지 마세요. `configs/compose.ec2.yaml`은 amd64 이미지 선택과 프로세스별 파일 핸들 상한65,536개를 지정합니다. 이는 MQTT 연결을 생성하는 설정이 아니며 허용Client수·실제연결수·AWS 할당량도 바꾸지 않습니다.
+
+Docker와 Compose, ECR 읽기 권한과 로그인이 준비된 호스트에서 다음 구성 확인만 먼저 실행합니다. 예시 경로의 private 폴더에는 mqtt.json과 인증서가 있어야 하며 컨테이너 UID10001이 읽을 수 있어야 합니다. 설정 출력에는 호스트 경로가 포함될 수 있으므로 공개하지 않습니다.
+
+```bash
+docker compose --env-file /opt/dangubi/private/container.env --project-name dangubi -f configs/compose.yaml -f configs/compose.ec2.yaml -f configs/compose.mqtt.yaml config --quiet
+```
+
+구성 확인 후 동일 명령의 `config --quiet`를 `pull`로 바꿔 이미지를 준비하고, `up --detach`로 시작합니다. MQTT 설정이 준비되어도 자동 전송하지 않습니다. UI에서 운영 프로필→차량 수·측정 기간 지정→일정 생성→연결/전송 설정→서버 설정 확인→실제MQTT 및 송신 확인→일정 실행 순으로 사용합니다. 생성Worker와 연결 풀 수는 서버 CPU 수와 별개이며 실행 전에 지정하고 해당 실행 중에는 고정합니다.
+
+웹 포트는 기존대로 호스트127.0.0.1에만 연결합니다. EC2의8081포트를 인터넷에 공개하지 않고, 접근이 제한된SSH나 인증된 관리 경로로 연결합니다. ECR 읽기 권한은 호스트 역할로 부여하고 AWS 자격증명·인증서 개인 키를 이미지에 넣지 않습니다. EC2와IoT Core를 같은 리전에 두고 NAT Gateway가 없는 경로를 사용할지 배포 전에 확인합니다.
+
+장기 실행 전 생성 확인은 송신 없음으로, 실제 전송 확인은 사용자 지정의 짧은 기간·메시지 상한으로 구분합니다. 현재 조건에 맞춘 서버MQTT설정의 메시지·시간 상한도 확인하세요. 가상시간으로 빨리 보내도 IoT 메시지 개수가 같으면 메시지 비용은 줄지 않습니다. 자동 재시작과 중단 전송의 자동 이어 보내기는 지원하지 않으므로7일 가동은 무중단 보장이나 자동 복구를 의미하지 않습니다.
+
+실행 후 측정JSON에서 생성량·PUBACK·미확인·지연 추세를 확인하고 Docker의 CPU·메모리와 호스트 디스크 여유도 함께 확인합니다. 정상 종료 후 컨테이너를 정지하고EC2가 계속 실행 중인지 별도로 확인합니다. 컨테이너/일정 종료는EC2 자동 정지가 아니며, 유지한EBS·ECR·Elastic IP에는 서버 정지 후에도 비용이 발생할 수 있습니다.

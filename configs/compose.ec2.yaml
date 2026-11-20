@@ -1,0 +1,8 @@
+# 공통 compose.yaml에 추가하는 EC2 x86_64 설정. 호스트 사양은 env와 별도로 선택한다.
+services:
+  simulator:
+    platform: linux/amd64
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
