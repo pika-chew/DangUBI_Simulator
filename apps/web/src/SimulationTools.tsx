@@ -36,7 +36,7 @@ export type Config = {
   interval_ms: number;
   connection_lifetime: "always" | "while_driving";
 };
-type Assignment = { vehicle_id: string; client_id: string };
+type Assignment = { vehicle_id: string; client_id: string; vin?: string };
 export type Generation = {
   include_em?: boolean;
   profile: "urban" | "highway" | "congested" | "mixed";

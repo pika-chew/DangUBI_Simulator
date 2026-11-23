@@ -185,3 +185,22 @@ body { margin:0; }
 
 /* 시간선 막대에 공통 버튼 여백이 적용되면 짧은 운행이 길게 보인다. */
 .studio .schedule-timeline button { padding:0; min-height:0; line-height:normal; }
+
+/* 시험 실행 | 상시 운영 전환 */
+.mode-switch{display:flex;gap:2px;margin-left:16px;padding:2px;border:1px solid var(--border);border-radius:8px}
+.mode-switch button{border:0;background:transparent;padding:4px 12px;border-radius:6px;font-weight:600;cursor:pointer;color:inherit}
+.mode-switch button[aria-selected="true"]{background:var(--accent);color:#092621}
+.operations{display:grid;gap:16px}
+.operations .metric-grid{margin:8px 0}
+.confirm-inline{display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px}
+.operation-events{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.operation-events li{display:grid;grid-template-columns:150px 180px 1fr;gap:8px;font-size:.9em}
+.operation-events time{opacity:.7}
+.sample-json{max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.legacy-profile{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+@media (max-width:700px){.operation-events li{grid-template-columns:1fr}.mode-switch{margin-left:8px}}
+/* 상시 운영은 작업 기록 탐색기·작업 탭이 없다: 본문이 도구 막대 오른쪽 전체를 쓰고 스크롤한다. */
+.operations-mode .studio-body,.operations-mode.sidebar-collapsed .studio-body,.operations-mode.focus-mode .studio-body{grid-template-columns:48px minmax(0,1fr)}
+.operations-mode .studio-main{grid-template-rows:auto minmax(0,1fr)}
+.operations-mode .workspace-content{overflow:auto}
+@media(max-width:650px){.operations-mode .studio-body{grid-template-columns:42px minmax(0,1fr)}}

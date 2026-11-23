@@ -7,12 +7,15 @@ from services.control.message_codec import encode_command
 
 
 class SchedulePublisher:
-    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None,queue_capacity=100,queue_bytes=1048576):
+    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None,queue_capacity=100,queue_bytes=1048576,clients=None,on_confirm=None):
         self.bridge=bridge
         self.on_account=on_account
+        # 상시 운영: 명령이 PUBACK 확인으로 끝날 때 차량별 진행을 기록한다.
+        self.on_confirm=on_confirm
         self.due_offset=due_offset or (lambda ts:ts-measurement_start_ms)
         self.clients=client_by_vehicle
-        self.queues={client:deque() for client in sorted(set(self.clients.values()))}
+        # 상시 운영은 차량 0대로 시작할 수 있어 Client 풀을 따로 받는다.
+        self.queues={client:deque() for client in sorted(set(self.clients.values())|set(clients or ()))}
         self.active={}
         self.busy=set()
         self.ready=deque()
@@ -27,7 +30,9 @@ class SchedulePublisher:
             "backpressure_count":0,"discarded_queued":0,"discarded_queued_bytes":0}
 
     def enqueue(self,command,gate,**fields):
-        client=self.clients[fields["vehicle_id"]] if command=="publish" else fields["client_id"]
+        # route: 상시 운영의 attach/detach처럼 보낼 Client를 따로 지정하는 명령(전송 필드 아님).
+        route=fields.pop("route",None)
+        client=route or (self.clients[fields["vehicle_id"]] if command=="publish" else fields["client_id"])
         size=len(encode_command(dict(command=command,**fields)).encode())
         if size>self.state["queue_byte_capacity"]:raise MQTTFailure("한 메시지가 송신 대기열 바이트 상한을 초과했습니다.")
         full=False
@@ -63,13 +68,14 @@ class SchedulePublisher:
             if reply is None:break
             identifier=reply["id"]
             if identifier not in self.active:raise MQTTFailure("송신 완료 명령을 확인하지 못했습니다.")
-            client,command,size=self.active.pop(identifier)
+            client,command,size,fields=self.active.pop(identifier)
             self.busy.remove(client)
             self._ready(client)
             self.reserved_count-=1;self.reserved_bytes-=size
             if command=="publish":
                 self.state["in_flight"]-=1
             self._budget()
+            if self.on_confirm:self.on_confirm(command,fields)
         if not allow_start:return
         # 매 순회에 Client당 하나씩 허용한다. 동일 Client의 차량들은 한 순서를 공유한다.
         for _ in range(len(self.ready)):
@@ -83,7 +89,7 @@ class SchedulePublisher:
                 self._ready(client)
                 raise
             queue.popleft()
-            self.active[identifier]=(client,command,size)
+            self.active[identifier]=(client,command,size,fields)
             self.busy.add(client)
             if command=="publish":
                 self.state["queued_messages"]-=1;self.state["in_flight"]+=1

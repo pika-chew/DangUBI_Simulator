@@ -16,8 +16,9 @@ export function scheduleReadiness(plan:PlanRecord,transport:"dry_run"|"mqtt",cli
   const issues:{reason:string;action:string}[]=[];
   if(!Number.isInteger(clients)||clients<1||clients>plan.vehicle_count)issues.push({reason:"Client 수는 차량 수 이하의 양의 정수여야 합니다.",action:"연결 풀 Client 수를 1개부터 차량 수 사이로 지정하세요."});
   const changeProfile=plan.request?.fleet
-    ?"설정 복사해 수정 → 실행 프로필을 운영으로 변경 → 일정 생성·기록 → 새 일정을 선택하세요."
-    :"수동 일정은 소량 실행만 지원합니다. 기간·메시지를 줄이거나 새 전체 조건에서 운영 프로필로 일정을 생성하세요.";
+    ?"설정 복사해 기간·차량 수·주기를 소량 시험 상한 안으로 줄여 새 일정을 기록하세요. 대규모·장기 운영은 상시 운영 탭에서 합니다."
+    :"수동 일정은 소량 실행만 지원합니다. 기간·메시지를 줄이거나, 대규모·장기 운영은 상시 운영 탭을 사용하세요.";
+  if(mode==="operations")issues.push({reason:"이전 운영 프로필 일정입니다. 운영 프로필은 상시 운영으로 이전되어 시험 실행에서 실행하지 않습니다.",action:"상시 운영 탭을 사용하거나, 설정 복사로 소량 시험 일정을 새로 기록하세요."});
   if(duration===null)issues.push({reason:"측정 기간을 확인할 수 없습니다.",action:"일정을 다시 선택하거나 조건을 확인해 다시 기록하세요."});
   if(limits&&duration!==null&&duration>limits.max_duration_ms)issues.push({reason:`일정 기간 ${(duration/3600000).toLocaleString()}시간이 ${mode==="operations"?"운영":"소량"} 실행 상한 ${(limits.max_duration_ms/3600000).toLocaleString()}시간을 초과합니다.`,action:mode==="small_test"?changeProfile:"측정 기간을 줄여 새 일정을 기록하세요."});
   if(limits&&plan.planned_messages>limits.max_messages)issues.push({reason:`예정 ${plan.planned_messages.toLocaleString()}건이 일정 실행 상한 ${limits.max_messages.toLocaleString()}건을 초과합니다.`,action:mode==="small_test"?changeProfile:"차량 수·기간을 줄이거나 Microtrip 주기를 늘려 새 일정을 기록하세요."});

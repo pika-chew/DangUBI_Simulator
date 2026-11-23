@@ -4,9 +4,10 @@ export type ExecutionProfile="small_test"|"operations";
 export const profileGuide={
   small_test:{name:"소량 시험",maxVehicles:100,maxDays:1/24,defaultClients:1,
     summary:"생성 확인 · 최대100대 / 1시간 / 10,000건",
-    info:"생성 확인용입니다. 전환 시 기본값을 적용합니다.",
+    info:"시험 실행은 데이터가 의도대로 생성·전송되는지 확인하는 공간이며 소량 시험 상한만 사용합니다.",
     range:"전체 실행: 100대·1시간·10,000건 이하. 실제 MQTT: 20Client·100건 이하·측정30초 미만. 서버 상한이 더 작으면 그 값을 적용"},
-  operations:{name:"운영",maxVehicles:25000,maxDays:30,defaultClients:500,
+  // 이전 운영 프로필 기록 조회·복사 변환용. 새 일정은 상시 운영 탭을 사용한다.
+  operations:{name:"운영(이전)",maxVehicles:25000,maxDays:30,defaultClients:500,
     summary:"일정 생성·전송 · 최대25,000대 / 30일",
     info:"일정 생성·전송용입니다. 전환 시 기본값을 적용합니다.",
     range:"25,000대·30일 이하. 생성 건수 최대1조 건. 실제 MQTT는 서버의 Client·메시지·시간 상한도 적용"},

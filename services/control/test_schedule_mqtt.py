@@ -9,6 +9,7 @@ from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 from services.control import app as control
+from services.control.vin import trial_vins, is_valid
 
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -115,9 +116,12 @@ def test_schedule_mqtt_mapping_lifetimes_and_payload(mqtt_client,mode,lifetime,w
     for row in client.post("/api/schedules/preview",json=source).json()["trips"]:
         output=client.post(f'/api/schedules/obd/{row["vehicle_id"]}/{row["trip_key"]}',json={"schedule":source}).json()
         expected.extend((m["ts"],row["vehicle_id"],m) for m in output["messages"]+[output["trip"]])
-    actual=[(s["message"]["ts"],s["vehicle_id"],s["message"]) for s in r["samples"]]
+    # 시험 실행 본문은 {vehicleId(시험 VIN), ty, ts, pld}. 생성 내용은 조회 결과와 같다.
+    vins=trial_vins(v["vehicle_id"] for v in source["vehicles"])
+    actual=[(s["message"]["ts"],s["vehicle_id"],{k:v for k,v in s["message"].items() if k!="vehicleId"}) for s in r["samples"]]
     assert actual==sorted(expected,key=lambda x:(x[0],x[1]))
-    assert all(s["topic"]==f'sim-test/{run_id}/{s["vehicle_id"]}/obd' for s in r["samples"])
+    assert all(list(s["message"])[0]=="vehicleId" and s["message"]["vehicleId"]==s["vin"]==vins[s["vehicle_id"]] for s in r["samples"])
+    assert all(s["topic"]==f'sim-test/{run_id}/{s["vin"]}/obd' for s in r["samples"])
     assert "cert_file" not in json.dumps(run) and str(profile) not in json.dumps(run)
     assert client.get("/api/workspace/records/"+plan["key"]).json()==plan
 
@@ -224,11 +228,14 @@ def test_schedule_mqtt_slow_client_does_not_block_other_and_global_pacing(mqtt_c
     # 전체 10건/초 제한이며 Client별 10건/초로 곱해지지 않는다.
     assert all(b-a>.075 for a,b in zip(times,times[1:])),times
     assert report["received"]==18 and report["unique_clients"]==(3 if mode=="dedicated" else 2)
+    vins=trial_vins(["v000001","v000002","v000003"])
     for vehicle in ["v000001","v000002","v000003"]:
-        received=[m for topic,m in zip(report["topics"],report["messages"]) if topic.endswith(f"/{vehicle}/obd")]
+        vin=vins[vehicle]
+        assert is_valid(vin) and vin[10]=="T"  # 시험 VIN(공장 T): 운영 VIN(공장 S)과 겹치지 않음
+        received=[m for topic,m in zip(report["topics"],report["messages"]) if topic.endswith(f"/{vin}/obd")]
         assert len(received)==6 and [m["ty"] for m in received]==[4]*5+[3]
         assert [m["ts"] for m in received]==sorted(m["ts"] for m in received)
-        assert all(set(m)=={"ty","ts","pld"} for m in received)
+        assert all(set(m)=={"vehicleId","ty","ts","pld"} and m["vehicleId"]==vin for m in received)
 
 
 @pytest.mark.parametrize("mqtt_client",["no_ack"],indirect=True)
@@ -395,4 +402,5 @@ def test_schedule_mqtt_automatic_fleet_window_preserves_microtrip_only(mqtt_clie
     assert r["trip_count"]==0 and all(s["message"]["ty"]==4 for s in r["samples"])
     assert r["generation_session"]["worker_count"]==4
     report=broker_report(profile)
-    assert all(m["ty"]==4 and set(m)=={"ty","ts","pld"} for m in report["messages"])
+    assert all(m["ty"]==4 and set(m)=={"vehicleId","ty","ts","pld"} for m in report["messages"])
+    assert {t.split("/")[-2] for t in report["topics"]}=={m["vehicleId"] for m in report["messages"]}

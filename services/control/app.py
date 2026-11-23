@@ -9,7 +9,9 @@ from contextlib import asynccontextmanager, contextmanager
 from services.control.jobs import JobManager, ACTIVE
 from services.control.runtime import RuntimePaths
 from services.control.transmission_goal import assess
-from services.control.operating import PROFILES
+from services.control.operating import PROFILES, MAX_VEHICLES
+from services.control.registry import Registry, RegistryError, DevelopmentPseudonyms
+from services.control.vin import trial_vins
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -18,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, Query
 from services.control.schedule import ScheduleRequest, plan as plan_schedule
 from services.control.schedule_obd import ScheduledOBDRequest, generate as generate_scheduled_obd
-from services.control.fleet import FleetRequest, FleetOBDRequest, preview as preview_fleet, obd as fleet_obd
+from services.control.fleet import PatternMix, RoadMix, FleetRequest, FleetOBDRequest, preview as preview_fleet, obd as fleet_obd
 from services.control.checkpoints import CheckpointStore, CheckpointError, CheckpointReset
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -37,6 +39,16 @@ DB = RUNTIME.database
 MQTT_PROFILE = RUNTIME.mqtt_profile
 MQTT_LOCK = threading.Lock()
 CHECKPOINTS = CheckpointStore(RUNTIME.checkpoints)
+_REGISTRY = None
+_OPERATION = None
+
+
+def registry():
+    # 상시 운영 명부. 실제 vault 연동 전에는 개발용 가명 발급기만 연결한다(실제 전송 불가 표시).
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = Registry(RUNTIME.registry, DevelopmentPseudonyms(), max_active=MAX_VEHICLES)
+    return _REGISTRY
 @asynccontextmanager
 async def lifespan(_app):
     JOBS.recover()
@@ -44,6 +56,10 @@ async def lifespan(_app):
         yield
     finally:
         JOBS.shutdown()
+        # 서버 종료 시 상시 운영은 강제 중단으로 기록해 다음 시작 때 확인된 지점부터 이어 보낸다.
+        if _OPERATION is not None and _OPERATION.running():
+            _OPERATION.stop(force=True)
+            _OPERATION.wait(30)
 
 
 app = FastAPI(title="DangUBI 로컬 제어 API", version="0.2.0", lifespan=lifespan)
@@ -64,6 +80,13 @@ def clear_checkpoints():
     return CHECKPOINTS.clear()
 
 
+def plan_vins(fleet=None, schedule=None):
+    """시험 실행 차량 VIN 표(전체 차량 기준, 가명처리 없음). 이전 운영 프로필은 기존 형식이라 VIN이 없다."""
+    if fleet is not None:
+        return {} if fleet.execution_profile=="operations" else trial_vins(f"v{i:06d}" for i in range(1,fleet.vehicle_count+1))
+    return trial_vins(v.vehicle_id for v in schedule.vehicles)
+
+
 def scheduled_response(data):
     return JSONResponse(status_code=202, content=data) if data["status"] == "preparing" else data
 
@@ -71,7 +94,7 @@ def scheduled_response(data):
 @app.post("/api/fleets/preview")
 def fleet_preview(body: FleetRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100), vehicle_id: str | None = Query(default=None)):
     try:
-        return preview_fleet(body, offset, limit, vehicle_id)
+        return {**preview_fleet(body, offset, limit, vehicle_id), "vehicle_vins": plan_vins(fleet=body)}
     except ValueError as error:
         raise HTTPException(422, detail=str(error)) from error
 
@@ -89,7 +112,7 @@ def fleet_generate(body: FleetOBDRequest, vehicle_id: str, trip_key: str, start_
 @app.post("/api/schedules/preview")
 def schedule_preview(body: ScheduleRequest, offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100), vehicle_id: str | None = Query(default=None)):
     try:
-        return plan_schedule(body, offset, limit, vehicle_id)
+        return {**plan_schedule(body, offset, limit, vehicle_id), "vehicle_vins": plan_vins(schedule=body)}
     except ValueError as error:
         raise HTTPException(422, detail=str(error)) from error
 
@@ -521,6 +544,8 @@ def workspace_create_plan(body: WorkspacePlanRequest):
     except ValueError as error:
         raise HTTPException(422,detail=str(error)) from error
     summary={k:v for k,v in summary.items() if k not in ("trips","offset","limit","has_more")}
+    # 시험 실행 차량의 VIN(가명처리 없음). 조회 화면 표시용이며 생성 키는 내부 ID를 유지한다.
+    summary["vehicle_vins"]=plan_vins(fleet=body.fleet,schedule=body.schedule)
     record_id,created=uuid4().hex,datetime.now(timezone.utc).isoformat()
     with database() as db:
         db.execute("INSERT INTO workspace_plans VALUES (?,?,?,?)",(record_id,created,json.dumps(payload),json.dumps(summary)))
@@ -560,6 +585,8 @@ def workspace_execute(body: ScheduleExecutionRequest):
     req = source.fleet or source.schedule
     mode=source.fleet.execution_profile if source.fleet else "small_test"
     limits=PROFILES[mode]
+    if mode!="small_test" and _OPERATION is not None and _OPERATION.running():
+        raise HTTPException(409, detail="상시 운영 중에는 시험 실행을 소량 시험 상한(100대·1시간·10,000건)으로만 할 수 있습니다.")
     start, end = instant(req.measurement.start), instant(req.measurement.end)
     if end-start > limits["max_duration_ms"] or saved["planned_messages"] > limits["max_messages"]:
         raise HTTPException(422, detail="소량 일정 실행은 측정 기간1시간·10,000메시지 이하입니다. 운영 프로필은 최대30일·설정된 메시지 상한을 적용합니다.")
@@ -598,7 +625,9 @@ def workspace_execute(body: ScheduleExecutionRequest):
         if not WORKER.is_file():
             raise HTTPException(503,detail="Worker가 준비되지 않았습니다.")
     run_id=uuid4().hex
-    assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}"} for i,v in enumerate(vehicle_ids)]
+    # 시험 실행은 VIN을 그대로 전송한다(가명처리 없음). 이전 운영 프로필(개발 측정) 경로는 기존 형식 유지.
+    vehicle_alias=plan_vins(fleet=source.fleet,schedule=source.schedule) if mode=="small_test" else {}
+    assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}",**({"vin":vehicle_alias[v]} if vehicle_alias else {})} for i,v in enumerate(vehicle_ids)]
     config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
     request={"config":config,"execution_profile":mode,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
     from services.control.execution_checkpoints import ExecutionCheckpoints
@@ -610,6 +639,7 @@ def workspace_execute(body: ScheduleExecutionRequest):
         return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"execution_profile":mode,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":stream.generate if stream else generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if stream:data["generate_batch"]=stream.generate_many
+    if vehicle_alias:data["vehicle_alias"]=vehicle_alias
     if profile:data["mqtt"]=profile
     if mode=="operations":
         data.update(transmission_queue_messages=min(4096,max(100,clients*2)),transmission_queue_bytes=8388608,stop_grace_seconds=15)
@@ -646,6 +676,141 @@ def workspace_delete_records(body: DeleteWorkspaceRecords):
         for kind,record_id in targets:
             db.execute("DELETE FROM workspace_plans WHERE id=?" if kind=="plan" else "DELETE FROM runs WHERE id=?",(record_id,))
     return {"deleted_keys":keys,"deleted_count":len(keys)}
+
+
+class RegisterVehicles(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    count: int=Field(ge=1,le=MAX_VEHICLES)
+    pattern_mix: PatternMix=Field(default_factory=PatternMix)
+    road_mix: RoadMix=Field(default_factory=RoadMix)
+    anomaly_vehicle_percent: float=Field(default=5,ge=0,le=100)
+    trip_min_minutes: int=Field(default=3,ge=2,le=240)
+    trip_max_minutes: int=Field(default=120,ge=2,le=240)
+
+    @model_validator(mode="after")
+    def trip_range(self):
+        if self.trip_min_minutes>self.trip_max_minutes:
+            raise ValueError("최소 운행 시간은 최대 운행 시간 이하여야 합니다.")
+        return self
+
+
+def operation():
+    global _OPERATION
+    if _OPERATION is None:
+        from services.control.operation_runtime import OperationController
+        _OPERATION = OperationController(registry(), WORKER, validate_message)
+    return _OPERATION
+
+
+class StartOperation(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    settings: dict[str, Any]=Field(default_factory=dict)
+    confirm_mqtt: bool=False
+
+
+class StopOperation(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    force: bool=False
+
+
+class ResolveHold(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    ids: list[int]=Field(min_length=1,max_length=MAX_VEHICLES)
+    action: Literal["retry","drop"]
+
+
+@app.get("/api/operations/status")
+def operations_status():
+    return operation().status()
+
+
+@app.get("/api/operations/events")
+def operations_events(limit: int = Query(default=50, ge=1, le=200)):
+    return {"events": registry().events(limit)}
+
+
+@app.post("/api/operations/start", status_code=202)
+def operations_start(body: StartOperation):
+    from services.control.operation_plan import OperationSettings
+    try:
+        settings=OperationSettings.model_validate(body.settings)
+    except ValueError as error:
+        raise HTTPException(422, detail="상시 운영 설정을 확인하세요.") from error
+    if not WORKER.is_file():
+        raise HTTPException(503, detail="Worker가 준비되지 않았습니다.")
+    profile=None
+    if settings.transport=="mqtt":
+        if not body.confirm_mqtt:
+            raise HTTPException(409, detail="실제 MQTT 송신 확인을 선택하세요.")
+        profile=mqtt_profile()
+        from urllib.parse import urlsplit
+        loopback=urlsplit(profile["broker_url"]).hostname in ("127.0.0.1","::1")
+        if not registry().provider.allows_real_transport and not loopback:
+            raise HTTPException(409, detail="개발용 가명 발급기로 만든 가명 VIN은 외부 브로커 전송에 쓸 수 없습니다. vault 연동 후 사용하세요(로컬 브로커 검증만 허용).")
+        if profile["execution_profile"]!="operations":
+            raise HTTPException(409, detail="운영 MQTT 서버 프로필이 필요합니다.")
+        needed=settings.duration_cap_days*86400+6*3600
+        if settings.client_count>profile["max_clients"] or needed>profile["max_duration_seconds"]:
+            raise HTTPException(422, detail="서버 MQTT Client 수 또는 실행 시간 상한이 상시 운영 설정보다 작습니다(기간 상한+정리 6시간).")
+        profile={**profile,"max_duration_seconds":needed}
+    try:
+        operation().start(settings, profile)
+    except RuntimeError as error:
+        raise HTTPException(409, detail=str(error)) from error
+    return operation().status()
+
+
+@app.post("/api/operations/stop")
+def operations_stop(body: StopOperation):
+    try:
+        operation().stop(force=body.force)
+    except RuntimeError as error:
+        raise HTTPException(409, detail=str(error)) from error
+    return operation().status()
+
+
+@app.post("/api/operations/vehicles/hold")
+def operations_resolve_hold(body: ResolveHold):
+    return registry().resolve_hold(body.ids, body.action)
+
+
+class RemoveVehicles(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    ids: list[int]=Field(min_length=1,max_length=MAX_VEHICLES)
+    confirm: bool=False
+
+
+@app.get("/api/operations/registry")
+def operations_registry():
+    return registry().summary()
+
+
+@app.get("/api/operations/vehicles")
+def operations_vehicles(status: str | None = Query(default=None), offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=100)):
+    try:
+        return registry().vehicles(status, offset, limit)
+    except RegistryError as error:
+        raise HTTPException(422, detail=str(error)) from error
+
+
+@app.post("/api/operations/vehicles")
+def operations_register(body: RegisterVehicles):
+    try:
+        return registry().register(body.count, body.model_dump(exclude={"count"}))
+    except RegistryError as error:
+        raise HTTPException(409, detail=str(error)) from error
+
+
+@app.post("/api/operations/pseudonyms/retry")
+def operations_pseudonym_retry():
+    return registry().issue_pseudonyms()
+
+
+@app.post("/api/operations/vehicles/remove")
+def operations_remove(body: RemoveVehicles):
+    if not body.confirm:
+        raise HTTPException(409, detail="선택한 차량을 명부에서 제외하려면 확인이 필요합니다. VIN 일련번호는 재사용하지 않습니다.")
+    return registry().request_removal(body.ids)
 
 
 @app.middleware("http")

@@ -18,12 +18,13 @@ test("small MQTT uses its own stricter caps even on an operating server",()=>{
   assert.equal(r.issues.length,2);
   assert.equal(scheduleReadiness(plan(false,29,100),"mqtt",1,health).issues.length,0);
 });
-test("operating plan and operating server are separate checks",()=>{
+test("legacy operating plans are kept viewable but routed to persistent operation",()=>{
   const p=plan(true,7200,12000);
-  assert.equal(scheduleReadiness(p,"mqtt",5,health).issues.length,0);
-  const smallServer={...health,mqtt_limits:{...health.mqtt_limits,execution_profile:"small_test",max_clients:20,max_messages:100,max_duration_seconds:30}};
-  assert.ok(scheduleReadiness(p,"mqtt",5,smallServer).issues.some(i=>i.reason.includes("서버는 소량")));
-  assert.equal(scheduleReadiness(p,"dry_run",5,smallServer).issues.length,0);
+  for(const transport of ["dry_run","mqtt"]){
+    const r=scheduleReadiness(p,transport,5,health);
+    assert.ok(r.issues.some(i=>i.reason.includes("이전 운영 프로필")&&i.action.includes("상시 운영")));
+  }
+  assert.ok(scheduleReadiness(plan(false,7200,12000),"dry_run",1,health).issues.every(i=>i.action.includes("상시 운영")));
 });
 test("exact limits, invalid client counts and missing settings are distinguished",()=>{
   assert.equal(scheduleReadiness(plan(false,3600,10000),"dry_run",10,health).issues.length,0);

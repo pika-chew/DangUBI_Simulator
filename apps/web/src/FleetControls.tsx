@@ -1,5 +1,5 @@
 import {InfoHint} from "./InfoHint";
-import {defaultFleet,profileGuide,type ExecutionProfile} from "./fleetSettings";
+import {defaultFleet,profileGuide} from "./fleetSettings";
 export {defaultFleet} from "./fleetSettings";
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
@@ -48,7 +48,9 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
   return <fieldset disabled={disabled} className="schedule-fieldset fleet-settings">
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’를 하면 현재 최소·최대 시간 배정 방식으로 새 일정을 작성합니다. 원본은 보존합니다.</p>}
     <div className="fields">
-      <label><span className="label-line">실행 프로필 <Help label="실행 프로필" text={guide.info} /></span><select value={profile} onChange={e=>onChange(defaultFleet(e.target.value as ExecutionProfile,Date.parse(v.measurement.start)))}><option value="small_test">소량 시험 · 빠른 생성 확인</option><option value="operations">운영 · 일정 생성·전송</option></select><span className="profile-limits"><b>{guide.name} 실행 프로필 상한</b><span>{profile==="operations"?"전체 실행 · 25,000대 · 30일 · 1조 건":"전체 실행 · 100대 · 1시간 · 10,000건"}</span><span>{profile==="operations"?"실제 MQTT · 서버에 설정한 상한 적용":"실제 MQTT · 20 Client · 100건 · 측정 30초 미만"}</span></span></label>
+      {profile==="operations"
+        ?<div className="context-note legacy-profile"><b>이전 운영 프로필 기록입니다.</b> 운영 프로필은 상시 운영 탭으로 이전되었습니다. 시험 실행은 소량 시험 상한만 사용합니다.<button type="button" onClick={()=>onChange(defaultFleet("small_test",Date.parse(v.measurement.start)))}>소량 시험 조건으로 바꾸기</button></div>
+        :<span className="profile-limits"><b>시험 실행 상한 <Help label="시험 실행 상한" text={guide.info} range={guide.range}/></b><span>전체 실행 · 100대 · 1시간 · 10,000건</span><span>실제 MQTT · 20 Client · 100건 · 측정 30초 미만</span><span>대규모·장기 운영은 상시 운영 탭에서 합니다.</span></span>}
       {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "데이터를 만들 차량 수입니다. 늘리면 생성량과 처리 부하가 커집니다.")}
       <label><span className="label-line">측정 시작 (KST) <Help label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발 시각과는 다릅니다." range={`시작 < 종료 · ${profile==="operations"?"최대30일":"전체 실행 최대1시간"} · 1970~2100년`} /></span><input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
       <label><span className="label-line">측정 종료 (KST) <Help label="측정 종료" text="데이터를 관측할 마지막 시각입니다. 늦출수록 관측량이 늘어납니다." range={profile==="operations"?"측정 기간 최대30일":"전체 실행 최대1시간·10,000건"} /></span><input type="datetime-local" step="1" min={local(v.measurement.start)} max={Number.isFinite(Date.parse(v.measurement.start))?localTime(Date.parse(v.measurement.start)+guide.maxDays*86400000):undefined} value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
@@ -81,6 +83,6 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
       </div>
       <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 다양한 생활 운행에서는 짧은 용무·운행 길이에 맞게 개별 도로 성격도 달라질 수 있습니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
     </details>
-    <p className="note">프로필 전환 시 해당 기본값을 적용합니다. 운행 시간은 1회 기준 · 최소 주차30분.</p>
+    <p className="note">운행 시간은 1회 기준 · 최소 주차30분.</p>
   </fieldset>;
 }

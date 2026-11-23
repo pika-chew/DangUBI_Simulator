@@ -6,6 +6,7 @@ from services.control.generation_session import GenerationFailure
 from services.control.generation_pool import GenerationPool
 from services.control.bounded_schedule import BoundedSchedule
 from services.control.schedule_publisher import SchedulePublisher
+from services.control.message_codec import with_vehicle_id
 
 
 def execute(manager, job, data, worker, timeout):
@@ -126,23 +127,28 @@ def execute(manager, job, data, worker, timeout):
             time.sleep(min(.05,max(0,(due-elapsed*1000)/1000)))
 
     due_offset=data.get("due_offset",lambda ts:ts-data["measurement_start_ms"])
+    # 시험 실행 VIN: 생성은 내부 ID, 전송 토픽·본문 vehicleId는 시험 VIN(가명처리 없음).
+    alias=data.get("vehicle_alias") or {}
+    wire_id=lambda vehicle:alias.get(vehicle,vehicle)
 
     def consume(timestamp,vehicle,message,synthetic):
         encoded=None
         if mqtt:
             if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
             encoded=data["validate_message"](message)
-            if not publisher.enqueue("publish",gate,vehicle_id=vehicle,message=encoded if encoded is not None else message):return
+            if alias:encoded=with_vehicle_id(wire_id(vehicle),encoded)
+            if not publisher.enqueue("publish",gate,vehicle_id=wire_id(vehicle),message=encoded if encoded is not None else message):return
         due=due_offset(timestamp)
         sequences[vehicle]=sequences.get(vehicle,0)+1
         result["processed_messages"]+=1
-        result["payload_bytes"]+=encoded.size if encoded is not None else len(json.dumps(message,separators=(",",":"),ensure_ascii=False).encode())
+        shown={"vehicleId":wire_id(vehicle),**message} if alias else message
+        result["payload_bytes"]+=encoded.size if encoded is not None else len(json.dumps(shown,separators=(",",":"),ensure_ascii=False).encode())
         result["trip_count" if message["ty"]==3 else "microtrip_count"]+=1
         result["simulation_time_ms"]=int(due)
         if data["realtime"]:
             result["schedule_delay_ms"]=max(result["schedule_delay_ms"],int((time.monotonic()-started-paused_seconds)*1000-due))
         if len(result["samples"])<10:
-            result["samples"].append(dict(vehicle_id=vehicle,client_id=data["client_by_vehicle"][vehicle],topic=f"{data["mqtt"]["topic_prefix"]}/{job.id}/{vehicle}/obd" if mqtt else "",sequence=sequences[vehicle],message=message,synthetic_trip=synthetic))
+            result["samples"].append(dict(vehicle_id=vehicle,vin=alias.get(vehicle),client_id=data["client_by_vehicle"][vehicle],topic=f"{data["mqtt"]["topic_prefix"]}/{job.id}/{wire_id(vehicle)}/obd" if mqtt else "",sequence=sequences[vehicle],message=shown,synthetic_trip=synthetic))
 
     try:
         report()
@@ -150,7 +156,7 @@ def execute(manager, job, data, worker, timeout):
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
-            publisher=SchedulePublisher(bridge,result,data["client_by_vehicle"],data["measurement_start_ms"],on_account=budget,due_offset=due_offset,
+            publisher=SchedulePublisher(bridge,result,{wire_id(v):c for v,c in data["client_by_vehicle"].items()},data["measurement_start_ms"],on_account=budget,due_offset=due_offset,
                                         queue_capacity=data.get("transmission_queue_messages",100),queue_bytes=data.get("transmission_queue_bytes",1048576))
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):

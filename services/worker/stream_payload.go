@@ -10,8 +10,21 @@ import (
 
 // 준비한 본문은 루트 형식을 확인한 뒤 그대로 발행한다. 일반 map 입력은 유지한다.
 func streamPayload(c streamCommand, trace bool) ([]byte, float64, float64, float64, error) {
+	return streamPayloadFor(c, trace, "")
+}
+
+// identity가 있으면 상시 운영 본문 {vehicleId, ty, ts, pld}를 요구한다.
+// vehicleId는 맨 앞이어야 하고 토픽 차량(가명 VIN)과 같아야 한다. 순서 보존을 위해 원문 입력만 허용한다.
+func streamPayloadFor(c streamCommand, trace bool, identity string) ([]byte, float64, float64, float64, error) {
 	fail := func() ([]byte, float64, float64, float64, error) {
 		return nil, 0, 0, 0, errors.New("OBD 본문을 확인하세요.")
+	}
+	fields := 3
+	if identity != "" {
+		fields = 4
+		if len(c.MessageRaw) == 0 {
+			return fail()
+		}
 	}
 	if len(c.MessageRaw) == 0 {
 		m := c.Message
@@ -47,6 +60,11 @@ func streamPayload(c streamCommand, trace bool) ([]byte, float64, float64, float
 		}
 		seen[name] = true
 		switch name {
+		case "vehicleId":
+			var value string
+			if identity == "" || len(seen) != 1 || decoder.Decode(&value) != nil || value != identity {
+				return fail()
+			}
 		case "ty":
 			if decoder.Decode(&ty) != nil || (ty != 3 && ty != 4) {
 				return fail()
@@ -78,7 +96,7 @@ func streamPayload(c streamCommand, trace bool) ([]byte, float64, float64, float
 		}
 	}
 	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') || len(seen) != 3 {
+	if err != nil || end != json.Delim('}') || len(seen) != fields {
 		return fail()
 	}
 	if decoder.Decode(new(any)) != io.EOF {

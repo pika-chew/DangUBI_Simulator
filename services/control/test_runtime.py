@@ -8,6 +8,8 @@ def test_runtime_default_and_external_data(tmp_path):
     assert local.checkpoints == tmp_path / ".local/obd-state.sqlite3"
     assert external.database == tmp_path / "persistent/runs.sqlite3"
     assert external.checkpoints == tmp_path / "persistent/obd-state.sqlite3"
+    assert local.registry == tmp_path / ".local/fleet-registry.sqlite3"
+    assert external.registry == tmp_path / "persistent/fleet-registry.sqlite3"
     assert external.worker == local.worker
     assert external.mqtt_profile == local.mqtt_profile
 

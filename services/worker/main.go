@@ -24,20 +24,25 @@ type Config struct {
 	Lifetime           string `json:"connection_lifetime"`
 }
 type Request struct {
-	Assignments  []Assignment    `json:"assignments,omitempty"`
-	Scheduled    *ScheduledInput `json:"scheduled,omitempty"`
-	Operation    string          `json:"operation"`
-	RunID        string          `json:"run_id"`
-	Config       Config          `json:"config"`
-	Message      map[string]any  `json:"message"`
-	MQTT         *MQTTProfile    `json:"mqtt,omitempty"`
-	Generation   *Generation     `json:"generation,omitempty"`
-	TraceVehicle int             `json:"trace_vehicle,omitempty"`
-	TraceStartMS int64           `json:"trace_start_ms,omitempty"`
-	TraceUntilMS int64           `json:"trace_until_ms,omitempty"`
-	TraceOffset  int             `json:"trace_offset,omitempty"`
-	TraceLimit   int             `json:"trace_limit,omitempty"`
-	Realtime     bool            `json:"realtime,omitempty"`
+	Assignments []Assignment `json:"assignments,omitempty"`
+	// 상시 운영 세션: 고정 Client 풀을 먼저 선언하고 차량은 attach/detach로 붙이고 뗀다.
+	Clients    []string `json:"clients,omitempty"`
+	Persistent bool     `json:"persistent,omitempty"`
+	// 시험 실행 VIN: 본문 맨 앞 vehicleId가 토픽 차량(VIN)과 같아야 한다.
+	VehicleEnvelope bool            `json:"vehicle_envelope,omitempty"`
+	Scheduled       *ScheduledInput `json:"scheduled,omitempty"`
+	Operation       string          `json:"operation"`
+	RunID           string          `json:"run_id"`
+	Config          Config          `json:"config"`
+	Message         map[string]any  `json:"message"`
+	MQTT            *MQTTProfile    `json:"mqtt,omitempty"`
+	Generation      *Generation     `json:"generation,omitempty"`
+	TraceVehicle    int             `json:"trace_vehicle,omitempty"`
+	TraceStartMS    int64           `json:"trace_start_ms,omitempty"`
+	TraceUntilMS    int64           `json:"trace_until_ms,omitempty"`
+	TraceOffset     int             `json:"trace_offset,omitempty"`
+	TraceLimit      int             `json:"trace_limit,omitempty"`
+	Realtime        bool            `json:"realtime,omitempty"`
 }
 type Assignment struct {
 	VehicleID string `json:"vehicle_id"`

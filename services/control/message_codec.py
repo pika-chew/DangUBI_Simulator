@@ -21,6 +21,14 @@ def prepare_message(message):
     return WireMessage(raw,len(raw.encode("utf-8")),message["ts"])
 
 
+def with_vehicle_id(vehicle_id,wire):
+    """검증을 마친 본문 맨 앞에 vehicleId를 둔다. 식별자는 영문자·숫자·_- 만 허용한다."""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}",vehicle_id):raise ValueError("vehicleId 형식을 확인하세요.")
+    rest=wire.text[1:]
+    text='{"vehicleId":"'+vehicle_id+'"'+(","+rest if rest!="}" else "}")
+    return WireMessage(text,len(text.encode("utf-8")),wire.timestamp)
+
+
 def encode_command(command,raw=True):
     message=command.get("message")
     if isinstance(message,WireMessage):

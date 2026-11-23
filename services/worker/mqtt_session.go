@@ -76,6 +76,9 @@ type mqttSession struct {
 	connectPacer, publishPacer   pacer
 	publishLimiter               *publishLimiter
 	started                      time.Time
+	persistent                   bool
+	envelope                     bool
+	validID                      *regexp.Regexp
 }
 
 type parkingConnect struct {
@@ -122,10 +125,20 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 	if p.LocalBenchmark {
 		maxAssignments = 1000
 	}
-	if !validID.MatchString(req.RunID) || len(req.Assignments) < 1 || len(req.Assignments) > maxAssignments {
+	minimum := 1
+	if req.Persistent {
+		// 상시 운영은 운영 프로필에서만 허용하며 차량 0대로 시작할 수 있다.
+		if p.ExecutionProfile != "operations" || len(req.Clients) < 1 || len(req.Clients) > p.MaxClients {
+			return nil, errors.New("상시 운영 Client 풀을 확인하세요.")
+		}
+		minimum = 0
+	} else if len(req.Clients) > 0 {
+		return nil, errors.New("Client 풀 선언은 상시 운영에서만 사용합니다.")
+	}
+	if !validID.MatchString(req.RunID) || len(req.Assignments) < minimum || len(req.Assignments) > maxAssignments {
 		return nil, errors.New("실행/차량 배정을 확인하세요.")
 	}
-	s := &mqttSession{profile: p, clients: map[string]mqtt.Client{}, vehicles: map[string]string{}, seen: map[string]bool{}, parked: map[string]bool{}, started: time.Now()}
+	s := &mqttSession{profile: p, clients: map[string]mqtt.Client{}, vehicles: map[string]string{}, seen: map[string]bool{}, parked: map[string]bool{}, started: time.Now(), persistent: req.Persistent, envelope: req.Persistent || req.VehicleEnvelope, validID: validID}
 	if p.MaxConnecting > 0 {
 		s.connectSlots = make(chan struct{}, p.MaxConnecting)
 	}
@@ -142,8 +155,21 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 	if p.ExecutionProfile == "operations" && p.PublishPerSecond > 1000 {
 		s.publishLimiter = newPublishLimiter(p.PublishPerSecond)
 	}
+	addClient := func(id string) {
+		s.clients[id] = newMQTTClient(p, id, config)
+		if p.ExecutionProfile == "operations" {
+			s.clientConnect[id] = &pacer{step: time.Second}
+			s.clientPublish[id] = &pacer{step: time.Second / 100}
+		}
+	}
+	for _, id := range req.Clients {
+		if !validID.MatchString(id) || s.clients[id] != nil {
+			return nil, errors.New("상시 운영 Client 풀을 확인하세요.")
+		}
+		addClient(id)
+	}
 	for _, a := range req.Assignments {
-		if !validID.MatchString(a.VehicleID) || !validID.MatchString(a.ClientID) || s.vehicles[a.VehicleID] != "" {
+		if !validID.MatchString(a.VehicleID) || !validID.MatchString(a.ClientID) || s.vehicles[a.VehicleID] != "" || (s.persistent && s.clients[a.ClientID] == nil) {
 			return nil, errors.New("고정 배정표를 확인하세요.")
 		}
 		s.vehicles[a.VehicleID] = a.ClientID
@@ -367,11 +393,17 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		s.disconnect(c.ClientID)
 		return nil
 	case "publish":
+		s.mu.Lock()
 		id := s.vehicles[c.VehicleID]
+		s.mu.Unlock()
 		if id == "" {
 			return errors.New("차량 또는 발행 상한을 확인하세요.")
 		}
-		encoded, ty, timestamp, tid, err := streamPayload(c, s.parkingTrace != nil)
+		identity := ""
+		if s.envelope {
+			identity = c.VehicleID
+		}
+		encoded, ty, timestamp, tid, err := streamPayloadFor(c, s.parkingTrace != nil, identity)
 		if err != nil {
 			return err
 		}
@@ -444,6 +476,31 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 	default:
 		return errors.New("지원하지 않는 연결 명령입니다.")
 	}
+}
+
+// 상시 운영에서만 실행 중 차량을 기존 Client에 붙이거나 뗀다. Client 소유는 바뀌지 않는다.
+// 진행 중 발행은 이미 Client를 확정했으므로 떼어도 그 발행은 끝까지 처리된다.
+func (s *mqttSession) reassign(c streamCommand) error {
+	if !s.persistent {
+		return errors.New("차량 배정 변경은 상시 운영에서만 사용합니다.")
+	}
+	if !s.validID.MatchString(c.VehicleID) {
+		return errors.New("차량 식별자를 확인하세요.")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.Command == "attach" {
+		if s.clients[c.ClientID] == nil || s.vehicles[c.VehicleID] != "" || len(s.vehicles) >= 25000 {
+			return errors.New("붙일 차량·Client를 확인하세요.")
+		}
+		s.vehicles[c.VehicleID] = c.ClientID
+		return nil
+	}
+	if s.vehicles[c.VehicleID] == "" || c.ClientID != "" {
+		return errors.New("뗄 차량을 확인하세요.")
+	}
+	delete(s.vehicles, c.VehicleID)
+	return nil
 }
 
 // 고정 Client마다 한 명령만 실행한다. 서로 다른 Client의 응답은 ID로 구분한다.
@@ -560,6 +617,14 @@ func serveMQTTStream(req Request, input io.Reader, w io.Writer) {
 			if c.Command == "close" {
 				shutdown(c.ID, nil)
 				return
+			}
+			if c.Command == "attach" || c.Command == "detach" {
+				if err := s.reassign(c); err != nil {
+					shutdown(c.ID, err)
+					return
+				}
+				respond(c.ID, nil)
+				continue
 			}
 			id := c.ClientID
 			if c.Command == "publish" {

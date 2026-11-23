@@ -61,6 +61,21 @@ class BoundedSchedule:
                 boundary=next(stream,None)
                 if boundary is not None:heapq.heappush(self.boundaries,(*boundary,v))
         self.assignments=[{"vehicle_id":v,"worker_index":s["owner"]} for v,s in sorted(self.states.items())]
+    def add(self,v):
+        """상시 운영: 실행 중 차량을 더한다. 기존 차량의 Worker 배정과 순서는 바뀌지 않는다."""
+        if v in self.states:raise GenerationFailure("이미 실행 중인 차량입니다.")
+        s={"vehicle":v,"owner":owner_for(v,len(self.pool.sessions)),"trips":iter(self.data["trip_provider"](v)),"queue":deque(),"future":None}
+        self.advance(s);self.states[v]=s;self.owner_counts[s["owner"]]+=1;self.track(s)
+        self.assignments.append({"vehicle_id":v,"worker_index":s["owner"]})
+    def retire(self,v):
+        """상시 운영: 아직 시작하지 않은 운행과 대기 메시지를 버리고 더 운행하지 않는다."""
+        s=self.states.get(v)
+        if s is None or s.get("retired"):return
+        s["retired"]=True
+        for _,_,size in s["queue"]:self.queued_count-=1;self.queued_bytes-=size
+        s["queue"].clear();s["more"]=False
+        if s["future"] is None:s["trip"]=None
+        self.track(s);self.account()
     def track(self,s):
         """변경된 차량의 시각순 색인만 갱신하고 오래된 항목과 색인 크기를 제한한다."""
         s["revision"]=s.get("revision",0)+1
@@ -83,7 +98,7 @@ class BoundedSchedule:
             heapq.heappop(heap)
         return None
     def advance(self,s):
-        s["trip"]=next(s["trips"],None);s["offset"]=0;s["more"]=True
+        s["trip"]=None if s.get("retired") else next(s["trips"],None);s["offset"]=0;s["more"]=True
         if s["trip"]:
             t=s["trip"];interval=self.data["config"]["interval_ms"]
             seq=max(0,(t["observed_start_ms"]-t["start_ms"]+interval-1)//interval)
@@ -117,6 +132,8 @@ class BoundedSchedule:
             previous=completed
         raise GenerationFailure("실행 중간 상태 복원 상한을 초과했습니다.")
     def accept(self,s,out):
+        if s.get("retired"):
+            s["more"]=False;s["trip"]=None;self.track(s);self.account();return
         items=[(m,False) for m in out["messages"]]
         deferred=bool(self.sequential and not out["has_more"] and out.get("trip") and items and out["trip"]["ts"]>items[-1][0]["ts"])
         if not out["has_more"] and out.get("trip") and not deferred:items.append((out["trip"],out["synthetic_trip"]))

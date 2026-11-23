@@ -376,5 +376,41 @@
         }
       }
     }
+  },
+  "envelopes": {
+    "operations": {
+      "title": "상시 운영 전송 본문",
+      "description": "상시 운영 Trip/Microtrip은 profiles 본문의 루트 맨 앞에 vehicleId(가명 VIN)를 둔다. 원본 VIN은 전송하지 않는다.",
+      "order": [
+        "vehicleId",
+        "ty",
+        "ts",
+        "pld"
+      ],
+      "vehicleId": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9_-]{1,128}$",
+        "title": "가명 VIN(토픽 차량 식별자와 같음)"
+      },
+      "topic": "{topic_prefix}/ops-main/{vehicleId}/obd",
+      "client_id": "sim-ops-main-cNNN"
+    },
+    "trial": {
+      "title": "시험 실행 전송 본문",
+      "description": "시험 실행 Trip/Microtrip도 루트 맨 앞에 vehicleId를 둔다. 시험 VIN(가상 WMI 0DS, 공장 코드 T)을 가명처리 없이 그대로 쓴다. 상시 운영 VIN(공장 코드 S)과 겹치지 않는다.",
+      "order": [
+        "vehicleId",
+        "ty",
+        "ts",
+        "pld"
+      ],
+      "vehicleId": {
+        "type": "string",
+        "pattern": "^[A-HJ-NPR-Z0-9]{17}$",
+        "title": "시험 VIN(토픽 차량 식별자와 같음)"
+      },
+      "topic": "{topic_prefix}/{run_id}/{vehicleId}/obd",
+      "client_id": "sim-{run_id}-cNNN"
+    }
   }
 }

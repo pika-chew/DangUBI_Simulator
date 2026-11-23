@@ -25,13 +25,20 @@ class MQTTBridge:
         self.sequence=0
         self.pending={}
         self.raw_supported=False
-        self.limit=len(set(a["client_id"] for a in data["assignments"]))
+        persistent=bool(data.get("persistent"))
+        self.limit=len(data["clients"]) if persistent else len(set(a["client_id"] for a in data["assignments"]))
         self.responses=queue.Queue(maxsize=self.limit+2)
         self.process=subprocess.Popen([str(worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL,text=True,encoding="utf-8",bufsize=1)
         self.reader=threading.Thread(target=self._read,daemon=True)
         self.reader.start()
-        try:self._write({"operation":"mqtt_stream","run_id":job.id,"mqtt":self.profile,"assignments":data["assignments"]})
+        # 시험 실행 VIN: 토픽·본문 차량 식별자를 VIN으로 바꾸고 Worker가 vehicleId 봉투를 확인한다.
+        alias=data.get("vehicle_alias") or {}
+        assignments=[{"vehicle_id":alias.get(a["vehicle_id"],a["vehicle_id"]),"client_id":a["client_id"]} for a in data["assignments"]]
+        start={"operation":"mqtt_stream","run_id":job.id,"mqtt":self.profile,"assignments":assignments}
+        if alias:start["vehicle_envelope"]=True
+        if persistent:start.update(persistent=True,clients=data["clients"])
+        try:self._write(start)
         except BaseException:
             self.close(abort=True)
             raise

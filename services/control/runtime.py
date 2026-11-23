@@ -11,6 +11,7 @@ class RuntimePaths:
     database: Path
     checkpoints: Path
     mqtt_profile: Path
+    registry: Path
 
     @classmethod
     def from_env(cls, root: Path, environ: Mapping[str, str] | None = None):
@@ -27,4 +28,5 @@ class RuntimePaths:
             database=configured("DANGUBI_DB", data / "runs.sqlite3"),
             checkpoints=configured("DANGUBI_CHECKPOINT_DB", data / "obd-state.sqlite3"),
             mqtt_profile=configured("DANGUBI_MQTT_PROFILE", root / ".local" / "mqtt.json"),
+            registry=configured("DANGUBI_REGISTRY_DB", data / "fleet-registry.sqlite3"),
         )

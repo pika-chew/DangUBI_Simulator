@@ -59,7 +59,9 @@ def test_em_schedule_api_and_local_execution_samples(client,monkeypatch):
     assert response.status_code==202,response.text
     run=wait_workspace_job(client,response.json()["id"])
     assert run["result"]["job_state"]=="completed",run
-    messages=[s["message"] for s in run["result"]["samples"]]
+    # 시험 실행 표본은 {vehicleId(시험 VIN), ty, ts, pld}. profiles 스키마는 봉투 안쪽 본문을 검사한다.
+    assert all(s["message"]["vehicleId"]==s["vin"] for s in run["result"]["samples"])
+    messages=[{k:v for k,v in s["message"].items() if k!="vehicleId"} for s in run["result"]["samples"]]
     assert sum(m["ty"]==4 for m in messages)==2
     assert sum(m["ty"]==3 for m in messages)==1
     for m in messages:control.validate_message(m)

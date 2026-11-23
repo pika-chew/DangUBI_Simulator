@@ -1058,10 +1058,11 @@ def test_workspace_schedule_execution_matches_query_and_mapping(client):
     assert result['job_state']=='completed',result
     assert result['processed_messages']==result['planned_messages']==31
     assert result['microtrip_count']==30 and result['trip_count']==1
-    assert result['samples'][0]['message']==expected['messages'][0]
+    vin=saved['result']['vehicle_vins']['v000001']
+    assert result['samples'][0]['message']=={'vehicleId':vin,**expected['messages'][0]}
     assert result['mqtt_published']==result['puback_count']==result['connected_clients']==0
     assert len(result['samples'])<=10
-    assert result['assignments'][0]['vehicle_id']=='v000001'
+    assert result['assignments'][0]['vehicle_id']=='v000001' and result['assignments'][0]['vin']==vin
     assert client.get('/api/workspace/records/'+saved['key']).json()==saved
 
 
