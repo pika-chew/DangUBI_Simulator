@@ -43,3 +43,22 @@ test("recovery diff names fields that differ from the interrupted trip's setting
   assert.deepEqual(recoveryDiff({...d,vehicle_count:1000},d),["운영 차량 수"]);
   assert.deepEqual(recoveryDiff({...d,interval_ms:1000,transport:"mqtt"},d),["전송 방식","Microtrip 주기"]);
 });
+test("traffic focus input checks mirror the server ranges",async()=>{
+  const {focusIssues,defaultFocusWindow,binLabel}=await import("../apps/web/src/trafficFocus.ts");
+  const w=defaultFocusWindow();
+  assert.deepEqual(focusIssues({windows:[w]}),[]);
+  assert.deepEqual(focusIssues(null),[]);
+  assert.equal(focusIssues({windows:[{...w,start:"03:00",end:"03:30"}]}).length,1);
+  assert.equal(focusIssues({windows:[{...w,end:"08:25"}]}).length,1);
+  assert.equal(focusIssues({windows:[{...w,target_percent:0}]}).length,1);
+  assert.equal(focusIssues({windows:[{...w,weekdays:[]}]}).length,1);
+  assert.ok(focusIssues({windows:[w,{...w}]}).some(x=>x.includes("겹칠")));
+  assert.equal(focusIssues({windows:[w,defaultFocusWindow([w]),defaultFocusWindow([w,defaultFocusWindow([w])]),{...w,start:"21:00",end:"21:30"}]}).length,1);
+  assert.equal(defaultFocusWindow([w]).start,"18:00");
+  assert.equal(binLabel(50),"08:20");
+  const {recoveryDiff,defaultOperationSettings:d,settingIssues}=await import("../apps/web/src/operationsView.ts");
+  const focused={...d,traffic_focus:{windows:[w]}};
+  assert.deepEqual(recoveryDiff(focused,JSON.parse(JSON.stringify(focused))),[]);  // 객체는 내용으로 비교
+  assert.deepEqual(recoveryDiff(focused,d),["운행 집중 시간대"]);
+  assert.equal(settingIssues({...d,traffic_focus:{windows:[{...w,target_percent:150}]}}).length,1);
+});

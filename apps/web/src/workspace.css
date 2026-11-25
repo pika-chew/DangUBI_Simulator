@@ -204,3 +204,29 @@ body { margin:0; }
 .operations-mode .studio-main{grid-template-rows:auto minmax(0,1fr)}
 .operations-mode .workspace-content{overflow:auto}
 @media(max-width:650px){.operations-mode .studio-body{grid-template-columns:42px minmax(0,1fr)}}
+
+/* 운행 집중 시간대 — 계열색은 기준 팔레트 1(파랑)·2(주황), 다크/라이트 각각 표면에 대해 검증 */
+.studio { --series-1:#3987e5; --series-2:#d95926; }
+.studio[data-theme="light"] { --series-1:#2a78d6; --series-2:#eb6834; }
+.focus-editor { display:grid; gap:10px; }
+.focus-window { border:1px solid var(--border); border-radius:8px; padding:10px 12px; display:grid; gap:8px; }
+.focus-window legend { color:var(--muted); padding:0 4px; }
+.focus-report { display:grid; gap:10px; }
+.focus-chart svg { width:100%; height:auto; min-height:160px; display:block; background:var(--well); border:1px solid var(--border); border-radius:10px; }
+.focus-chart text { font-size:13px; fill:var(--muted); }
+.focus-band { fill:var(--accent-bg); }
+.focus-grid { stroke:var(--border); stroke-width:1; }
+.focus-target { stroke:var(--text); stroke-width:1.5; stroke-dasharray:6 4; }
+.focus-label { fill:var(--text) !important; }
+.focus-line { fill:none; stroke-width:2; stroke-linejoin:round; }
+.focus-line.baseline { stroke:var(--series-1); stroke-dasharray:5 3; }
+.focus-line.adjusted { stroke:var(--series-2); }
+.focus-dot { stroke:var(--well); stroke-width:2; }
+.focus-dot.baseline { fill:var(--series-1); } .focus-dot.adjusted { fill:var(--series-2); }
+.focus-cursor { stroke:var(--muted); stroke-width:1; }
+.focus-legend { display:flex; flex-wrap:wrap; gap:14px; color:var(--muted); font-size:13px; }
+.focus-legend span { display:inline-flex; align-items:center; gap:6px; }
+.focus-legend .swatch { display:inline-block; width:18px; height:3px; border-radius:2px; }
+.focus-legend .swatch.baseline { background:repeating-linear-gradient(90deg,var(--series-1) 0 5px,transparent 5px 8px); }
+.focus-legend .swatch.adjusted { background:var(--series-2); }
+.focus-legend .swatch.window { height:10px; background:var(--accent-bg); border:1px solid var(--border); }

@@ -2,7 +2,9 @@ import {useCallback,useEffect,useState,type ReactNode} from "react";
 import {InfoHint} from "./InfoHint";
 import {api,type Message} from "./SimulationTools";
 import {OperationVehicleView} from "./OperationVehicleView";
-import {defaultOperationSettings,defaultRegister,eventLabels,formatKST,operationState,patternLabels,recoveryDiff,registerIssues,settingIssues,stopExplanation,
+import {FocusEditor,FocusReportView} from "./FocusEditor";
+import type {FocusReport} from "./trafficFocus";
+import {defaultOperationSettings,defaultRegister,eventLabels,formatKST,kstDay,operationState,patternLabels,recoveryDiff,registerIssues,settingIssues,stopExplanation,
   type OperationSettings,type OperationStatus,type RegisterInput} from "./operationsView";
 
 type Vehicle={id:number;vin_masked:string;pseudonym:string|null;status:string;status_label:string;pattern:string;anomaly_eligible:boolean;registered_at:string};
@@ -23,6 +25,7 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
   const [confirmMqtt,setConfirmMqtt]=useState(false),[confirmRemove,setConfirmRemove]=useState(false),[confirmForce,setConfirmForce]=useState(false);
   const [busy,setBusy]=useState(false),[error,setError]=useState(""),[notice,setNotice]=useState("");
   const [inspect,setInspect]=useState<{id:number;token:number}|null>(null);
+  const [previewDay,setPreviewDay]=useState(()=>kstDay(Date.now())),[focusPreview,setFocusPreview]=useState<FocusReport|null>(null);
 
   const loadStatus=useCallback(async()=>{const s=await api<OperationStatus>("/api/operations/status");setStatus(s);return s;},[]);
   const loadVehicles=useCallback(async()=>{
@@ -53,6 +56,10 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
   const recovery=status&&!status.running?status.recovery??null:null;
   const recoveryIssues=recovery?recoveryDiff(settings,recovery.settings):[];
   const running=!!status?.running;
+  const change=status?.pending_settings??null;
+  const waiting=change?.state==="waiting"||change?.state==="starting";
+  const changes=running&&status?.settings?recoveryDiff(settings,{...defaultOperationSettings,...status.settings}):[];
+  const focusNow=status?.live?.focus??null;
   const live=status?.live?.result;
   const pending=registry?.status.pending_pseudonym?.count??0;
   const holds=page?.vehicles.filter(v=>selected.includes(v.id)&&v.status==="cleanup_hold").map(v=>v.id)??[];
@@ -65,12 +72,18 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
 
     <section className="card"><div className="panel-heading"><div><h2>운영 상태</h2><p className="note">{operationState(status)}{status?.live?.recovering?" · 확인 지점부터 복구 중":""}</p></div>
       <div className="schedule-actions">
-        <button className="primary" disabled={busy||running||!status||setIssues.length>0||recoveryIssues.length>0||(recovery!==null&&!recovery.settings)||(settings.transport==="mqtt"&&!confirmMqtt)} onClick={()=>void act("운영 시작",()=>api("/api/operations/start",{settings,confirm_mqtt:confirmMqtt}),"상시 운영 시작")}>운영 시작</button>
+        {running
+          ?<button className="primary" disabled={busy||waiting||!changes.length||setIssues.length>0||!!status?.live?.stopping||(settings.transport==="mqtt"&&!confirmMqtt)} onClick={()=>void act("설정 적용",()=>api("/api/operations/settings/apply",{settings,confirm_mqtt:confirmMqtt}),"설정 변경 요청 · 진행 중 운행을 마치면 새 설정으로 자동 시작합니다")}>설정 적용(자동 재시작)</button>
+          :<button className="primary" disabled={busy||!status||waiting||setIssues.length>0||recoveryIssues.length>0||(recovery!==null&&!recovery.settings)||(settings.transport==="mqtt"&&!confirmMqtt)} onClick={()=>void act("운영 시작",()=>api("/api/operations/start",{settings,confirm_mqtt:confirmMqtt}),"상시 운영 시작")}>운영 시작</button>}
         <button disabled={busy||!running||status?.state==="stopping"||status?.state==="pausing"} onClick={()=>void act("운영 시각 제어",()=>api(status?.state==="paused"?"/api/operations/resume":"/api/operations/pause",{}))}>{status?.state==="paused"?"운영 재개":"일시중지"}</button>
         <button disabled={busy||!running||!!status?.live?.stopping} onClick={()=>void act("정상 중단",()=>api("/api/operations/stop",{force:false}),"정상 중단 요청 · 진행 중 운행을 마치고 멈춥니다")}>정상 중단</button>
         {!confirmForce?<button disabled={busy||!running} onClick={()=>setConfirmForce(true)}>강제 중단</button>
           :<span className="confirm-inline">진행 중 운행을 끊고 멈춥니다. 다음 시작 때 확인 지점부터 이어 보냅니다.<button disabled={busy} onClick={()=>{setConfirmForce(false);void act("강제 중단",()=>api("/api/operations/stop",{force:true}),"강제 중단 · 다음 시작 때 복구");}}>강제 중단 확인</button><button onClick={()=>setConfirmForce(false)}>취소</button></span>}
       </div></div>
+      {change&&<div className="context-note" role="status"><b>{change.state==="blocked"?"설정 변경 · 자동 재시작 안 함":"설정 변경 대기 · 자동 재시작"}</b>
+        <p>바뀐 항목: {change.changed.join(", ")}. {change.state==="blocked"?change.reason:change.state==="starting"?"새 설정으로 시작하고 있습니다.":`진행 중 운행${status?.live?.driving_now?` ${status.live.driving_now.toLocaleString()}대`:""}을 마치면 새 설정으로 자동 시작합니다. 멈춘 가상 시각에서 이어 갑니다.`}</p>
+        {change.state!=="starting"&&<button disabled={busy} onClick={()=>void act("설정 변경 취소",()=>api("/api/operations/settings/cancel",{}),change.state==="blocked"?"설정 변경 대기를 정리했습니다":"자동 재시작 취소 · 정상 중단 후 멈춘 상태로 둡니다")}>{change.state==="blocked"?"대기 정리":"자동 재시작 취소"}</button>}</div>}
+      {running&&!change&&changes.length>0&&<p className="context-note">입력한 설정이 실행 중 설정과 다릅니다: {changes.join(", ")}. ‘설정 적용(자동 재시작)’을 누르면 진행 중 운행을 마친 뒤 새 설정으로 자동 시작합니다.</p>}
       {stopExplanation(status)&&<p className="context-note">{stopExplanation(status)}</p>}
       {recovery&&<div className="context-note" role="status"><b>복구 대기 운행 {recovery.trips.toLocaleString()}건</b>
         <p>비정상 종료(강제 중단·오류·서버 종료) 때 보내던 운행입니다. 운영을 시작하면 확인된 메시지 다음부터 먼저 이어 보내며, 그 운행을 만든 당시 설정으로만 시작할 수 있습니다.</p>
@@ -85,13 +98,15 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
         <div><span>확인 <InfoHint label="확인" text="MQTT는 PUBACK(브로커 수신 확인), 송신 없는 생성은 생성 완료 기준입니다. 후속 저장 성공이 아닙니다."/></span><b>{(live?.confirmed_messages??0).toLocaleString()}</b></div>
         <div><span>Trip / Microtrip</span><b>{(live?.trip_count??0).toLocaleString()} / {(live?.microtrip_count??0).toLocaleString()}</b></div>
         <div><span>복구 운행</span><b>{(live?.recovered_trips??0).toLocaleString()}</b></div>
+        {running&&<div><span>지금 운행 중</span><b>{(status?.live?.driving_now??0).toLocaleString()}대</b></div>}
       </div>
+      {focusNow&&<p className="context-note" role="status">집중 시간대 {focusNow.start}~{focusNow.end} · 목표 {focusNow.target_percent}% · 계획(구간 평균) {focusNow.window_planned_percent}% · 계획(현재 10분) {focusNow.planned_percent.toFixed(1)}% · <b>실제 운행 {focusNow.actual_percent}%</b> <InfoHint label="집중 시간대 비교" text="계획은 날짜별로 고정된 조정 일정의 동시 운행 비율, 실제 운행은 지금 운행 중인 차량 비율입니다. 생성·확인(PUBACK)은 위 지표를 봅니다."/></p>}
       {status?.live?.mqtt&&<p className="note">MQTT · 접속 {status.live.mqtt.connected_clients??0} · 현재 연결 {status.live.mqtt.active_clients??0} · 발행 {status.live.mqtt.publish_attempts??0} · PUBACK {status.live.mqtt.puback_count??0} · 미확인 {status.live.mqtt.unconfirmed_messages??0}</p>}
       {live&&live.samples.length>0&&<details><summary>최근 전송 본문 표본 · 최대10건</summary><p className="note">본문 맨 앞의 vehicleId는 가명 VIN입니다. 토픽: {live.samples[0].topic}</p><pre className="sample-json">{live.samples.map(s=>s.message).join("\n")}</pre></details>}
     </section>
 
-    <section className="card"><div className="panel-heading"><h2>운영 설정</h2><InfoHint label="운영 설정" text="시작 전에 정하고 실행 중에는 고정합니다. 다음 시작부터 바꿀 수 있습니다."/></div>
-      <fieldset disabled={running||busy} className="schedule-fieldset"><div className="fields">
+    <section className="card"><div className="panel-heading"><h2>운영 설정</h2><InfoHint label="운영 설정" text="실행 중에는 고정됩니다. 실행 중에 바꾸고 ‘설정 적용(자동 재시작)’을 누르면 진행 중 운행을 마친 뒤 새 설정으로 자동 시작합니다."/></div>
+      <fieldset disabled={busy||waiting} className="schedule-fieldset"><div className="fields">
         <label><span className="label-line">전송 방식 <InfoHint label="전송 방식" text="송신 없는 생성은 외부로 보내지 않습니다. 실제 MQTT는 서버 운영 프로필과 vault 가명 VIN이 필요합니다(개발용 가명은 로컬 브로커만)."/></span><select value={settings.transport} onChange={e=>{setSettings({...settings,transport:e.target.value as OperationSettings["transport"]});setConfirmMqtt(false);}}><option value="dry_run">송신 없는 생성</option><option value="mqtt">실제 MQTT 송신</option></select></label>
         <label><span className="label-line">Microtrip 주기 (초)</span>{num(settings.interval_ms/1000,n=>setSettings({...settings,interval_ms:Math.round(n*1000)}),1,60)}</label>
         <label><span className="label-line">Client 수 <InfoHint label="Client 수" text="연결 풀 크기입니다. 차량은 차량 수가 가장 적은 Client에 배정합니다." range="1~25,000 · 서버 상한 별도"/></span>{num(settings.client_count,n=>setSettings({...settings,client_count:n}),1,25000)}</label>
@@ -107,6 +122,13 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
         <label><span className="label-line">이상 이벤트 강도</span><select value={settings.anomaly_intensity} onChange={e=>setSettings({...settings,anomaly_intensity:e.target.value as OperationSettings["anomaly_intensity"]})}><option value="low">낮음</option><option value="medium">보통</option><option value="high">높음</option></select></label>
         <label><span className="label-line">생성 Worker</span><select value={settings.generation_workers} onChange={e=>setSettings({...settings,generation_workers:Number(e.target.value)})}><option value={1}>1개</option><option value={2}>2개</option><option value={4}>4개</option></select></label>
       </div></details>
+      <details className="schedule-advanced" open={!!settings.traffic_focus}><summary>운행 집중 시간대</summary>
+        <FocusEditor value={settings.traffic_focus} onChange={next=>{setSettings({...settings,traffic_focus:next});setFocusPreview(null);}}/>
+        {settings.traffic_focus&&<div className="schedule-actions">
+          <label>미리보기 날짜 (KST)<input type="date" value={previewDay} onChange={e=>{setPreviewDay(e.target.value);setFocusPreview(null);}}/></label>
+          <button type="button" disabled={busy||setIssues.length>0} onClick={()=>void act("집중 미리보기",async()=>setFocusPreview(await api<FocusReport>("/api/operations/focus/preview",{settings,date:previewDay})))}>집중 미리보기</button></div>}
+        {focusPreview&&<><p className="note">{focusPreview.date} · 현재 명부에서 운영에 넣을 {focusPreview.vehicles.toLocaleString()}대 기준 예상입니다. 실제 운영은 그 날짜를 처음 쓸 때의 운영 차량으로 정하고 고정합니다.</p><FocusReportView report={focusPreview}/></>}
+      </details>
       {setIssues.length>0&&<ul className="note">{setIssues.map(i=><li key={i}>{i}</li>)}</ul>}
       {settings.transport==="mqtt"&&<label className="schedule-check"><input type="checkbox" checked={confirmMqtt} onChange={e=>setConfirmMqtt(e.target.checked)}/>설정된 브로커로 실제 전송하는 데 동의합니다.</label>}
       </fieldset>

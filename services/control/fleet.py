@@ -10,6 +10,7 @@ from services.control.schedule import Strict, Measurement, ScheduleRequest, KST,
 from services.control.journey_schedule import varied_day
 from services.control.operating import TRIAL_VEHICLES
 from services.control.schedule_obd import ScheduledOBDRequest, generate, key_for
+from services.control.traffic_focus import TrafficFocus, adjust, calibrate, days_between
 
 
 class PatternMix(Strict):
@@ -58,12 +59,15 @@ class FleetRequest(Strict):
     anomaly_intensity: Literal["low", "medium", "high"] = "medium"
     pattern_mix: PatternMix = Field(default_factory=PatternMix)
     road_mix: RoadMix = Field(default_factory=RoadMix)
+    traffic_focus: TrafficFocus | None = None
 
     @model_validator(mode="after")
     def feasible(self):
         self.include_em = True
         if self.execution_profile=="small_test" and self.vehicle_count>TRIAL_VEHICLES:
             raise ValueError(f"시험 실행은 최대 {TRIAL_VEHICLES:,}대입니다.")
+        if self.traffic_focus is not None and (self.fleet_version != "fleet-plan-4" or self.execution_profile != "small_test"):
+            raise ValueError("운행 집중 시간대는 새 시험 실행 일정(fleet-plan-4)에서만 사용할 수 있습니다.")
         if self.fleet_version == "fleet-plan-4":
             if self.vehicle_variation_percent is not None:
                 raise ValueError("새 배정은 차량 간 운행 시간 편차를 사용하지 않습니다. 해당 항목을 제거하세요.")
@@ -148,9 +152,60 @@ def allocation(req):
     return result
 
 
-def iter_vehicle_days(req, vehicle, fixed):
+def context_days(req):
     first = datetime.fromtimestamp(instant(req.measurement.start) / 1000, KST).date() - timedelta(days=2)
     last = datetime.fromtimestamp(instant(req.measurement.end) / 1000, KST).date() + timedelta(days=1)
+    return first, last
+
+
+def focus_rng(req, vehicle, day):
+    return lambda kind, index: rng(req, vehicle, day.isoformat(), "focus", kind, index)
+
+
+def base_day(req, vehicle, fixed, day):
+    """집중 조정 전 하루 운행 [(시작ms, 종료ms, 도로)] (fleet-plan-4)."""
+    trips = []
+    for trip in iter_vehicle_days(req, vehicle, fixed, only=day, focus=False):
+        trips.append((instant(trip["start"]), instant(trip["end"]), trip["road_profile"]))
+    return trips
+
+
+_FOCUS_CACHE: dict = {}
+
+
+def focus_report(req, day):
+    """시험 일정 전체 차량 기준 그날의 집중 확률·달성 보고(같은 요청이면 같은 결과, 메모리 캐시)."""
+    key = (hashlib.sha256(req.model_dump_json().encode()).hexdigest(), day.isoformat())
+    if key not in _FOCUS_CACHE:
+        assigned = allocation(req)
+        vehicles = [(base_day(req, v, fixed, day), focus_rng(req, v, day)) for v, fixed in assigned.items()]
+        if len(_FOCUS_CACHE) > 256:
+            _FOCUS_CACHE.clear()
+        _FOCUS_CACHE[key] = calibrate(vehicles, req.traffic_focus, day)
+    return _FOCUS_CACHE[key]
+
+
+def focus_summary(req):
+    """측정 기간의 날짜별 집중 보고(10분 칸 제외). 집중 설정이 없으면 None."""
+    if req.traffic_focus is None:
+        return None
+    start = datetime.fromtimestamp(instant(req.measurement.start) / 1000, KST).date()
+    end = datetime.fromtimestamp((instant(req.measurement.end) - 1) / 1000, KST).date()
+    return [{k: v for k, v in focus_report(req, day).items() if k != "ps"} for day in days_between(start, end)]
+
+
+def iter_vehicle_days(req, vehicle, fixed, only=None, focus=True):
+    if focus and req.traffic_focus is not None and only is None:
+        first, last = context_days(req)
+        for day in days_between(first, last):
+            report = focus_report(req, day)
+            ps = {int(k): v for k, v in report["ps"].items()}
+            for a, b, road in adjust(base_day(req, vehicle, fixed, day), req.traffic_focus, day, ps, focus_rng(req, vehicle, day)):
+                yield {"start": datetime.fromtimestamp(a / 1000, KST).isoformat(), "end": datetime.fromtimestamp(b / 1000, KST).isoformat(), "road_profile": road}
+        return
+    first, last = context_days(req)
+    if only is not None:
+        first = last = only
     for n in range((last-first).days+1):
         day = first + timedelta(days=n)
         daily = rng(req, vehicle, day.isoformat(), "day")
@@ -210,7 +265,7 @@ def preview(req, offset=0, limit=100, vehicle_id=None):
     assigned = allocation(req)
     if req.execution_profile=="operations" or req.vehicle_count > 100:
         from services.control.fleet_stream import preview as stream_preview
-        return stream_preview(req,assigned,iter_vehicle_days,offset,limit,vehicle_id)
+        return {**stream_preview(req,assigned,iter_vehicle_days,offset,limit,vehicle_id), "traffic_focus": focus_summary(req)}
     schedule = selected_schedule(req,[{"vehicle_id":v,"trips":[]} for v in assigned])
     def provide(_req, vehicle):
         return ((instant(t["start"]),instant(t["end"]),t["road_profile"]) for t in iter_vehicle_days(req,vehicle.vehicle_id,assigned[vehicle.vehicle_id]))
@@ -219,6 +274,7 @@ def preview(req, offset=0, limit=100, vehicle_id=None):
     data["anomaly_target_count"] = sum(v["anomaly_eligible"] for v in assigned.values())
     for vehicle in data["vehicles"]:
         vehicle.update(assigned[vehicle["vehicle_id"]])
+    data["traffic_focus"] = focus_summary(req)
     data["warnings"].extend([
         "전체 조건으로 배정한 개발용 합성 일정이며 한국 실차 통계로 보정하지 않았습니다.",
         "일일 목표는 운행하는 날의 전체 운행 합계입니다. 미운행·관측 경계·정수 분 반올림으로 관측 평균은 달라집니다.",

@@ -1,5 +1,7 @@
 import {InfoHint} from "./InfoHint";
 import {defaultFleet,profileGuide,trialMaxDays} from "./fleetSettings";
+import {FocusEditor} from "./FocusEditor";
+import type {TrafficFocus} from "./trafficFocus";
 export {defaultFleet} from "./fleetSettings";
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
@@ -18,6 +20,7 @@ export type FleetConfig = {
   departure_jitter_minutes: number;
   day_off_probability: number;
   weekend_activity_probability: number;
+  traffic_focus?: TrafficFocus | null;
   anomaly_vehicle_percent: number;
   anomaly_events_per_hour: number;
   anomaly_intensity: "low" | "medium" | "high";
@@ -84,5 +87,8 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
       <p className="note">생활패턴 비율과 도로 배정 비중은 각각 합계100%로 지정합니다. 생활패턴은 정수 차량 수로 배정하고 도로 비중은 차량별 도로 성격을 추첨하는 가중치입니다. 다양한 생활 운행에서는 짧은 용무·운행 길이에 맞게 개별 도로 성격도 달라질 수 있습니다. 실제 경로·목적지·전국 교통을 수입한 모델은 아닙니다.</p>
     </details>
     <p className="note">운행 시간은 1회 기준 · 최소 주차30분.</p>
+    {v.fleet_version==="fleet-plan-4"&&profile!=="operations"&&<details className="schedule-advanced" open={!!v.traffic_focus}><summary>운행 집중 시간대</summary>
+      <FocusEditor value={v.traffic_focus} onChange={next=>onChange({...v,traffic_focus:next??undefined})} disabled={disabled}/>
+      <p className="note">기본 전송·빠른 전송 모두 같은 조정 일정을 씁니다. 결과는 일정 기록 후 차량 데이터 화면에서 날짜별로 확인합니다.</p></details>}
   </fieldset>;
 }

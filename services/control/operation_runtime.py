@@ -20,8 +20,9 @@ from services.control.generation_pool import GenerationPool
 from services.control.generation_session import GenerationFailure
 from services.control.message_codec import with_vehicle_id
 from services.control.mqtt_bridge import MQTTBridge, MQTTFailure, mqtt_destination
-from services.control.operation_plan import (MAX_OPERATION_VEHICLES, MIN_PARKING_MS, OperationSettings, day_of, day_trips,
-                                             trip_row, upcoming, vehicle_key)
+from services.control.operation_plan import (MAX_OPERATION_VEHICLES, MIN_PARKING_MS, FocusPlanner, OperationSettings, day_of,
+                                             day_trips, trip_row, upcoming, vehicle_key)
+from services.control.traffic_focus import window_at
 from services.control.registry import Registry
 from services.control.schedule_publisher import SchedulePublisher
 
@@ -33,7 +34,8 @@ INITIAL_STATE = dict(lat=37.5, lon=127.0, odometer_m=500000, coolant_c=20., head
 SETTING_LABELS = {"transport": "전송 방식", "interval_ms": "Microtrip 주기", "client_count": "Client 수", "duration_cap_days": "가상 운영 기간",
                   "vehicle_count": "운영 차량 수", "daily_variation_percent": "날짜별 편차", "departure_jitter_minutes": "출발 편차",
                   "day_off_probability": "하루 미운행 확률", "weekend_activity_probability": "주말 운행 참여 확률",
-                  "anomaly_events_per_hour": "이상 이벤트 후보 빈도", "anomaly_intensity": "이상 이벤트 강도", "generation_workers": "생성 Worker"}
+                  "anomaly_events_per_hour": "이상 이벤트 후보 빈도", "anomaly_intensity": "이상 이벤트 강도", "generation_workers": "생성 Worker",
+                  "traffic_focus": "운행 집중 시간대"}
 
 
 def settings_diff(saved: dict, requested: dict) -> list[str]:
@@ -164,6 +166,8 @@ class OperationController:
         self.graceful = threading.Event()
         self.pause_request = threading.Event()
         self.live = {}
+        self.pending = None          # 설정 변경 자동 재시작 대기(메모리 전용: 서버 재시작 시 실행하지 않음)
+        self.graceful_reason = "사용자 정상 중단"
         self.recover_interrupted()
 
     def recover_interrupted(self):
@@ -176,16 +180,20 @@ class OperationController:
     def running(self):
         return self.thread is not None and self.thread.is_alive()
 
-    def first_departure(self, settings: OperationSettings, wall_ms: int):
-        """처음 시작 때 편입할 차량들의 시작일(KST) 운행 중 가장 이른 출발 시각. 그날 운행이 없으면 None."""
+    def first_departure(self, settings: OperationSettings, wall_ms: int, planner: FocusPlanner | None = None):
+        """처음 시작 때 편입할 차량들의 시작일(KST) 운행 중 가장 이른 출발 시각(집중 조정 포함). 그날 운행이 없으면 None."""
         today = day_of(wall_ms)
         seed = self.registry.seed()
         earliest = None
-        for info in initial_selection(self.registry.session_vehicles(), settings.vehicle_count or MAX_OPERATION_VEHICLES):
+        selection = initial_selection(self.registry.session_vehicles(), settings.vehicle_count or MAX_OPERATION_VEHICLES)
+        planner = planner or FocusPlanner(settings, seed, self.registry)
+        for info in selection:
+            planner.add(info["id"], info["fixed"])
+        for info in selection:
             if info["start_day"] and date.fromisoformat(info["start_day"]) > today:
                 continue
             floor = info["last_end_ms"] + MIN_PARKING_MS if info["last_end_ms"] is not None else 0
-            for a, _, _ in day_trips(settings, seed, vehicle_key(info["id"]), info["fixed"], today):
+            for a, _, _ in day_trips(settings, seed, vehicle_key(info["id"]), info["fixed"], today, planner):
                 if a >= floor:
                     earliest = a if earliest is None else min(earliest, a)
                     break
@@ -205,12 +213,74 @@ class OperationController:
         live = dict(self.live) if self.running() else {}
         return {**{k: op[k] for k in ("state", "settings", "last_stop", "stop_reason", "error", "virtual_checkpoint_ms", "window_end_ms", "session_started_at")},
                 "running": self.running(), "live": live, "registry": self.registry.summary(),
-                "recovery": None if self.running() else self.recovery(op)}
+                "recovery": None if self.running() else self.recovery(op), "pending_settings": self.pending_status()}
 
-    def start(self, settings: OperationSettings, mqtt=None):
+    def pending_status(self):
+        pending = self.pending
+        if not pending:
+            return None
+        return {k: pending[k] for k in ("state", "changed", "reason", "requested_at")} | {"settings": pending["settings"].model_dump()}
+
+    def apply_settings(self, settings: OperationSettings, mqtt=None):
+        """실행 중 설정 변경: 정상 중단(진행 운행 마무리) 뒤 새 설정으로 자동 시작한다."""
+        with self.lock:
+            if not self.running():
+                raise RuntimeError("실행 중인 상시 운영이 없습니다. 설정을 바꾼 뒤 운영 시작을 누르세요.")
+            if self.job.stop_requested or self.live.get("stopping"):
+                raise RuntimeError("이미 중단 중입니다. 중단이 끝난 뒤 새 설정으로 시작하세요.")
+            if self.pending:
+                raise RuntimeError("이미 설정 변경을 기다리는 중입니다. 취소한 뒤 다시 요청하세요.")
+            current = self.registry.operation()["settings"] or {}
+            changed = settings_diff(current, settings.model_dump())
+            if not changed:
+                raise RuntimeError("현재 운영 설정과 같습니다.")
+            self.pending = {"settings": settings, "mqtt": mqtt, "changed": changed, "state": "waiting", "reason": None,
+                            "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            thread = self.thread
+            self.graceful_reason = "설정 변경 적용을 위한 정상 중단"
+            self.graceful.set()
+        self.registry.add_event("settings_change", {"changed": changed})
+        threading.Thread(target=self._restart_after, args=(thread,), name="operation-restart", daemon=True).start()
+
+    def _restart_after(self, thread):
+        thread.join()
+        with self.lock:
+            pending = self.pending
+            if not pending or pending["state"] != "waiting":
+                return
+            if self.registry.operation()["last_stop"] != "graceful":
+                pending.update(state="blocked", reason="정상 중단으로 끝나지 않아(강제 중단·오류) 자동 시작하지 않았습니다. "
+                                                      "남은 운행을 당시 설정으로 먼저 이어 보낸 뒤 새 설정을 적용하세요.")
+                self.registry.add_event("settings_restart_blocked", {"reason": pending["reason"]})
+                return
+            pending["state"] = "starting"
+        try:
+            self.start(pending["settings"], pending["mqtt"], from_restart=True)
+        except Exception as error:  # 시작 거절 사유를 그대로 보여 준다.
+            with self.lock:
+                pending.update(state="blocked", reason=f"자동 시작 실패: {error}")
+            self.registry.add_event("settings_restart_blocked", {"reason": pending["reason"]})
+            return
+        with self.lock:
+            if self.pending is pending:
+                self.pending = None
+        self.registry.add_event("settings_restarted", {"changed": pending["changed"]})
+
+    def cancel_pending(self):
+        with self.lock:
+            if not self.pending or self.pending["state"] == "starting":
+                raise RuntimeError("취소할 설정 변경 대기가 없습니다.")
+            self.pending = None
+        self.registry.add_event("settings_change_cancelled", {})
+
+    def start(self, settings: OperationSettings, mqtt=None, from_restart=False):
         with self.lock:
             if self.running():
                 raise RuntimeError("상시 운영이 이미 실행 중입니다.")
+            if not from_restart and self.pending:
+                if self.pending["state"] == "waiting":
+                    raise RuntimeError("설정 변경 자동 재시작을 기다리는 중입니다.")
+                self.pending = None  # 막혀 있던 대기는 사용자가 직접 시작하면 정리한다.
             previous = self.registry.operation()
             snapshots = self.registry.recovery_trips()
             requested_settings = settings.model_dump()
@@ -229,6 +299,7 @@ class OperationController:
                     raise RuntimeError("복구할 운행의 Worker, 차량 식별자 또는 전송 대상이 바뀌었습니다. 기존 구성으로 복구하세요.")
             self.graceful.clear()
             self.pause_request.clear()
+            self.graceful_reason = "사용자 정상 중단"
             self.job = OperationJob()
             self.live = {"state": "starting"}
             self.thread = threading.Thread(target=self._run, args=(settings, mqtt, self.job, worker_hash), name="operation", daemon=True)
@@ -265,9 +336,10 @@ class OperationController:
         wall = int(self.clock() * 1000)
         fresh = op["virtual_checkpoint_ms"] is None
         anchor = wall if fresh else int(op["virtual_checkpoint_ms"])
+        planner = FocusPlanner(settings, registry.seed(), registry)
         if fresh:
             # 처음 시작: 시작일(실제 날짜, KST)의 가장 이른 출발 시각부터 가상시각을 시작해 그날 운행을 모두 보낸다.
-            anchor = self.first_departure(settings, wall) or wall
+            anchor = self.first_departure(settings, wall, planner) or wall
         window_end = op["window_end_ms"]
         if window_end is None or anchor >= window_end:
             window_end = anchor + int(settings.duration_cap_days * self.day_seconds * 1000)
@@ -324,7 +396,7 @@ class OperationController:
                 registry.recover_history(info["id"], trip["key"], info["confirmed_ts"])
                 yield row
                 last_end, not_before = trip["b"], trip["b"]
-            for row in upcoming(settings, seed, info["id"], info["fixed"], day_of_iso(vs["start_day"]), not_before, last_end):
+            for row in upcoming(settings, seed, info["id"], info["fixed"], day_of_iso(vs["start_day"]), not_before, last_end, planner):
                 if vs["final"] or vs["removing"] or row["start_ms"] >= window_end:
                     return
                 if row["end_ms"] > window_end:
@@ -342,6 +414,7 @@ class OperationController:
             vstates[vehicle] = dict(info=info, alias=info["pseudonym"], client=client, start_day=day, active_key=None,
                                     final=False, removing=info["status"] == "removing", pending_end=None)
             generator.add(vehicle, info)
+            planner.add(info["id"], info["fixed"])
             return vehicle
 
         def confirm(vehicle, ty, ts):
@@ -432,6 +505,16 @@ class OperationController:
             registry.save_checkpoint(max(anchor, min(current, queued_due)), progress, state)
             progress.clear()
             live["virtual_now_ms"] = current
+            live["driving_now"] = sum(1 for vs in vstates.values() if vs["active_key"] and not vs.get("removed"))
+            live["focus"] = None
+            if settings.traffic_focus is not None:
+                today = day_of(current)
+                report = planner.cache.get(today.isoformat())
+                item, planned = window_at(report, current, today) if report else (None, None)
+                if item:
+                    live["focus"] = {"start": item["start"], "end": item["end"], "target_percent": item["target_percent"],
+                                     "planned_percent": planned, "window_planned_percent": item["planned_percent"],
+                                     "actual_percent": round(live["driving_now"] * 100 / max(1, live["vehicles"]), 1)}
             if bridge:
                 live["mqtt"] = {k: bridge.stats.get(k) for k in ("connected_clients", "active_clients", "publish_attempts", "puback_count", "unconfirmed_messages", "reconnect_count")}
             if not force:
@@ -480,7 +563,7 @@ class OperationController:
                 if job.stop_requested:
                     return False
                 if self.graceful.is_set() and not live["stopping"]:
-                    begin_graceful("사용자 정상 중단")
+                    begin_graceful(self.graceful_reason)
                 if virtual_now() >= window_end and not live["stopping"]:
                     begin_graceful(f"기간 상한 {settings.duration_cap_days}일 도달")
                 if publisher:

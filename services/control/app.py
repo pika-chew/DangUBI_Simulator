@@ -795,13 +795,19 @@ def operations_events(limit: int = Query(default=50, ge=1, le=200)):
     return {"events": registry().events(limit)}
 
 
-@app.post("/api/operations/start", status_code=202)
-def operations_start(body: StartOperation):
+def operation_settings(raw: dict):
+    from pydantic import ValidationError
     from services.control.operation_plan import OperationSettings
     try:
-        settings=OperationSettings.model_validate(body.settings)
-    except ValueError as error:
-        raise HTTPException(422, detail="상시 운영 설정을 확인하세요.") from error
+        return OperationSettings.model_validate(raw)
+    except ValidationError as error:
+        reasons=[str(e.get("ctx",{}).get("error") or e["msg"]) for e in error.errors()[:3]]
+        raise HTTPException(422, detail="상시 운영 설정을 확인하세요. "+" / ".join(reasons)) from error
+
+
+def prepare_operation(body: StartOperation):
+    """시작·설정 변경 공통 검사. (설정, MQTT 프로필)을 돌려준다."""
+    settings=operation_settings(body.settings)
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker가 준비되지 않았습니다.")
     profile=None
@@ -822,11 +828,68 @@ def operations_start(body: StartOperation):
         needed=remaining+600
         if settings.client_count>profile["max_clients"] or needed>profile["max_duration_seconds"]:
             raise HTTPException(422, detail="서버 MQTT Client 수 또는 실제 실행시간 상한을 확인하세요(가상 운영 기간과 정리 여유 10분 이상 필요).")
+    return settings, profile
+
+
+@app.post("/api/operations/start", status_code=202)
+def operations_start(body: StartOperation):
+    settings, profile = prepare_operation(body)
     try:
         operation().start(settings, profile)
     except RuntimeError as error:
         raise HTTPException(409, detail=str(error)) from error
     return operation().status()
+
+
+@app.post("/api/operations/settings/apply", status_code=202)
+def operations_apply_settings(body: StartOperation):
+    """실행 중 설정 변경: 정상 중단 뒤 새 설정으로 자동 시작한다."""
+    settings, profile = prepare_operation(body)
+    try:
+        operation().apply_settings(settings, profile)
+    except RuntimeError as error:
+        raise HTTPException(409, detail=str(error)) from error
+    return operation().status()
+
+
+@app.post("/api/operations/settings/cancel")
+def operations_cancel_settings():
+    try:
+        operation().cancel_pending()
+    except RuntimeError as error:
+        raise HTTPException(409, detail=str(error)) from error
+    return operation().status()
+
+
+class FocusPreview(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    settings: dict[str, Any]
+    date: str=Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+@app.post("/api/operations/focus/preview")
+def operations_focus_preview(body: FocusPreview):
+    """현재 명부에서 운영에 넣을 차량 기준의 예상 집중 결과(저장하지 않음)."""
+    from datetime import date as Date
+    from services.control.operation_plan import FocusPlanner
+    from services.control.operation_runtime import initial_selection
+    settings=operation_settings(body.settings)
+    if settings.traffic_focus is None:
+        raise HTTPException(422, detail="운행 집중 시간대를 하나 이상 지정하세요.")
+    try:
+        day=Date.fromisoformat(body.date)
+    except ValueError as error:
+        raise HTTPException(422, detail="날짜를 확인하세요.") from error
+    reg=registry()
+    selection=initial_selection(reg.session_vehicles(), settings.vehicle_count or 20000)
+    if not selection:
+        raise HTTPException(409, detail="운영에 넣을 준비된 차량이 없습니다.")
+    planner=FocusPlanner(settings, reg.seed(), None)
+    for info in selection:
+        planner.add(info["id"], info["fixed"])
+    report=planner.report(day, save=False)
+    saved=reg.focus_day(day.isoformat(), planner.digest)
+    return {**report, "frozen": saved is not None, **({"frozen_report": saved} if saved else {})}
 
 
 @app.post("/api/operations/stop")

@@ -8,6 +8,8 @@ import { TripTimeline } from "./TripTimeline";
 import { readJSONResponse } from "./http";
 import { currentFleet, trialMaxDays } from "./fleetSettings";
 import { FleetControls, defaultFleet, type FleetConfig } from "./FleetControls";
+import { FocusDays } from "./FocusEditor";
+import type { FocusReport } from "./trafficFocus";
 
 type Road = "urban" | "highway" | "congested" | "mixed";
 type TripInput = { start: string; end: string; road_profile: Road };
@@ -15,7 +17,7 @@ type Slot = { start_time: string; duration_min_minutes: number; duration_max_min
 type Vehicle = { vehicle_id: string; trips?: TripInput[]; pattern?: { weekdays: number[]; day_off_probability: number; baseline_jitter_minutes: number; slots: Slot[] }; overrides?: Record<string, TripInput[]> };
 export type Schedule = { include_em?: boolean; schedule_version: "schedule-plan-1"; mode: "manual" | "patterned"; seed: number; interval_ms: number; measurement: { start: string; end: string; timezone: "Asia/Seoul" }; vehicles: Vehicle[] };
 type Trip = { vehicle_id: string; trip_key: string; start_ms: number; end_ms: number; observed_start_ms: number; observed_end_ms: number; road_profile: Road; started_before_window: boolean; continues_after_window: boolean };
-export type Plan = { vehicle_count?: number; vehicle_list_limit?: number; anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[]; vehicle_vins?: Record<string,string> };
+export type Plan = { vehicle_count?: number; vehicle_list_limit?: number; anomaly_target_count?: number; measurement_start_ms: number; measurement_end_ms: number; observed_trip_count: number; microtrip_count: number; trip_count: number; matched_trip_count: number; trips: Trip[]; has_more: boolean; vehicles: { vehicle_id: string; observed_trip_count: number; pattern?: string; anomaly_eligible?: boolean }[]; vehicle_vins?: Record<string,string>; traffic_focus?: FocusReport[] | null };
 type OBD = { status: "generated_local_only"; vehicle_assignment?: {pattern: string; anomaly_eligible: boolean}; messages: Message[]; trace: TracePoint[]; microtrip_count: number; has_more: boolean; trip: Message | null; synthetic_trip: boolean; initial_state: { lat: number; lon: number; odometer_m: number; coolant_c: number }; model: string };
 type Restoration = {checkpoint_epoch:number; completed_preceding_trips: number; total_preceding_trips: number; computed_trips: number; reused_preceding_trips: number};
 type Preparing = {status: "preparing"; restoration: Restoration};
@@ -303,6 +305,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       <p>전체 {plan.vehicle_count ?? plan.vehicles.length}대 · 관측 운행 {plan.observed_trip_count.toLocaleString()}회 · 예상 Microtrip {plan.microtrip_count.toLocaleString()}건 · 정상 종료 Trip {plan.trip_count.toLocaleString()}건</p>
       {plan.anomaly_target_count !== undefined && <p>이상 이벤트 대상 {plan.anomaly_target_count}대 · 실제 발생 차량 수와 다를 수 있습니다.</p>}
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
+      {plan.traffic_focus && plan.traffic_focus.length > 0 && <FocusDays reports={plan.traffic_focus} />}
       <div className="fields">
         <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 운행 {trips.length}회 · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{plan.vehicle_vins?.[v.vehicle_id]?`VIN ${plan.vehicle_vins[v.vehicle_id]} · `:""}{v.vehicle_id} · 운행 {v.observed_trip_count}회{v.anomaly_eligible?" · 이상 이벤트 대상":""}</option>)}</select>{plan.vehicle_vins?.[vehicle]&&<span className="note">시험 VIN {plan.vehicle_vins[vehicle]} · 전송 토픽과 본문 vehicleId에 그대로 사용(가명처리 없음)</span>}</label>
         {frozenFleet&&((plan.vehicle_count??0)>plan.vehicles.length||frozenFleet.execution_profile==="operations")&&<label>차량 번호 직접 조회<input type="text" placeholder="v000001" maxLength={7} onKeyDown={e=>{if(e.key==="Enter"&&/^v[0-9]{6}$/.test(e.currentTarget.value))void selectVehicle(e.currentTarget.value);}}/><span className="note">목록은 처음100대입니다. 다른 차량은 번호를 입력한 뒤 Enter로 조회합니다. 선택 차량: {vehicle}</span></label>}

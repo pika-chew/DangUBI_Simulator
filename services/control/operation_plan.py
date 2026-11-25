@@ -14,8 +14,11 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import json
+
 from services.control.journey_schedule import varied_day
 from services.control.schedule import KST
+from services.control.traffic_focus import FOCUS_VERSION, TrafficFocus, adjust, calibrate
 
 PLAN_VERSION = "operations-plan-1"
 MAX_OPERATION_VEHICLES = 20_000
@@ -38,6 +41,7 @@ class OperationSettings(BaseModel):
     anomaly_events_per_hour: float = Field(default=2, ge=0, le=60)
     anomaly_intensity: str = Field(default="medium", pattern="^(low|medium|high)$")
     generation_workers: int = Field(default=1, ge=1, le=4)
+    traffic_focus: TrafficFocus | None = None
 
     @field_validator("generation_workers")
     @classmethod
@@ -74,8 +78,20 @@ def trip_row(vehicle: str, a: int, b: int, profile: str, interval_ms: int, resum
             "started_before_window": first > a, "continues_after_window": False, "interval_ms": interval_ms}
 
 
-def day_trips(settings: OperationSettings, seed, vehicle: str, fixed: dict, day: date):
-    """하루치 운행 (시작ms, 종료ms, 도로). 미운행·주말 참여는 기존 배정과 같은 방식이다."""
+def focus_rng(seed, vehicle: str, day: date):
+    return lambda kind, index: rng(seed, vehicle, day.isoformat(), "focus", kind, index)
+
+
+def day_trips(settings: OperationSettings, seed, vehicle: str, fixed: dict, day: date, planner=None):
+    """하루치 운행 (시작ms, 종료ms, 도로). 미운행·주말 참여는 기존 배정과 같은 방식이다.
+    planner가 있으면 운행 집중 시간대 조정을 적용한다."""
+    base = base_day_trips(settings, seed, vehicle, fixed, day)
+    if planner is None or settings.traffic_focus is None:
+        return base
+    return adjust(base, settings.traffic_focus, day, planner.ps(day), focus_rng(seed, vehicle, day))
+
+
+def base_day_trips(settings: OperationSettings, seed, vehicle: str, fixed: dict, day: date):
     if rng(seed, vehicle, day.isoformat(), "off").random() < settings.day_off_probability:
         return []
     weekend = day.isoweekday() >= 6
@@ -94,7 +110,7 @@ def day_trips(settings: OperationSettings, seed, vehicle: str, fixed: dict, day:
 
 
 def upcoming(settings: OperationSettings, seed, vehicle_id: int, fixed: dict, start_day: date,
-             not_before_ms: int, last_end_ms: int | None):
+             not_before_ms: int, last_end_ms: int | None, planner=None):
     """기준 시각 이후의 운행을 끝없이 낸다. 장기간 운행이 없으면(설정상 미운행 100% 등) 멈춘다."""
     vehicle = vehicle_key(vehicle_id)
     floor = not_before_ms if last_end_ms is None else max(not_before_ms, last_end_ms + MIN_PARKING_MS)
@@ -103,7 +119,7 @@ def upcoming(settings: OperationSettings, seed, vehicle_id: int, fixed: dict, st
     previous_end = last_end_ms
     while idle < IDLE_DAY_LIMIT:
         found = False
-        for a, b, profile in day_trips(settings, seed, vehicle, fixed, day):
+        for a, b, profile in day_trips(settings, seed, vehicle, fixed, day, planner):
             if a < floor:
                 continue
             if previous_end is not None and a - previous_end < MIN_PARKING_MS:
@@ -113,3 +129,44 @@ def upcoming(settings: OperationSettings, seed, vehicle_id: int, fixed: dict, st
             yield trip_row(vehicle, a, b, profile, settings.interval_ms)
         idle = 0 if found else idle + 1
         day += timedelta(days=1)
+
+
+def focus_digest(settings: OperationSettings) -> str:
+    """날짜별 집중 결과를 고정 저장할 때의 설정 지문(하루 배정에 영향을 주는 항목만)."""
+    keys = ("daily_variation_percent", "departure_jitter_minutes", "day_off_probability", "weekend_activity_probability")
+    data = {"version": FOCUS_VERSION, "plan": PLAN_VERSION, "focus": settings.traffic_focus.model_dump() if settings.traffic_focus else None,
+            **{k: getattr(settings, k) for k in keys}}
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+class FocusPlanner:
+    """상시 운영의 날짜별 집중 확률. 날짜를 처음 쓸 때 그 시점의 운영 차량으로 맞추고 명부 DB에 고정 저장한다.
+    이후 추가·제외된 차량이 있어도 이미 정한 날짜의 결과(기존 차량 일정)는 바뀌지 않는다."""
+
+    def __init__(self, settings: OperationSettings, seed, store=None):
+        self.settings, self.seed, self.store = settings, seed, store
+        self.fleet: dict[int, dict] = {}
+        self.cache: dict[str, dict] = {}
+        self.digest = focus_digest(settings)
+
+    def add(self, vehicle_id: int, fixed: dict):
+        self.fleet[vehicle_id] = fixed
+
+    def report(self, day: date, save=True) -> dict | None:
+        if self.settings.traffic_focus is None:
+            return None
+        key = day.isoformat()
+        if key not in self.cache:
+            saved = self.store.focus_day(key, self.digest) if self.store else None
+            if saved is None:
+                vehicles = [(base_day_trips(self.settings, self.seed, vehicle_key(v), fixed, day), focus_rng(self.seed, vehicle_key(v), day))
+                            for v, fixed in sorted(self.fleet.items())]
+                saved = calibrate(vehicles, self.settings.traffic_focus, day)
+                if save and self.store:
+                    saved = self.store.save_focus_day(key, self.digest, saved)
+            self.cache[key] = saved
+        return self.cache[key]
+
+    def ps(self, day: date) -> dict:
+        report = self.report(day)
+        return {int(k): v for k, v in report["ps"].items()} if report else {}

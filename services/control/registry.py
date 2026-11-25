@@ -122,6 +122,9 @@ class Registry:
                     status TEXT NOT NULL, confirmed_ts INTEGER, resume_after_ms INTEGER, recoveries INTEGER NOT NULL DEFAULT 0,
                     started_at TEXT NOT NULL, finished_at TEXT, UNIQUE(vehicle_id, trip_key));
                 CREATE INDEX IF NOT EXISTS trip_history_vehicle ON trip_history(vehicle_id, start_ms);
+                CREATE TABLE IF NOT EXISTS focus_days (
+                    day TEXT NOT NULL, digest TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY (day, digest));
             """)
             con.execute("INSERT OR IGNORE INTO operation(id, state, updated_at) VALUES (1, 'stopped', ?)", (now(),))
             columns = {row["name"] for row in con.execute("PRAGMA table_info(operation)")}
@@ -468,6 +471,18 @@ class Registry:
                 "status": r["status"], "status_label": STATUS_LABELS[r["status"]], "pattern": r["pattern"],
                 "anomaly_eligible": bool(r["anomaly_eligible"]), "traits": json.loads(r["traits"]),
                 "batch_id": r["batch_id"], "registered_at": r["registered_at"], "status_at": r["status_at"]}
+
+    # ---- 운행 집중 시간대 ----
+    def focus_day(self, day: str, digest: str) -> dict | None:
+        with self.connect() as con:
+            row = con.execute("SELECT data FROM focus_days WHERE day=? AND digest=?", (day, digest)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def save_focus_day(self, day: str, digest: str, data: dict) -> dict:
+        """처음 저장한 값이 우선한다(같은 날짜를 두 번 정하지 않음)."""
+        with self.connect() as con:
+            con.execute("INSERT OR IGNORE INTO focus_days VALUES (?,?,?,?)", (day, digest, json.dumps(data), now()))
+            return json.loads(con.execute("SELECT data FROM focus_days WHERE day=? AND digest=?", (day, digest)).fetchone()[0])
 
     # ---- 운행 이력 조회 ----
     def find_vehicle(self, query: str) -> dict | None:
