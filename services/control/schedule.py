@@ -6,6 +6,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from services.control.operating import TRIAL_VEHICLES
 
 KST = timezone(timedelta(hours=9))
 
@@ -96,7 +97,7 @@ class ScheduleRequest(Strict):
     seed: int = Field(default=42, ge=-2147483648, le=2147483647)
     interval_ms: int = Field(default=2000, ge=100, le=86400000)
     measurement: Measurement
-    vehicles: list[Vehicle] = Field(min_length=1, max_length=100)
+    vehicles: list[Vehicle] = Field(min_length=1, max_length=TRIAL_VEHICLES)
 
     @model_validator(mode="after")
     def modes(self):
@@ -170,14 +171,14 @@ def plan(req: ScheduleRequest, offset=0, limit=100, vehicle_id=None, trip_provid
         previous = None
         observed, driving_ms = 0, 0
         for a, b, profile in trips:
-            total += 1
-            if total > 10000:
-                raise ValueError("일정 계획은 최대10,000회입니다. 차량·날짜·운행 슬롯을 줄이세요.")
             if previous is not None and a-previous < 1800000:
                 raise ValueError(f"{vehicle.vehicle_id}: 운행 중첩 또는 최소 주차30분 미달입니다. 자동 편차/날짜 예외도 확인하세요.")
             previous = b
             if b < start or a > end:
                 continue
+            total += 1
+            if total > 10000:
+                raise ValueError("관측 범위의 일정은 최대10,000회입니다. 차량이나 운행 슬롯을 줄이세요.")
             observed += 1
             driving_ms += max(0, min(b,end)-max(a,start))
             key = hashlib.sha256(f"{req.schedule_version}|{vehicle.vehicle_id}|{a}|{b}|{profile}".encode()).hexdigest()

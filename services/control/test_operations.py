@@ -27,7 +27,8 @@ def fleet(**patch):
 def test_operating_bounds_and_small_test_remain_separate():
     assert fleet(vehicle_count=25000).vehicle_count==25000
     with pytest.raises(ValueError):fleet(vehicle_count=25001)
-    with pytest.raises(ValueError):fleet(vehicle_count=101,execution_profile="small_test")
+    assert fleet(vehicle_count=1000,execution_profile="small_test").vehicle_count==1000
+    with pytest.raises(ValueError):fleet(vehicle_count=1001,execution_profile="small_test")
     with pytest.raises(ValueError):fleet(measurement=dict(start="2026-11-01T00:00:00+09:00",end="2026-12-02T00:00:00+09:00"))
     p=json.loads((ROOT/"configs/mqtt.operations.example.json").read_text())
     profile=control.MQTTProfile(**p)

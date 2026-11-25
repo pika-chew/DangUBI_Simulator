@@ -13,9 +13,49 @@ def execute(manager, job, data, worker, timeout):
     started = time.monotonic()
     started_wall_ms = time.time()*1000
     paused_seconds = 0.0
+    paused_at = None
     result = job.result.copy()
-    operations=data.get("execution_profile")=="operations"
-    result.update(assignments=data["assignments"][:100] if operations else data["assignments"],assignment_count=len(data["assignments"]), model_version="schedule-obd-5/journey-8-events-3",
+    checkpoint = data.get("schedule_checkpoint")
+    resume_ms = checkpoint["virtual_ms"] if checkpoint else 0
+    confirmed = dict(checkpoint["confirmed"]) if checkpoint else {}
+    previous_count = checkpoint["count"] if checkpoint else 0
+    confirmed_count = previous_count
+    result["processed_messages"] = previous_count
+    if checkpoint:
+        result["recovery_confirmed_before"] = previous_count
+    alias = data.get("vehicle_alias") or {}
+    vehicle_by_alias = {value: key for key, value in alias.items()}
+    wire_id = lambda vehicle: alias.get(vehicle, vehicle)
+    due_offset = data.get("due_offset", lambda ts: ts - data["measurement_start_ms"])
+
+    def active_ms(now):
+        return resume_ms + ((paused_at if paused_at is not None else now) - started - paused_seconds) * 1000
+
+    def checkpoint_position():
+        if not data["realtime"]:
+            return result.get("simulation_time_ms", 0)
+        position = min(data["duration_ms"], int(active_ms(time.monotonic())))
+        head = bounded.peek(bounded.heads) if bounded else None
+        return min(position, int(due_offset(head["due"]))) if head else position
+
+    def message_position(message):
+        return [message["ts"], int(message["ty"] == 3)]
+
+    def record_confirmed(vehicle, position):
+        nonlocal confirmed_count
+        if checkpoint is not None:
+            confirmed[vehicle] = position
+            confirmed_count += 1
+
+    def on_confirm(command, fields):
+        if command == "publish":
+            wire_vehicle = fields["vehicle_id"]
+            position = advancing.pop(id(fields["message"]))
+            record_confirmed(vehicle_by_alias.get(wire_vehicle, wire_vehicle), position)
+
+    advancing = {}
+    paginate_assignments = len(data["assignments"]) > 100
+    result.update(assignments=data["assignments"][:100] if paginate_assignments else data["assignments"],assignment_count=len(data["assignments"]), model_version="schedule-obd-5/journey-8-events-3",
                   microtrip_count=0, trip_count=0, schedule_delay_ms=0)
     last_save = 0.0
     result["execution_timing"]={}
@@ -27,8 +67,9 @@ def execute(manager, job, data, worker, timeout):
     sequences={}
     cleanup=True
     result["transport"]="mqtt" if mqtt else "dry_run"
+    result["transmission_pacing"] = "basic" if data["realtime"] else "fast"
     if mqtt:
-        result.update(unsent_messages=result["planned_messages"], connection_count=0, disconnect_count=0)
+        result.update(unsent_messages=result["planned_messages"]-previous_count, connection_count=0, disconnect_count=0)
 
     def budget():
         if not mqtt:return
@@ -49,10 +90,11 @@ def execute(manager, job, data, worker, timeout):
     def sync_mqtt():
         if bridge:
             result.update(bridge.stats)
-            result["unsent_messages"]=max(0,result["planned_messages"]-result["publish_attempts"])
+            result["unsent_messages"]=max(0,result["planned_messages"]-previous_count-result["publish_attempts"])
 
     def finish(state):
         nonlocal cleanup
+        final_position = checkpoint_position() if checkpoint is not None else None
         cleanup_started=time.monotonic()
         if bridge:
             bridge.close(abort=job.stop_requested or state!="completed")
@@ -66,24 +108,31 @@ def execute(manager, job, data, worker, timeout):
             generation.close(abort=job.stop_requested or state!="completed")
             result["generation_session"]=dict(generation.stats,cleanup_confirmed=generation.cleaned,forced_termination=generation.forced or job.forced)
             if bounded:bounded.close()
-            if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if operations else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
+            if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if paginate_assignments else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
             if state=="completed" and job.stop_requested:state="failed" if job.timed_out else "stopped"
             if state=="completed" and (not generation.cleaned or not generation.close_acknowledged):
                 state="failed"
                 result["errors"]=["생성 세션 종료 응답 또는 프로세스 정리를 확인하지 못했습니다."]
         result["execution_timing"]["cleanup_ms"]=(time.monotonic()-cleanup_started)*1000
-        report(state,True)
+        report(state,True,saved_position=final_position)
 
-    def report(state="running", final=False, throttle=False):
+    def report(state="running", final=False, throttle=False, saved_position=None):
         nonlocal last_save
         # 연결 경계가 몰려도 DB에 차량 수만큼 연속 저장하지 않는다.
         # 최종 상태와 상태 전환은 제한하지 않으며 gate의 중단/일시정지 확인도 유지한다.
         if throttle and not final and result.get("job_state")==state and time.monotonic()-last_save<.1:return
-        if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if operations else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
+        if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if paginate_assignments else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
         budget()
-        elapsed = time.monotonic()-started
-        result.update(elapsed_ms=int(elapsed*1000), paused_ms=int(paused_seconds*1000),
-                      active_elapsed_ms=int((elapsed-paused_seconds)*1000),
+        now = time.monotonic()
+        elapsed = now-started
+        paused = paused_seconds + (now - paused_at if paused_at is not None else 0)
+        if checkpoint is not None:
+            position = checkpoint_position() if saved_position is None else saved_position
+            result["schedule_checkpoint"] = {**checkpoint, "virtual_ms": max(resume_ms, position),
+                                             "confirmed": dict(confirmed), "count": confirmed_count}
+            result["recovery_available"] = state != "completed"
+        result.update(elapsed_ms=int(elapsed*1000), paused_ms=int(paused*1000),
+                      active_elapsed_ms=int((elapsed-paused)*1000),
                       remaining_messages=max(0,result["planned_messages"]-result["processed_messages"]),
                       job_state=state, state=("mqtt_completed" if mqtt else "dry_run_completed") if final and state=="completed" else "mqtt_failed" if mqtt and final and state=="failed" else state,
                       connection_cleanup_confirmed=final and cleanup,
@@ -95,7 +144,7 @@ def execute(manager, job, data, worker, timeout):
         last_save = time.monotonic()
 
     def gate(due=None):
-        nonlocal paused_seconds
+        nonlocal paused_at, paused_seconds
         while True:
             now=time.monotonic()
             if now-started >= timeout:
@@ -103,10 +152,15 @@ def execute(manager, job, data, worker, timeout):
                 job.stop_requested=True
             if job.stop_requested:
                 return False
+            if job.pause_requested and paused_at is None:
+                paused_at = now
+            elif not job.pause_requested and paused_at is not None:
+                paused_seconds += now - paused_at
+                paused_at = None
             if publisher:
                 publisher.pump(allow_start=not job.pause_requested,
-                               elapsed_ms=(now-started-paused_seconds)*1000,
-                               origin_ms=started_wall_ms+paused_seconds*1000)
+                               elapsed_ms=active_ms(now),
+                               origin_ms=started_wall_ms+paused_seconds*1000-resume_ms)
                 sync_mqtt()
             if job.pause_requested:
                 before=time.monotonic()
@@ -114,9 +168,8 @@ def execute(manager, job, data, worker, timeout):
                 if result.get("job_state") != state or before-last_save >= .5:
                     report(state)
                 time.sleep(.05)
-                paused_seconds += time.monotonic()-before
                 continue
-            elapsed=now-started-paused_seconds
+            elapsed=active_ms(now)/1000
             result["simulation_time_ms"]=min(data["duration_ms"],int(elapsed*1000)) if data["realtime"] else result.get("simulation_time_ms",0)
             # 짧은 ACK 제한시간 안에도 중단 가능한 진행 상태를 확인한다.
             # 메시지마다 저장하지 않고 진행 중 MQTT 명령이 있을 때만 최대10회/초로 갱신한다.
@@ -126,18 +179,21 @@ def execute(manager, job, data, worker, timeout):
                 return True
             time.sleep(min(.05,max(0,(due-elapsed*1000)/1000)))
 
-    due_offset=data.get("due_offset",lambda ts:ts-data["measurement_start_ms"])
-    # 시험 실행 VIN: 생성은 내부 ID, 전송 토픽·본문 vehicleId는 시험 VIN(가명처리 없음).
-    alias=data.get("vehicle_alias") or {}
-    wire_id=lambda vehicle:alias.get(vehicle,vehicle)
-
     def consume(timestamp,vehicle,message,synthetic):
+        position = message_position(message)
+        if checkpoint is not None and position <= confirmed.get(vehicle, [-1, -1]):
+            return
         encoded=None
         if mqtt:
             if synthetic:raise MQTTFailure("시험용 Trip은 외부 전송할 수 없습니다.")
             encoded=data["validate_message"](message)
             if alias:encoded=with_vehicle_id(wire_id(vehicle),encoded)
-            if not publisher.enqueue("publish",gate,vehicle_id=wire_id(vehicle),message=encoded if encoded is not None else message):return
+            outbound = encoded if encoded is not None else message
+            if not publisher.enqueue("publish",gate,vehicle_id=wire_id(vehicle),message=outbound):return
+            if checkpoint is not None:
+                advancing[id(outbound)] = position
+        else:
+            record_confirmed(vehicle, position)
         due=due_offset(timestamp)
         sequences[vehicle]=sequences.get(vehicle,0)+1
         result["processed_messages"]+=1
@@ -146,7 +202,7 @@ def execute(manager, job, data, worker, timeout):
         result["trip_count" if message["ty"]==3 else "microtrip_count"]+=1
         result["simulation_time_ms"]=int(due)
         if data["realtime"]:
-            result["schedule_delay_ms"]=max(result["schedule_delay_ms"],int((time.monotonic()-started-paused_seconds)*1000-due))
+            result["schedule_delay_ms"]=max(result["schedule_delay_ms"],int(active_ms(time.monotonic())-due))
         if len(result["samples"])<10:
             result["samples"].append(dict(vehicle_id=vehicle,vin=alias.get(vehicle),client_id=data["client_by_vehicle"][vehicle],topic=f"{data["mqtt"]["topic_prefix"]}/{job.id}/{wire_id(vehicle)}/obd" if mqtt else "",sequence=sequences[vehicle],message=shown,synthetic_trip=synthetic))
 
@@ -157,7 +213,8 @@ def execute(manager, job, data, worker, timeout):
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
             publisher=SchedulePublisher(bridge,result,{wire_id(v):c for v,c in data["client_by_vehicle"].items()},data["measurement_start_ms"],on_account=budget,due_offset=due_offset,
-                                        queue_capacity=data.get("transmission_queue_messages",100),queue_bytes=data.get("transmission_queue_bytes",1048576))
+                                        queue_capacity=data.get("transmission_queue_messages",100),queue_bytes=data.get("transmission_queue_bytes",1048576),
+                                        on_confirm=on_confirm if checkpoint is not None else None,measure_schedule=data["realtime"])
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
                     if not gate():break

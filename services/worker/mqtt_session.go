@@ -119,6 +119,9 @@ func newMQTTSession(req Request) (*mqttSession, error) {
 	}
 	validID := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 	maxAssignments := 100
+	if req.VehicleEnvelope {
+		maxAssignments = 1000
+	}
 	if p.ExecutionProfile == "operations" {
 		maxAssignments = 25000
 	}

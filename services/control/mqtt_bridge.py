@@ -1,4 +1,5 @@
 """한 Go 송신 프로세스의 고정 Client들을 명령 ID로 병행 제어한다."""
+import hashlib
 import json
 import queue
 import subprocess
@@ -9,6 +10,14 @@ from services.control.message_codec import encode_command
 
 class MQTTFailure(Exception):
     pass
+
+
+def mqtt_destination(profile):
+    """복구 시 브로커와 토픽이 일치하는지 확인하는 식별값."""
+    if profile is None:
+        return None
+    route = f"{profile['broker_url']}\n{profile.get('topic_prefix', 'sim')}"
+    return hashlib.sha256(route.encode()).hexdigest()
 
 
 class MQTTBridge:

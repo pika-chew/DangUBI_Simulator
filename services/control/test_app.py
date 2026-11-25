@@ -802,7 +802,7 @@ def test_fleet_probability_extremes_limits_and_weekends(client):
     assert off["planned_messages"]==0 and off["observed_trip_count"]==0
     weekend=dict(body,measurement={"start":"2026-11-21T00:00:00+09:00","end":"2026-11-23T00:00:00+09:00"},weekend_activity_probability=0.0)
     assert client.post("/api/fleets/preview",json=weekend).json()["observed_trip_count"]==0
-    for invalid in [dict(body,vehicle_count=101),dict(body,pattern_mix={"commute":100,"daytime":20,"flexible":0}),dict(body,road_mix={"urban":1}),dict(body,daily_driving_minutes=480,vehicle_variation_percent=50,daily_variation_percent=50)]:
+    for invalid in [dict(body,vehicle_count=1001),dict(body,pattern_mix={"commute":100,"daytime":20,"flexible":0}),dict(body,road_mix={"urban":1}),dict(body,daily_driving_minutes=480,vehicle_variation_percent=50,daily_variation_percent=50)]:
         assert client.post("/api/fleets/preview",json=invalid).status_code==422
     large=dict(body,vehicle_count=100,measurement={"start":"2026-11-01T00:00:00+09:00","end":"2026-12-01T00:00:00+09:00"})
     response=client.post("/api/fleets/preview?limit=3",json=large)
@@ -974,7 +974,7 @@ def test_checkpoint_clear_during_request_and_synthetic_state(client,monkeypatch)
 
 def test_workspace_plan_and_existing_run_share_history(client):
     old=client.post("/api/runs",json=request()).json()
-    settings=dict(fleet_example(),vehicle_count=1)
+    settings=dict(fleet_example(), vehicle_count=1, measurement={**fleet_example()["measurement"], "end":"2026-11-18T00:00:00+09:00"})
     response=client.post("/api/workspace/plans",json={"title":"도심 출퇴근 확인","fleet":settings})
     assert response.status_code==201,response.text
     plan=response.json()
@@ -1052,7 +1052,7 @@ def test_workspace_schedule_execution_matches_query_and_mapping(client):
     saved=client.post('/api/workspace/plans',json={'title':'전체 자동 실행','schedule':schedule}).json()
     rows=client.post('/api/schedules/preview',json=schedule).json()['trips']
     expected=client.post('/api/schedules/obd/v000001/'+rows[0]['trip_key'],json={'schedule':schedule}).json()
-    started=client.post('/api/workspace/execute',json={'plan_key':saved['key'],'realtime':False,'mapping_mode':'dedicated'})
+    started=client.post('/api/workspace/execute',json={'plan_key':saved['key'],'realtime':False,'mapping_mode':'shared'})
     assert started.status_code==202,started.text
     result=wait_workspace_job(client,started.json()['id'])['result']
     assert result['job_state']=='completed',result
@@ -1067,10 +1067,62 @@ def test_workspace_schedule_execution_matches_query_and_mapping(client):
 
 
 def test_workspace_schedule_execution_rejects_long_plan(client):
-    saved=client.post('/api/workspace/plans',json={'title':'장기 일정','fleet':fleet_example()}).json()
-    response=client.post('/api/workspace/execute',json={'plan_key':saved['key']})
+    # 시험 일정은 최대 7일(2026-11-25 결정). 3일 예시는 허용하고 7일을 넘는 일정은 거절한다.
+    assert client.post('/api/workspace/plans',json={'title':'3일 일정','fleet':fleet_example()}).status_code==201
+    long=fleet_example()|{"measurement":{"start":"2026-11-17T00:00:00+09:00","end":"2026-11-24T00:00:01+09:00"}}
+    response=client.post('/api/workspace/plans',json={'title':'장기 일정','fleet':long})
     assert response.status_code==422
     assert client.get('/api/health').json()['active_job_id'] is None
+
+
+def test_trial_accepts_week_and_1000_vehicles_including_last_vehicle(client):
+    schedule = scheduled_obd_body()["schedule"]
+    schedule["measurement"] = {"start": "2026-11-17T00:00:00+09:00", "end": "2026-11-24T00:00:00+09:00"}
+    schedule["vehicles"] = [{"vehicle_id": f"v{i:06d}", "trips": []} for i in range(1, 1001)]
+    schedule["vehicles"][-1]["trips"] = [
+        {"start": "2026-11-17T13:00:00+09:00", "end": "2026-11-17T13:00:04+09:00", "road_profile": "urban"},
+        {"start": "2026-11-23T18:00:00+09:00", "end": "2026-11-23T18:00:04+09:00", "road_profile": "mixed"},
+    ]
+    plan = client.post("/api/workspace/plans", json={"title": "1,000대 시험", "schedule": schedule})
+    assert plan.status_code == 201, plan.text
+    started = client.post("/api/workspace/execute", json={"plan_key": plan.json()["key"], "realtime": False})
+    assert started.status_code == 202, started.text
+    result = wait_workspace_job(client, started.json()["id"])["result"]
+    assert result["job_state"] == "completed", result["errors"]
+    assert result["assignment_count"] == 1000
+    assert result["trip_count"] == 2
+    assert {sample["vehicle_id"] for sample in result["samples"]} == {"v001000"}
+    schedule["measurement"]["end"] = "2026-11-24T00:00:01+09:00"
+    too_long = client.post("/api/workspace/plans", json={"title": "기간 초과", "schedule": schedule})
+    assert too_long.status_code == 422 and "7일" in too_long.text
+    schedule["measurement"]["end"] = "2026-11-24T00:00:00+09:00"
+    schedule["vehicles"].append({"vehicle_id": "v001001", "trips": []})
+    assert client.post("/api/workspace/plans", json={"title": "상한 초과", "schedule": schedule}).status_code == 422
+
+
+def test_trial_weekly_fleet_matches_daily_patterns_and_parking(client):
+    from collections import Counter
+    from datetime import datetime
+    from services.control.schedule import KST
+
+    body = fleet_example()
+    del body["daily_driving_minutes"]
+    body.update(
+        vehicle_count=1000, fleet_version="fleet-plan-4", trip_min_minutes=3, trip_max_minutes=120,
+        pattern_mix={"commute": 100, "daytime": 0, "flexible": 0},
+        day_off_probability=0, weekend_activity_probability=0,
+        measurement={"start": "2026-11-16T00:00:00+09:00", "end": "2026-11-23T00:00:00+09:00"},
+    )
+    created = client.post("/api/workspace/plans", json={"title": "평일 출퇴근", "fleet": body})
+    assert created.status_code == 201, created.text
+    assert created.json()["planned_messages"] > 10000
+    selected = client.post("/api/fleets/preview?vehicle_id=v001000", json=body)
+    assert selected.status_code == 200, selected.text
+    trips = selected.json()["trips"]
+    per_day = Counter(datetime.fromtimestamp(t["start_ms"] / 1000, KST).weekday() for t in trips)
+    assert set(per_day) == set(range(5))
+    assert all(count >= 2 for count in per_day.values())
+    assert all(nxt["start_ms"] - last["end_ms"] >= 1800000 for last, nxt in zip(trips, trips[1:]))
 
 
 def test_workspace_schedule_pause_stop_and_no_fake_trip(client):
@@ -1119,6 +1171,7 @@ def test_bounded_fleet_record_and_obd_without_daily_target(client):
     import json
     body=json.loads((Path(__file__).resolve().parents[2]/"configs/fleet-bounded.example.json").read_text(encoding="utf-8"))
     body.update(vehicle_count=2,trip_min_minutes=4,trip_max_minutes=9,day_off_probability=0,weekend_activity_probability=1)
+    body["measurement"] = {"start": "2026-11-17T00:00:00+09:00", "end": "2026-11-18T00:00:00+09:00"}
     created=client.post("/api/workspace/plans",json={"title":"범위 운행", "fleet":body})
     assert created.status_code==201,created.text
     record=created.json()

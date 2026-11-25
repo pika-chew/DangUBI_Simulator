@@ -7,11 +7,12 @@ from services.control.message_codec import encode_command
 
 
 class SchedulePublisher:
-    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None,queue_capacity=100,queue_bytes=1048576,clients=None,on_confirm=None):
+    def __init__(self,bridge,result,client_by_vehicle,measurement_start_ms=0,on_account=None,due_offset=None,queue_capacity=100,queue_bytes=1048576,clients=None,on_confirm=None,measure_schedule=True):
         self.bridge=bridge
         self.on_account=on_account
         # 상시 운영: 명령이 PUBACK 확인으로 끝날 때 차량별 진행을 기록한다.
         self.on_confirm=on_confirm
+        self.measure_schedule=measure_schedule
         self.due_offset=due_offset or (lambda ts:ts-measurement_start_ms)
         self.clients=client_by_vehicle
         # 상시 운영은 차량 0대로 시작할 수 있어 Client 풀을 따로 받는다.
@@ -82,7 +83,7 @@ class SchedulePublisher:
             client=self.ready.popleft();self.ready_set.remove(client)
             queue=self.queues[client]
             command,fields,size=queue[0]
-            if command=="publish":
+            if command=="publish" and self.measure_schedule:
                 fields=dict(fields,due_at_ms=int(due_origin_ms+self.due_offset(fields["message"]["ts"])))
             try:identifier=self.bridge.submit(command,**fields)
             except MQTTFailure:

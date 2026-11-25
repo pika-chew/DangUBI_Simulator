@@ -293,7 +293,7 @@ def child(case,profile_path,worker,temporary):
             if case.get("local_scale"):run_id=start_scale(control.JOBS)["id"]
             else:
                 response=client.post("/api/workspace/execute",json=dict(plan_key=plan.json()["key"],transport="mqtt",confirm_mqtt=True,
-                         generation_workers=case["workers"],mapping_mode="dedicated" if case["clients"]==case["vehicles"] else "shared",
+                         generation_workers=case["workers"],mapping_mode="shared",
                          client_count=case["clients"],connection_lifetime=case.get("lifetime","always")))
                 if response.status_code!=202:raise RuntimeError("측정 실행 시작 실패")
                 run_id=response.json()["id"]

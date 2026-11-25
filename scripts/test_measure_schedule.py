@@ -56,7 +56,7 @@ class ScheduleMeasurementTest(unittest.TestCase):
         self.assertEqual(ScheduleExecutionRequest(plan_key="test",client_count=25000).client_count,25000)
         with self.assertRaises(ValidationError):ScheduleExecutionRequest(plan_key="test",client_count=25001)
         with self.assertRaises(ValidationError):MQTTProfile(broker_url="ssl://127.0.0.1:1",ca_file="a",cert_file="b",key_file="c",max_clients=1000)
-        self.assertEqual(ScheduleRequest.model_fields["vehicles"].metadata[1].max_length,100)
+        self.assertEqual(ScheduleRequest.model_fields["vehicles"].metadata[1].max_length,1000)
 
     def test_sustained_local_case_respects_existing_message_and_time_limits(self):
         case=dict(name="sustained",vehicles=160,clients=160,workers=2,local_scale=True,driving_seconds=90)

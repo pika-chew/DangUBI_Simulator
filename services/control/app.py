@@ -1,6 +1,7 @@
 """로컬 제어 API: 기본 dry_run, 서버 프로필과 확인을 거친 소량 MQTT 시험."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -9,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from services.control.jobs import JobManager, ACTIVE
 from services.control.runtime import RuntimePaths
 from services.control.transmission_goal import assess
-from services.control.operating import PROFILES, MAX_VEHICLES
+from services.control.operating import PROFILES, MAX_VEHICLES, TRIAL_DAYS, TRIAL_DURATION_MS
 from services.control.registry import Registry, RegistryError, DevelopmentPseudonyms
 from services.control.vin import trial_vins
 from pathlib import Path
@@ -279,6 +280,8 @@ def prepare_worker(body: RunRequest, operation: str, run_id: str):
         data["generation"] = body.generation.model_dump()
     timeout = 30
     if operation == "mqtt":
+        if body.config.mapping_mode != "shared":
+            raise HTTPException(422, detail="신규 MQTT 전송은 연결 풀만 지원합니다.")
         if not body.confirm_mqtt:
             raise HTTPException(409, detail="실제 MQTT 송신 확인을 선택하세요.")
         profile = mqtt_profile("small_test")
@@ -405,6 +408,30 @@ def resume_job(run_id: str):
     get_job(run_id)
     JOBS.pause(run_id, False)
     return get_job(run_id)
+
+
+class RecoverScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    confirm_mqtt: bool = False
+
+
+@app.post("/api/jobs/{run_id}/recover", status_code=202)
+def recover_schedule(run_id: str, body: RecoverScheduleRequest):
+    run = get_job(run_id)
+    request, result = run["request"], run["result"]
+    if (result.get("job_state") not in ("interrupted", "stopped", "failed")
+            or not result.get("schedule_checkpoint") or not request.get("schedule_plan")):
+        raise HTTPException(409, detail="이어서 재생할 시험 실행 체크포인트가 없습니다.")
+    config = request["config"]
+    generation = request["generation"]
+    execution = ScheduleExecutionRequest(
+        plan_key=request["source_plan_key"], transport=request["transport"], realtime=request["realtime"],
+        mapping_mode=config["mapping_mode"], client_count=config["client_count"],
+        connection_lifetime=config["connection_lifetime"], force_end_trip=request["force_end_trip"],
+        confirm_mqtt=body.confirm_mqtt, generation_workers=generation["workers"],
+        generation_queue_messages=generation["queue_messages"], generation_queue_bytes=generation["queue_bytes"],
+    )
+    return execute_saved_schedule(execution, recovery=run)
 
 
 @app.get("/api/runs")
@@ -539,6 +566,12 @@ def workspace_create_plan(body: WorkspacePlanRequest):
     payload=body.model_dump(exclude_none=True)
     if len(json.dumps(payload).encode())>2097152:
         raise HTTPException(422,detail="일정 설정은2MiB 이하여야 합니다.")
+    from services.control.schedule import instant
+    source = body.fleet or body.schedule
+    if (body.fleet is None or body.fleet.execution_profile == "small_test") and (
+        instant(source.measurement.end) - instant(source.measurement.start) > TRIAL_DURATION_MS
+    ):
+        raise HTTPException(422, detail=f"시험 일정은 최대 {TRIAL_DAYS}일입니다.")
     try:
         summary=preview_fleet(body.fleet) if body.fleet is not None else plan_schedule(body.schedule)
     except ValueError as error:
@@ -575,35 +608,53 @@ class ScheduleExecutionRequest(BaseModel):
 
 @app.post("/api/workspace/execute", status_code=202)
 def workspace_execute(body: ScheduleExecutionRequest):
+    return execute_saved_schedule(body)
+
+
+def execute_saved_schedule(body: ScheduleExecutionRequest, recovery=None):
     from functools import partial
     from services.control.schedule import instant
     from services.control.schedule_execution import execute
-    saved = workspace_get_record(body.plan_key)
-    if saved["kind"] != "plan":
-        raise HTTPException(422, detail="저장된 일정을 선택하세요.")
-    source = WorkspacePlanRequest.model_validate(saved["request"])
+    from services.control.mqtt_bridge import mqtt_destination
+    if recovery:
+        saved = {"planned_messages": recovery["result"]["planned_messages"]}
+        source = WorkspacePlanRequest.model_validate(recovery["request"]["schedule_plan"])
+    else:
+        saved = workspace_get_record(body.plan_key)
+        if saved["kind"] != "plan":
+            raise HTTPException(422, detail="저장된 일정을 선택하세요.")
+        source = WorkspacePlanRequest.model_validate(saved["request"])
     req = source.fleet or source.schedule
     mode=source.fleet.execution_profile if source.fleet else "small_test"
     limits=PROFILES[mode]
     if mode!="small_test" and _OPERATION is not None and _OPERATION.running():
-        raise HTTPException(409, detail="상시 운영 중에는 시험 실행을 소량 시험 상한(100대·1시간·10,000건)으로만 할 수 있습니다.")
+        raise HTTPException(409, detail="상시 운영 중에는 이전 운영 프로필을 실행할 수 없습니다.")
     start, end = instant(req.measurement.start), instant(req.measurement.end)
-    if end-start > limits["max_duration_ms"] or saved["planned_messages"] > limits["max_messages"]:
-        raise HTTPException(422, detail="소량 일정 실행은 측정 기간1시간·10,000메시지 이하입니다. 운영 프로필은 최대30일·설정된 메시지 상한을 적용합니다.")
-    vehicle_ids=[f"v{i:06d}" for i in range(1,source.fleet.vehicle_count+1)] if mode=="operations" else [v["vehicle_id"] for v in saved["result"]["vehicles"]]
+    if end-start > limits["max_duration_ms"]:
+        raise HTTPException(422, detail=f"일정 기간은 최대 {limits['max_duration_ms'] // 86400000}일입니다.")
+    if saved["planned_messages"] > limits["max_messages"]:
+        raise HTTPException(422, detail="예정 메시지 건수가 실행 상한을 초과했습니다.")
+    if recovery:
+        vehicle_ids = recovery["result"]["schedule_checkpoint"]["vehicles"]
+    elif source.fleet:
+        vehicle_ids = [f"v{i:06d}" for i in range(1, source.fleet.vehicle_count + 1)]
+    else:
+        vehicle_ids = sorted(v.vehicle_id for v in source.schedule.vehicles)
+    if not recovery and body.mapping_mode != "shared":
+        raise HTTPException(422, detail="신규 일정 실행은 연결 풀만 지원합니다.")
     clients=len(vehicle_ids) if body.mapping_mode=="dedicated" else (body.client_count if body.client_count is not None else min(limits["default_clients"],len(vehicle_ids)))
-    if mode=="small_test" and (clients>100 or body.generation_queue_messages>2000 or body.generation_queue_bytes>16777216):
-        raise HTTPException(422,detail="소량 실행의 Client·대기열 상한을 초과했습니다.")
+    if mode=="small_test" and (body.generation_queue_messages>2000 or body.generation_queue_bytes>16777216):
+        raise HTTPException(422,detail="시험 실행의 대기열 상한을 초과했습니다.")
     if clients > len(vehicle_ids):
         raise HTTPException(422, detail="연결 풀 Client 수는 차량 수 이하여야 합니다.")
     from services.control.schedule_cursor import provider_for
     stream=None
-    if mode=="operations":
+    if source.fleet and (mode=="operations" or len(vehicle_ids)>100):
         from services.control.fleet_execution import FleetExecution
         stream=FleetExecution(source.fleet,WORKER,body.force_end_trip)
     trip_provider=stream.trips if stream else provider_for(source)
     planned=saved["planned_messages"]
-    if body.force_end_trip:
+    if body.force_end_trip and not recovery:
         for vehicle in vehicle_ids:
             for row in trip_provider(vehicle):
                 if row["continues_after_window"]:planned+=0 if (end-row["start_ms"])%req.interval_ms==0 else 1
@@ -613,18 +664,21 @@ def workspace_execute(body: ScheduleExecutionRequest):
     if body.transport=="mqtt":
         if not body.confirm_mqtt:
             raise HTTPException(409,detail="실제 MQTT 송신 확인을 선택하세요.")
-        if not body.realtime or body.force_end_trip:
-            raise HTTPException(422,detail="일정 MQTT는 실제 시간·정상 Trip만 지원합니다. 가상시간 또는 시험용 Trip을 해제하세요.")
-        profile=mqtt_profile(mode)
+        if body.force_end_trip:
+            raise HTTPException(422,detail="시험용 종료 Trip은 실제 MQTT로 전송할 수 없습니다.")
+        if mode=="operations" and not body.realtime:
+            raise HTTPException(422,detail="이전 운영 프로필은 기본 전송만 지원합니다.")
+        profile=mqtt_profile()
         if mode=="operations" and profile["execution_profile"]!="operations":
             raise HTTPException(409,detail="운영 MQTT 서버 프로필이 필요합니다. 현재 소량 시험 설정은 유지됩니다.")
-        if clients>profile["max_clients"] or planned>profile["max_messages"] or end-start>=profile["max_duration_seconds"]*1000:
+        minimum_seconds = (end-start)/1000 if body.realtime else planned/profile["publish_per_second"]
+        if clients>profile["max_clients"] or planned>profile["max_messages"] or minimum_seconds>=profile["max_duration_seconds"]:
             raise HTTPException(422,detail="서버 MQTT 연결·메시지·시간 상한을 초과했습니다. 접속·응답 여유를 포함해 일정을 줄이세요.")
         if mode=="operations":
             profile={**profile,"max_duration_seconds":min(profile["max_duration_seconds"],(end-start+999)//1000+600)}
         if not WORKER.is_file():
             raise HTTPException(503,detail="Worker가 준비되지 않았습니다.")
-    run_id=uuid4().hex
+    run_id = recovery["id"] if recovery else uuid4().hex
     # 시험 실행은 VIN을 그대로 전송한다(가명처리 없음). 이전 운영 프로필(개발 측정) 경로는 기존 형식 유지.
     vehicle_alias=plan_vins(fleet=source.fleet,schedule=source.schedule) if mode=="small_test" else {}
     assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}",**({"vin":vehicle_alias[v]} if vehicle_alias else {})} for i,v in enumerate(vehicle_ids)]
@@ -639,14 +693,26 @@ def workspace_execute(body: ScheduleExecutionRequest):
         return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"execution_profile":mode,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":stream.generate if stream else generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
     if stream:data["generate_batch"]=stream.generate_many
+    if len(vehicle_ids) > 100:
+        data["sequential"] = True
     if vehicle_alias:data["vehicle_alias"]=vehicle_alias
     if profile:data["mqtt"]=profile
+    if mode == "small_test":
+        if not WORKER.is_file():
+            raise HTTPException(503, detail="Worker가 준비되지 않았습니다.")
+        identity = {"worker": hashlib.sha256(WORKER.read_bytes()).hexdigest(),
+                    "destination": mqtt_destination(profile), "vehicles": vehicle_ids,
+                    "aliases": vehicle_alias}
+        if recovery and any(recovery["result"]["schedule_checkpoint"].get(k) != value for k, value in identity.items()):
+            raise HTTPException(409, detail="복구할 Worker, 차량 VIN 또는 MQTT 전송 대상이 바뀌었습니다.")
+        data["schedule_checkpoint"] = (recovery["result"]["schedule_checkpoint"] if recovery
+                                       else {**identity, "virtual_ms": 0, "confirmed": {}, "count": 0})
     if mode=="operations":
         data.update(transmission_queue_messages=min(4096,max(100,clients*2)),transmission_queue_bytes=8388608,stop_grace_seconds=15)
     request["generation"]={"workers":body.generation_workers,"queue_messages":body.generation_queue_messages,"queue_bytes":body.generation_queue_bytes}
     data.update(trip_provider=trip_provider,generation_workers=body.generation_workers,generation_queue_messages=body.generation_queue_messages,generation_queue_bytes=body.generation_queue_bytes,execution_checkpoint_stats=stream.stats if stream else execution_checkpoints.stats)
-    timeout=profile["max_duration_seconds"] if profile else (end-start)/1000+600 if mode=="operations" else (end-start)/1000+30 if body.realtime else 120
-    return JOBS.start(run_id,request,data,WORKER,timeout,runner=partial(execute,JOBS))
+    timeout = profile["max_duration_seconds"] if profile else max(120, (end-start)/1000 + 600)
+    return JOBS.start(run_id,request,data,WORKER,timeout,runner=partial(execute,JOBS),recovery=recovery)
 
 
 class DeleteWorkspaceRecords(BaseModel):
@@ -749,10 +815,13 @@ def operations_start(body: StartOperation):
             raise HTTPException(409, detail="개발용 가명 발급기로 만든 가명 VIN은 외부 브로커 전송에 쓸 수 없습니다. vault 연동 후 사용하세요(로컬 브로커 검증만 허용).")
         if profile["execution_profile"]!="operations":
             raise HTTPException(409, detail="운영 MQTT 서버 프로필이 필요합니다.")
-        needed=settings.duration_cap_days*86400+6*3600
+        saved=registry().operation()
+        checkpoint, window_end = saved["virtual_checkpoint_ms"], saved["window_end_ms"]
+        remaining = ((window_end-checkpoint+999)//1000 if checkpoint is not None and window_end is not None and checkpoint<window_end
+                     else settings.duration_cap_days*86400)
+        needed=remaining+600
         if settings.client_count>profile["max_clients"] or needed>profile["max_duration_seconds"]:
-            raise HTTPException(422, detail="서버 MQTT Client 수 또는 실행 시간 상한이 상시 운영 설정보다 작습니다(기간 상한+정리 6시간).")
-        profile={**profile,"max_duration_seconds":needed}
+            raise HTTPException(422, detail="서버 MQTT Client 수 또는 실제 실행시간 상한을 확인하세요(가상 운영 기간과 정리 여유 10분 이상 필요).")
     try:
         operation().start(settings, profile)
     except RuntimeError as error:
@@ -764,6 +833,16 @@ def operations_start(body: StartOperation):
 def operations_stop(body: StopOperation):
     try:
         operation().stop(force=body.force)
+    except RuntimeError as error:
+        raise HTTPException(409, detail=str(error)) from error
+    return operation().status()
+
+
+@app.post("/api/operations/pause", status_code=202)
+@app.post("/api/operations/resume", status_code=202)
+def operations_pause(request: Request):
+    try:
+        operation().pause(request.url.path.endswith("/pause"))
     except RuntimeError as error:
         raise HTTPException(409, detail=str(error)) from error
     return operation().status()
@@ -811,6 +890,48 @@ def operations_remove(body: RemoveVehicles):
     if not body.confirm:
         raise HTTPException(409, detail="선택한 차량을 명부에서 제외하려면 확인이 필요합니다. VIN 일련번호는 재사용하지 않습니다.")
     return registry().request_removal(body.ids)
+
+
+@app.get("/api/operations/vehicles/lookup")
+def operations_vehicle_lookup(q: str = Query(min_length=1, max_length=128)):
+    vehicle=registry().find_vehicle(q)
+    if vehicle is None:
+        raise HTTPException(404, detail="명부 번호 또는 가명 VIN으로 차량을 찾지 못했습니다.")
+    return vehicle
+
+
+@app.get("/api/operations/vehicles/{vehicle_id}/history")
+def operations_vehicle_history(vehicle_id: int, from_ms: int | None = Query(default=None, ge=0, le=4102444800000), to_ms: int | None = Query(default=None, ge=0, le=4102444800000)):
+    if (from_ms is None) != (to_ms is None) or (from_ms is not None and (to_ms<=from_ms or to_ms-from_ms>31*86400000)):
+        raise HTTPException(422, detail="조회 기간은 시작 < 종료이며 최대 31일입니다.")
+    try:
+        return registry().history(vehicle_id, from_ms, to_ms)
+    except RegistryError as error:
+        raise HTTPException(404, detail=str(error)) from error
+
+
+class OperationOBDRequest(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True)
+    checkpoint_epoch: int | None=None  # 공용 이벤트 찾기 화면이 보내는 값. 상시 운영 조회는 중간 상태를 쓰지 않는다.
+    search_events: bool=False
+    event_mask: int=Field(default=0,ge=0,le=383)
+
+
+@app.post("/api/operations/obd/{vehicle_id}/{trip_key}")
+def operations_obd(body: OperationOBDRequest, vehicle_id: int, trip_key: str, start_ms: int | None = Query(default=None, ge=0), end_ms: int | None = Query(default=None, ge=0), offset: int = Query(default=0, ge=0, le=1000000), limit: int = Query(default=100, ge=1, le=100)):
+    from services.control.operation_query import generate as regenerate
+    if not WORKER.is_file():
+        raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
+    if body.event_mask & 128:
+        raise HTTPException(422, detail="예약된 이벤트 비트입니다.")
+    try:
+        trip=registry().history_trip(vehicle_id, trip_key)
+    except RegistryError as error:
+        raise HTTPException(404, detail=str(error)) from error
+    try:
+        return regenerate(trip, WORKER, start_ms, end_ms, offset, limit, body.search_events, body.event_mask)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        raise HTTPException(422, detail=str(error)) from error
 
 
 @app.middleware("http")

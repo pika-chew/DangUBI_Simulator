@@ -12,12 +12,13 @@ import hashlib
 import random
 from types import SimpleNamespace
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from services.control.journey_schedule import varied_day
 from services.control.schedule import KST
 
 PLAN_VERSION = "operations-plan-1"
+MAX_OPERATION_VEHICLES = 20_000
 MIN_PARKING_MS = 1800000
 IDLE_DAY_LIMIT = 60
 
@@ -29,6 +30,7 @@ class OperationSettings(BaseModel):
     interval_ms: int = Field(default=2000, ge=1000, le=60000)
     client_count: int = Field(default=500, ge=1, le=25000)
     duration_cap_days: int = Field(default=7, ge=1, le=30)
+    vehicle_count: int | None = Field(default=None, ge=1, le=MAX_OPERATION_VEHICLES)
     daily_variation_percent: int = Field(default=25, ge=0, le=50)
     departure_jitter_minutes: int = Field(default=30, ge=0, le=120)
     day_off_probability: float = Field(default=0.2, ge=0, le=1)
@@ -36,6 +38,13 @@ class OperationSettings(BaseModel):
     anomaly_events_per_hour: float = Field(default=2, ge=0, le=60)
     anomaly_intensity: str = Field(default="medium", pattern="^(low|medium|high)$")
     generation_workers: int = Field(default=1, ge=1, le=4)
+
+    @field_validator("generation_workers")
+    @classmethod
+    def supported_worker_count(cls, value):
+        if value not in (1, 2, 4):
+            raise ValueError("생성 Worker 수는 1·2·4개만 지원합니다.")
+        return value
 
 
 def vehicle_key(vehicle_id: int) -> str:

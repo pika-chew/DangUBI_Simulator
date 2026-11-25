@@ -15,10 +15,10 @@ ROOT=Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="module")
-def fixture_binary():
+def fixture_binary(tmp_path_factory):
     env=os.environ.copy()
     env.update(GOCACHE=str(ROOT/".local/go-cache"),GOMODCACHE=str(ROOT/".local/go-mod"))
-    target=ROOT/".local/schedule-mqtt-fixture.exe"
+    target=tmp_path_factory.mktemp("schedule-mqtt-broker")/("fixture.exe" if os.name=="nt" else "fixture")
     subprocess.run(["go","test","-c","-o",str(target),"."],cwd=ROOT/"services/worker",env=env,check=True,timeout=120)
     return target
 
@@ -78,8 +78,48 @@ def broker_report(profile):
     raise AssertionError("브로커 결과 대기 초과")
 
 
+def test_trial_pause_and_recover_preserve_mqtt_trip(mqtt_client):
+    client, profile = mqtt_client
+    source = schedule(end="08", interval=1000)
+    source["vehicles"] = [{"vehicle_id": "v000001", "trips": [{
+        "start": "2026-11-18T13:00:00+09:00", "end": "2026-11-18T13:00:06+09:00", "road_profile": "urban"}]}]
+    run_id, _ = start(client, source)
+    job = "/api/jobs/" + run_id
+
+    def wait_for_result(predicate):
+        for _ in range(200):
+            result = client.get(job).json()["result"]
+            if predicate(result):
+                return result
+            time.sleep(.02)
+        raise AssertionError(result)
+
+    wait_for_result(lambda r: r["puback_count"] >= 1)
+    assert client.post(job + "/pause").status_code == 202
+    paused = wait_for_result(lambda r: r["job_state"] == "paused")
+    checkpoint = paused["schedule_checkpoint"]
+    assert 0 < checkpoint["count"] < 7
+    time.sleep(.35)
+    assert client.get(job).json()["result"]["schedule_checkpoint"] == checkpoint
+    assert client.post(job + "/stop").status_code == 202
+    assert finished(client, run_id)["result"]["job_state"] == "stopped"
+    # 서버 재시작에 해당하는 복구는 실행 프로세스가 없는 상태에서 저장 기록만 이용한다.
+    assert client.post(job + "/recover", json={}).status_code == 409
+    response = client.post(job + "/recover", json={"confirm_mqtt": True})
+    assert response.status_code == 202, response.text
+    assert response.json()["id"] == run_id
+    result = finished(client, run_id)["result"]
+    assert result["job_state"] == "completed", result["errors"]
+    assert result["recovery_confirmed_before"] == checkpoint["count"]
+    assert result["schedule_checkpoint"]["count"] == result["planned_messages"] == 7
+    report = broker_report(profile)
+    assert [m["ty"] for m in report["messages"]] == [4] * 6 + [3]
+    assert len({m["vehicleId"] for m in report["messages"]}) == 1
+    assert len({m["pld"]["tid"] for m in report["messages"]}) == 1
+
+
 @pytest.mark.parametrize("workers",[1,2,4])
-@pytest.mark.parametrize("mode,lifetime",[("shared","always"),("shared","while_driving"),("dedicated","always"),("dedicated","while_driving")])
+@pytest.mark.parametrize("mode,lifetime",[("shared","always"),("shared","while_driving")])
 def test_schedule_mqtt_mapping_lifetimes_and_payload(mqtt_client,mode,lifetime,workers):
     client,profile=mqtt_client
     source=schedule()
@@ -158,14 +198,37 @@ def test_schedule_mqtt_slow_ack_backpressure(mqtt_client):
     assert r["transmission"]["peak_queued"]>0 and r["schedule_delay_ms"]>100
 
 
-def test_schedule_mqtt_rejects_virtual_synthetic_and_missing_confirmation(mqtt_client):
+def test_schedule_mqtt_rejects_dedicated_synthetic_and_missing_confirmation(mqtt_client):
     client,_=mqtt_client
     plan=client.post("/api/workspace/plans",json={"title":"거절 시험","schedule":schedule()}).json()
     base={"plan_key":plan["key"],"transport":"mqtt"}
     assert client.post("/api/workspace/execute",json=base).status_code==409
-    for extra in [{"realtime":False},{"force_end_trip":True}]:
+    for extra in [{"mapping_mode":"dedicated"},{"force_end_trip":True}]:
         assert client.post("/api/workspace/execute",json={**base,"confirm_mqtt":True,**extra}).status_code==422
     assert control.JOBS.active_id() is None
+
+
+def test_trial_fast_and_basic_send_identical_payloads(mqtt_client):
+    client, profile = mqtt_client
+    source = schedule()
+    source["vehicles"].extend({"vehicle_id": f"v{i:06d}", "trips": []} for i in range(3, 1000))
+    source["vehicles"][2]["vehicle_id"] = "v001000"
+    basic, _ = start(client, source)
+    basic_result = finished(client, basic)["result"]
+    fast, _ = start(client, source, realtime=False)
+    fast_result = finished(client, fast)["result"]
+    assert basic_result["job_state"] == fast_result["job_state"] == "completed"
+    assert basic_result["assignment_count"] == fast_result["assignment_count"] == 1000
+    assert basic_result["puback_count"] == fast_result["puback_count"] == 6
+    assert fast_result["transmission_goal"]["status"] == "not_applicable"
+    report = broker_report(profile)
+    messages = {
+        run_id: [m for topic, m in zip(report["topics"], report["messages"])
+                 if f"/{run_id}/" in topic]
+        for run_id in (basic, fast)
+    }
+    assert messages[basic] == messages[fast]
+    assert fast_result["elapsed_ms"] + 3000 < basic_result["elapsed_ms"]
 
 
 @pytest.mark.parametrize("mqtt_client",["no_ack"],indirect=True)
@@ -210,7 +273,7 @@ def test_schedule_mqtt_pause_resume_preserves_schedule(mqtt_client):
 
 
 @pytest.mark.parametrize("mqtt_client",["split_ack"],indirect=True)
-@pytest.mark.parametrize("mode,lifetime",[("dedicated","always"),("shared","while_driving")])
+@pytest.mark.parametrize("mode,lifetime",[("shared","always"),("shared","while_driving")])
 def test_schedule_mqtt_slow_client_does_not_block_other_and_global_pacing(mqtt_client,mode,lifetime):
     client,profile=mqtt_client
     source=schedule([{"vehicle_id":vehicle,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
@@ -243,7 +306,7 @@ def test_schedule_mqtt_parallel_failure_accounts_all_attempts_and_queue(mqtt_cli
     client,profile=mqtt_client
     source=schedule([{"vehicle_id":v,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
                      for v in ["v000001","v000002"]],end="03",interval=100)
-    run_id,_=start(client,source,mapping_mode="dedicated",connection_lifetime="while_driving")
+    run_id,_=start(client,source,client_count=2,connection_lifetime="while_driving")
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="failed" and r["connection_cleanup_confirmed"],r
     assert r["publish_attempts"]==r["unconfirmed_messages"]==2 and r["puback_count"]==0
@@ -257,7 +320,7 @@ def test_schedule_mqtt_parallel_pause_drains_active_and_retains_queue(mqtt_clien
     client,_=mqtt_client
     source=schedule([{"vehicle_id":v,"trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:01+09:00","road_profile":"urban"}]}
                      for v in ["v000001","v000002"]],end="03",interval=100)
-    run_id,_=start(client,source,mapping_mode="dedicated",generation_workers=4)
+    run_id,_=start(client,source,client_count=2,generation_workers=4)
     for _ in range(200):
         r=client.get("/api/jobs/"+run_id).json()["result"]
         if r.get("transmission",{}).get("peak_in_flight",0)>=2:break
@@ -325,7 +388,7 @@ def test_schedule_mqtt_slow_generation_uses_workers_and_isolates_ui_cache(mqtt_c
     def forbidden(*args,**kwargs):raise AssertionError("조회 캐시를 실행에서 사용함")
     monkeypatch.setattr(control.CHECKPOINTS,"resume",forbidden)
     monkeypatch.setattr(control.CHECKPOINTS,"put",forbidden)
-    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,mapping_mode="dedicated")
+    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,client_count=3)
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="completed" and r["puback_count"]==18 and r["execution_cleanup_confirmed"],r
     assert r["generation_session"]["peak_active_workers"]>=2
@@ -347,7 +410,7 @@ def test_schedule_mqtt_generation_failure_closes_all_workers_and_sender(mqtt_cli
         return generate(body,vehicle,*args,**kwargs)
     monkeypatch.setattr(control,"generate_scheduled_obd",fail)
     monkeypatch.setattr(schedule_execution,"MQTTBridge",bridge)
-    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,mapping_mode="dedicated")
+    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,client_count=3)
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="failed" and r["execution_cleanup_confirmed"],r
     assert r["generation_session"]["process_starts"]==4 and r["generation_session"]["cleanup_confirmed"]
@@ -366,7 +429,7 @@ def test_schedule_mqtt_sender_pressure_stalls_generation_with_combined_budget(mq
             super().__init__(*args,**kwargs)
             self.state.update(queue_capacity=4,queue_byte_capacity=8192)
     monkeypatch.setattr(schedule_execution,"SchedulePublisher",SmallPublisher)
-    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,mapping_mode="dedicated",
+    run_id,_=start(client,short_parallel_schedule(),generation_workers=4,client_count=3,
                    generation_queue_messages=256,generation_queue_bytes=4194304)
     r=finished(client,run_id)["result"]
     assert r["job_state"]=="completed" and r["puback_count"]==18 and r["execution_cleanup_confirmed"],r

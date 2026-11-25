@@ -1,5 +1,5 @@
 import {InfoHint} from "./InfoHint";
-import {defaultFleet,profileGuide} from "./fleetSettings";
+import {defaultFleet,profileGuide,trialMaxDays} from "./fleetSettings";
 export {defaultFleet} from "./fleetSettings";
 type Mix = { commute: number; daytime: number; flexible: number };
 export type FleetConfig = {
@@ -49,11 +49,11 @@ export function FleetControls({ value: v, onChange, disabled }: { value: FleetCo
     {v.fleet_version!=="fleet-plan-4" && <p className="context-note">이전 시간 배정의 기록입니다. ‘설정 복사’를 하면 현재 최소·최대 시간 배정 방식으로 새 일정을 작성합니다. 원본은 보존합니다.</p>}
     <div className="fields">
       {profile==="operations"
-        ?<div className="context-note legacy-profile"><b>이전 운영 프로필 기록입니다.</b> 운영 프로필은 상시 운영 탭으로 이전되었습니다. 시험 실행은 소량 시험 상한만 사용합니다.<button type="button" onClick={()=>onChange(defaultFleet("small_test",Date.parse(v.measurement.start)))}>소량 시험 조건으로 바꾸기</button></div>
-        :<span className="profile-limits"><b>시험 실행 상한 <Help label="시험 실행 상한" text={guide.info} range={guide.range}/></b><span>전체 실행 · 100대 · 1시간 · 10,000건</span><span>실제 MQTT · 20 Client · 100건 · 측정 30초 미만</span><span>대규모·장기 운영은 상시 운영 탭에서 합니다.</span></span>}
-      {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:100, "데이터를 만들 차량 수입니다. 늘리면 생성량과 처리 부하가 커집니다.")}
-      <label><span className="label-line">측정 시작 (KST) <Help label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발 시각과는 다릅니다." range={`시작 < 종료 · ${profile==="operations"?"최대30일":"전체 실행 최대1시간"} · 1970~2100년`} /></span><input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
-      <label><span className="label-line">측정 종료 (KST) <Help label="측정 종료" text="데이터를 관측할 마지막 시각입니다. 늦출수록 관측량이 늘어납니다." range={profile==="operations"?"측정 기간 최대30일":"전체 실행 최대1시간·10,000건"} /></span><input type="datetime-local" step="1" min={local(v.measurement.start)} max={Number.isFinite(Date.parse(v.measurement.start))?localTime(Date.parse(v.measurement.start)+guide.maxDays*86400000):undefined} value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
+        ?<div className="context-note legacy-profile"><b>이전 운영 프로필 기록입니다.</b> 운영 프로필은 상시 운영 탭으로 이전되었습니다. 시험 실행은 최대 1,000대·{trialMaxDays}일을 지원합니다.<button type="button" onClick={()=>onChange(defaultFleet("small_test",Date.parse(v.measurement.start)))}>시험 조건으로 바꾸기</button></div>
+        :<span className="profile-limits"><b>시험 실행 상한 <Help label="시험 실행 상한" text={guide.info} range={guide.range}/></b><span>최대 1,000대 · {guide.maxDays}일</span><span>실제 MQTT · 서버 상한 적용</span><span>대규모·장기 운영은 상시 운영 탭에서 합니다.</span></span>}
+      {numeric("vehicle_count", "차량 수", 1, v.execution_profile==="operations"?25000:1000, "데이터를 만들 차량 수입니다. 늘리면 생성량과 처리 부하가 커집니다.")}
+      <label><span className="label-line">측정 시작 (KST) <Help label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발 시각과는 다릅니다." range={`시작 < 종료 · 최대 ${guide.maxDays}일 · 1970~2100년`} /></span><input type="datetime-local" step="1" value={local(v.measurement.start)} onChange={e => patch({ measurement: { ...v.measurement, start: iso(e.target.value) } })} /></label>
+      <label><span className="label-line">측정 종료 (KST) <Help label="측정 종료" text="데이터를 관측할 마지막 시각입니다. 늦출수록 관측량이 늘어납니다." range={`측정 기간 최대 ${guide.maxDays}일`} /></span><input type="datetime-local" step="1" min={local(v.measurement.start)} max={Number.isFinite(Date.parse(v.measurement.start))?localTime(Date.parse(v.measurement.start)+guide.maxDays*86400000):undefined} value={local(v.measurement.end)} onChange={e => patch({ measurement: { ...v.measurement, end: iso(e.target.value) } })} /></label>
       <label><span className="label-line">Microtrip 주기 (초) <Help label="Microtrip 주기" text="운행 중 메시지를 만드는 간격입니다. 짧을수록 데이터와 전송량이 늘어납니다." range="0.1~86,400초" /></span><input type="number" min="0.1" max="86400" step="0.1" value={v.interval_ms / 1000} onChange={e => patch({ interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
       <label><span className="label-line">운행 성격 <Help label="운행 성격" text="출퇴근·주간·비정기 차량의 구성을 바꿉니다. 차량별 시간표는 자동 배정합니다." /></span><select value={preset} onChange={e => patch({ pattern_mix: { ...presets[e.target.value] } })}>
         <option value="mixed">혼합 · 출퇴근60% / 주간20% / 비정기20%</option>

@@ -6,7 +6,7 @@ import { SpeedChart } from "./TelemetryChart";
 import type {PlanRecord, PlanInput, View} from "./workspaceTypes";
 import { TripTimeline } from "./TripTimeline";
 import { readJSONResponse } from "./http";
-import { currentFleet } from "./fleetSettings";
+import { currentFleet, trialMaxDays } from "./fleetSettings";
 import { FleetControls, defaultFleet, type FleetConfig } from "./FleetControls";
 
 type Road = "urban" | "highway" | "congested" | "mixed";
@@ -154,11 +154,12 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
     if (source.fleet) setFrozenFleet(source.fleet); else setFrozen(source.schedule!);
     void (async () => {
       try {
-        const p:Plan=source.fleet?.execution_profile==="operations"&&record.result
+        const p:Plan=record.result?.vehicles?.length
           ? {...record.result,trips:[],has_more:false}
           : await post<Plan>(`/api/${source.fleet ? "fleets" : "schedules"}/preview`,input,c.signal);
         if (c.signal.aborted) return;
-        setPlan(p); const id=p.vehicles[0].vehicle_id; setVehicle(id);
+        const id=(p.vehicles.find(v=>v.observed_trip_count>0)??p.vehicles[0]).vehicle_id;
+        setPlan(p); setVehicle(id);
         await vehicleTrips(input,id,c,!!source.fleet);
       } catch (e) { fail(e,c); } finally { done(c); }
     })();
@@ -245,16 +246,16 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       <p className="note">모든 시각은 한국 시간(KST)입니다. 설정을 수정하면 이전 조회를 비우고 새 일정으로 다시 계획합니다.</p>
       <fieldset disabled={!!busy || readOnly} className="schedule-fieldset">
         <div className="fields">
-          <label>측정 시작 <Hint label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발과 구분합니다." range="시작 < 종료 · 최대30일 · 1970~2100년" /><input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
-          <label>측정 종료 <Hint label="측정 종료" text="데이터를 관측할 끝 시각입니다. 늦출수록 관측량이 늘어납니다." range="계획 최대30일 · 개별 일정 실행 최대1시간·10,000메시지" /><input type="datetime-local" step="1" value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
-          <label>일정 방식 <Hint label="일정 방식" text="직접 지정은 운행 시각을 입력하고, 자동 일정은 요일과 시간대로 배정합니다." range="최대100대 · 차량당1,000운행 · 직접 지정 전체10,000운행" /><select value={draft.mode} onChange={e => { const mode = e.target.value as Schedule["mode"]; edit({ ...draft, mode, vehicles: draft.vehicles.map(v => mode === "manual" ? { vehicle_id: v.vehicle_id, trips: [] } : { vehicle_id: v.vehicle_id, pattern: pattern(), overrides: {} }) }); }}><option value="manual">직접 지정</option><option value="patterned">자동 일정 · 개발 예시</option></select></label>
+          <label>측정 시작 <Hint label="측정 시작" text="데이터를 관측할 시작 시각입니다. 차량의 실제 출발과 구분합니다." range={`시작 < 종료 · 최대 ${trialMaxDays}일 · 1970~2100년`} /><input type="datetime-local" step="1" value={local(draft.measurement.start)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, start: iso(e.target.value) } })} /></label>
+          <label>측정 종료 <Hint label="측정 종료" text="데이터를 관측할 끝 시각입니다. 늦출수록 관측량이 늘어납니다." range={`시험 일정 최대 ${trialMaxDays}일`} /><input type="datetime-local" step="1" min={local(draft.measurement.start)} max={Number.isFinite(Date.parse(draft.measurement.start)) ? kst(Date.parse(draft.measurement.start) + trialMaxDays * 86400000) : undefined} value={local(draft.measurement.end)} onChange={e => edit({ ...draft, measurement: { ...draft.measurement, end: iso(e.target.value) } })} /></label>
+          <label>일정 방식 <Hint label="일정 방식" text="직접 지정은 운행 시각을 입력하고, 자동 일정은 요일과 시간대로 배정합니다." range="최대 1,000대 · 차량당1,000운행 · 직접 지정 전체10,000운행" /><select value={draft.mode} onChange={e => { const mode = e.target.value as Schedule["mode"]; edit({ ...draft, mode, vehicles: draft.vehicles.map(v => mode === "manual" ? { vehicle_id: v.vehicle_id, trips: [] } : { vehicle_id: v.vehicle_id, pattern: pattern(), overrides: {} }) }); }}><option value="manual">직접 지정</option><option value="patterned">자동 일정 · 개발 예시</option></select></label>
           <label>Microtrip 주기 (초) <Hint label="Microtrip 주기" text="운행 중 메시지 생성 간격입니다. 짧을수록 메시지가 많아집니다." range="0.1~86,400초" /><input type="number" min="0.1" max="86400" step="0.1" value={draft.interval_ms / 1000} onChange={e => edit({ ...draft, interval_ms: Math.round(Number(e.target.value) * 1000) })} /></label>
           <label>seed <Hint label="seed" text="무작위 배정의 기준값입니다. 같은 버전·조건·seed는 같은 결과를 만듭니다." range="-2,147,483,648~2,147,483,647 · 정수" /><input type="number" value={draft.seed} onChange={e => edit({ ...draft, seed: Number(e.target.value) })} /></label>
         </div>
         <p className="note">방식을 바꾸면 차량 명부를 유지하고 운행 설정을 초기화합니다. 직접 지정의 운행 목록이 비어 있으면 해당 차량은 미운행입니다.</p>
         <div className="schedule-actions">
           <label>설정할 차량<select value={editor} onChange={e => setEditor(Number(e.target.value))}>{draft.vehicles.map((v, i) => <option value={i} key={v.vehicle_id}>{v.vehicle_id}</option>)}</select></label>
-          <button disabled={draft.vehicles.length >= 100} onClick={() => { const id = Math.max(0, ...draft.vehicles.map(v => Number(v.vehicle_id.slice(1)))) + 1; edit({ ...draft, vehicles: [...draft.vehicles, draft.mode === "manual" ? { vehicle_id: `v${String(id).padStart(6, "0")}`, trips: [] } : { vehicle_id: `v${String(id).padStart(6, "0")}`, pattern: pattern(), overrides: {} }] }); setEditor(draft.vehicles.length); }}>차량 추가</button>
+          <button disabled={draft.vehicles.length >= 1000} onClick={() => { const id = Math.max(0, ...draft.vehicles.map(v => Number(v.vehicle_id.slice(1)))) + 1; edit({ ...draft, vehicles: [...draft.vehicles, draft.mode === "manual" ? { vehicle_id: `v${String(id).padStart(6, "0")}`, trips: [] } : { vehicle_id: `v${String(id).padStart(6, "0")}`, pattern: pattern(), overrides: {} }] }); setEditor(draft.vehicles.length); }}>차량 추가</button>
           <button disabled={draft.vehicles.length <= 1} onClick={() => { edit({ ...draft, vehicles: draft.vehicles.filter((_, i) => i !== editor) }); setEditor(0); }}>선택 차량 제거</button>
         </div>
         {draft.mode === "manual" ? <>
@@ -304,7 +305,7 @@ export function SchedulePanel({ renderMessages, view, record, draftToken, draftI
       <p className="note">예상 건수는 시험용 종료 Trip을 제외한 계획값입니다. 운행·주차 시간선은 선택 차량의 전체 관측 일정입니다.</p>
       <div className="fields">
         <label>조회 차량<select disabled={!!busy} value={vehicle} onChange={e => void selectVehicle(e.target.value)}>{!plan.vehicles.some(v=>v.vehicle_id===vehicle)&&<option value={vehicle}>{vehicle} · 운행 {trips.length}회 · 직접 조회</option>}{plan.vehicles.map(v => <option key={v.vehicle_id} value={v.vehicle_id}>{plan.vehicle_vins?.[v.vehicle_id]?`VIN ${plan.vehicle_vins[v.vehicle_id]} · `:""}{v.vehicle_id} · 운행 {v.observed_trip_count}회{v.anomaly_eligible?" · 이상 이벤트 대상":""}</option>)}</select>{plan.vehicle_vins?.[vehicle]&&<span className="note">시험 VIN {plan.vehicle_vins[vehicle]} · 전송 토픽과 본문 vehicleId에 그대로 사용(가명처리 없음)</span>}</label>
-        {frozenFleet?.execution_profile==="operations"&&<label>차량 번호 직접 조회<input type="text" placeholder="v000001" maxLength={7} onKeyDown={e=>{if(e.key==="Enter"&&/^v[0-9]{6}$/.test(e.currentTarget.value))void selectVehicle(e.currentTarget.value);}}/><span className="note">목록은 처음100대입니다. 다른 차량은 번호를 입력한 뒤 Enter로 조회합니다. 선택 차량: {vehicle}</span></label>}
+        {frozenFleet&&((plan.vehicle_count??0)>plan.vehicles.length||frozenFleet.execution_profile==="operations")&&<label>차량 번호 직접 조회<input type="text" placeholder="v000001" maxLength={7} onKeyDown={e=>{if(e.key==="Enter"&&/^v[0-9]{6}$/.test(e.currentTarget.value))void selectVehicle(e.currentTarget.value);}}/><span className="note">목록은 처음100대입니다. 다른 차량은 번호를 입력한 뒤 Enter로 조회합니다. 선택 차량: {vehicle}</span></label>}
         <label>조회 운행<select disabled={!!busy || !trips.length} value={tripKey} onChange={e => chooseTrip(trips.find(t => t.trip_key === e.target.value), true)}>{!trips.length && <option value="">관측 운행 없음</option>}{trips.map((t, i) => <option key={t.trip_key} value={t.trip_key}>운행 {i + 1} · {clock(t.start_ms)} → {clock(t.end_ms)}</option>)}</select></label>
       </div>
       <TripTimeline key={`${record?.key}:${vehicle}`} start={plan.measurement_start_ms} end={plan.measurement_end_ms} trips={trips} selectedKey={tripKey} vehicle={vehicle} disabled={!!busy} onSelect={t=>chooseTrip(t,true)} />

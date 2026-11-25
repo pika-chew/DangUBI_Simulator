@@ -28,6 +28,7 @@ class Job:
     stop_grace_seconds: float = 2
     timed_out: bool = False
     forced: bool = False
+    controller_managed: bool = False
     thread: threading.Thread | None = None
     force_timer: threading.Timer | None = None
     finished: threading.Event = field(default_factory=threading.Event)
@@ -61,7 +62,7 @@ class JobManager:
                     result["transmission_goal"] = assess(result)
                     db.execute("UPDATE runs SET result=? WHERE id=?", (json.dumps(result), run_id))
 
-    def start(self, run_id, request, data, worker, timeout, runner=None):
+    def start(self, run_id, request, data, worker, timeout, runner=None, recovery=None):
         mqtt = data["operation"] == "mqtt"
         c = data["config"]
         planned = data.get("planned_messages", c["vehicle_count"] * c["messages_per_vehicle"])
@@ -72,17 +73,27 @@ class JobManager:
                       publish_attempts=0, unconfirmed_messages=0, reconnect_count=0, elapsed_ms=0,
                       unsent_messages=planned if mqtt else 0, samples=[], errors=[], connection_cleanup_confirmed=False)
         result["transmission_goal"] = assess(result)
-        created = datetime.now(timezone.utc).isoformat()
+        created = recovery["created_at"] if recovery else datetime.now(timezone.utc).isoformat()
         with self.lock:
             if self.closing or self.active:
                 raise HTTPException(409, detail="실행이 진행 중이거나 종료 중입니다. 완료 후 새 실행을 시작하세요.")
             if mqtt and not self.mqtt_lock.acquire(blocking=False):
                 raise HTTPException(409, detail="다른 MQTT 실행이 진행 중입니다.")
-            job = Job(run_id, result, mqtt, wall_limit_seconds=data.get("mqtt", {}).get("max_duration_seconds", timeout),stop_grace_seconds=data.get("stop_grace_seconds",2))
+            job = Job(run_id, result, mqtt, wall_limit_seconds=data.get("mqtt", {}).get("max_duration_seconds", timeout),
+                      stop_grace_seconds=data.get("stop_grace_seconds",2), controller_managed=runner is not None)
             result["wall_limit_seconds"] = job.wall_limit_seconds
+            if "schedule_checkpoint" in data:
+                result["schedule_checkpoint"] = data["schedule_checkpoint"]
+                result["recovery_available"] = True
             try:
                 with self.database() as db:
-                    db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(request), json.dumps(result)))
+                    if recovery:
+                        updated = db.execute("UPDATE runs SET result=? WHERE id=? AND result=?",
+                                             (json.dumps(result), run_id, json.dumps(recovery["result"])))
+                        if updated.rowcount != 1:
+                            raise HTTPException(409, detail="실행 기록이 바뀌었습니다. 다시 조회하세요.")
+                    else:
+                        db.execute("INSERT INTO runs VALUES (?,?,?,?)", (run_id, created, json.dumps(request), json.dumps(result)))
                 self.active = job
                 job.thread = threading.Thread(target=runner or self.run, args=(job, data, worker, timeout), daemon=True)
                 job.thread.start()
@@ -119,7 +130,8 @@ class JobManager:
                 return
             job.pause_requested = pause
             job.result["job_state"] = "pausing" if pause else "resuming"
-            self.send_command(job, "pause" if pause else "resume")
+            if not job.controller_managed:
+                self.send_command(job, "pause" if pause else "resume")
             self.save(job)
 
     def request_stop(self, job, timed_out=False):
@@ -131,7 +143,8 @@ class JobManager:
                 job.timed_out = timed_out
                 job.result.update(job_state="stopping")
                 self.save(job)
-                self.signal_stop(job)
+                if not job.controller_managed:
+                    self.signal_stop(job)
                 job.force_timer = threading.Timer(job.stop_grace_seconds, self.force, args=(job,))
                 job.force_timer.daemon = True
                 job.force_timer.start()

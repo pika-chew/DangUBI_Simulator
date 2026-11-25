@@ -95,6 +95,8 @@ type TimingSummary = {
   over_5s_count?: number;
 };
 export type Result = {
+  recovery_available?: boolean;
+  recovery_confirmed_before?: number;
   initial_connect_ms?: number;
   execution_timing?: {
     preparation_ms?:number;replay_ms?:number;measurement_wait_ms?:number;drain_ms?:number;cleanup_ms?:number;
@@ -459,22 +461,6 @@ export function TransmissionBench({onRun,activeId}: {onRun: (run: SavedRun, star
                           changeConfig("vehicle_count", e.target.value)
                         }
                       />
-                    </label>
-                    <label htmlFor="setting-4">
-                      <span className="label-line">
-                        연결 방식 <Info name="연결 방식" />
-                      </span>
-                      <select
-                        id="setting-4"
-                        aria-label="연결 방식"
-                        value={config.mapping_mode}
-                        onChange={(e) =>
-                          changeConfig("mapping_mode", e.target.value)
-                        }
-                      >
-                        <option value="shared">연결 풀</option>
-                        <option value="dedicated">차량별 전체 연결</option>
-                      </select>
                     </label>
                     <label htmlFor="setting-5">
                       <span className="label-line">

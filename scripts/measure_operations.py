@@ -179,7 +179,7 @@ def child(case,folder):
             started=time.monotonic()
             response=client.post("/api/workspace/execute",json=dict(plan_key=plan["key"],transport="mqtt" if broker else "dry_run",
                 confirm_mqtt=bool(broker),realtime=bool(broker),client_count=case["clients"],
-                mapping_mode="dedicated" if case["clients"]==case["vehicles"] else "shared",generation_workers=case["workers"]))
+                mapping_mode="shared",generation_workers=case["workers"]))
             if response.status_code!=202:raise RuntimeError("운영 실행 시작 실패: "+response.text)
             run_id=response.json()["id"];job=control.JOBS.active;seen=set()
             while True:

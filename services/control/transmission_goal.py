@@ -10,6 +10,8 @@ def assess(result):
 
     if result.get("transport") != "mqtt":
         return state("not_applicable", "송신 없는 실행은 실제 발행 지연을 판정하지 않습니다.")
+    if result.get("transmission_pacing") == "fast":
+        return state("not_applicable", "빠른 전송은 일정 대기를 생략하므로 1배속 발행 지연 목표를 적용하지 않습니다.")
     status = result.get("job_state", result.get("state"))
     if status in {"starting", "running", "pausing", "paused", "resuming", "stopping"}:
         return state("pending", "실행이 끝난 뒤 전체 전송 결과와 지연을 함께 판정합니다.")

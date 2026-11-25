@@ -49,7 +49,7 @@ def preview(req, assigned, days, offset=0, limit=100, vehicle_id=None):
     except sqlite3.Error:
         raise ValueError("운영 계획의 임시 색인을 사용할 수 없습니다. 임시 디렉터리와 디스크 여유를 확인하세요.") from None
     finally:ids.close()
-    return dict(schedule_version="schedule-plan-1",fleet_version=req.fleet_version,execution_profile="operations",
+    return dict(schedule_version="schedule-plan-1",fleet_version=req.fleet_version,execution_profile=req.execution_profile,
                 status="plan_only",minimum_parking_seconds=1800,measurement_start_ms=start,measurement_end_ms=end,
                 vehicle_count=len(assigned),fleet_vehicle_count=population,summary_scope="selected_vehicle" if vehicle_id else "fleet",
                 vehicles=summaries,inactive_vehicle_ids=inactive,inactive_vehicle_count=inactive_count,vehicle_list_limit=100,**totals,

@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-type TimelineTrip = { vehicle_id:string; trip_key:string; start_ms:number; end_ms:number; observed_start_ms:number; observed_end_ms:number };
+type TimelineTrip = { vehicle_id:string|number; trip_key:string; start_ms:number; end_ms:number; observed_start_ms:number; observed_end_ms:number };
 const clock=(ms:number)=>new Date(ms).toLocaleString("ko-KR",{timeZone:"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
 const length=(ms:number)=>{const s=Math.round(ms/1000);return `${Math.floor(s/3600)}시간 ${Math.floor(s%3600/60)}분 ${s%60}초`;};
 export function TripTimeline<T extends TimelineTrip>({start,end,trips,selectedKey,vehicle,disabled,onSelect}:{start:number;end:number;trips:T[];selectedKey:string;vehicle:string;disabled:boolean;onSelect:(trip:T)=>void}) {

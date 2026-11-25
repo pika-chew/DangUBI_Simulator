@@ -10,7 +10,7 @@ import time
 import pytest
 
 from services.control.generation_session import GenerationSession
-from services.control.operation_plan import OperationSettings, day_of, trip_row, upcoming, vehicle_key, MIN_PARKING_MS
+from services.control.operation_plan import OperationSettings, day_of, day_trips, trip_row, upcoming, vehicle_key, MIN_PARKING_MS
 from services.control.operation_runtime import INITIAL_STATE, OperationController, OperationGenerator, with_vehicle_id
 from services.control.message_codec import prepare_message
 from services.control.registry import Registry, DevelopmentPseudonyms
@@ -108,12 +108,13 @@ def controller(reg, clock):
     return OperationController(reg, WORKER, validate, clock=clock)
 
 
-def arm_recovery(reg, row, remaining_ms=5000):
+def arm_recovery(reg, row, remaining_ms=5000, settings=SETTINGS):
     """비정상 종료 직후 상태: 운행 시작 기록과 마지막 확인 시각을 둔다."""
     trip = {"key": row["trip_key"], "a": row["start_ms"], "b": row["end_ms"], "profile": row["road_profile"], "initial": dict(INITIAL_STATE)}
     reg.save_trip_start(row_id(row), trip)
     reg.save_confirmed({row_id(row): row["end_ms"] - remaining_ms})
-    reg.update_operation(last_stop="abnormal", virtual_checkpoint_ms=row["end_ms"] - remaining_ms)
+    reg.update_operation(last_stop="abnormal", virtual_checkpoint_ms=row["end_ms"] - remaining_ms,
+                         settings=settings.model_dump())
 
 
 def row_id(row):
@@ -182,6 +183,50 @@ def test_force_stop_keeps_confirmed_point_and_resumes(tmp_path):
 
 
 @pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_pause_freezes_clock_and_restart_rejects_changed_trip_settings(tmp_path):
+    reg = registry(tmp_path)
+    _, row = first_trip(reg)
+    arm_recovery(reg, row, remaining_ms=7000)
+    ops = controller(reg, clock=time.time)
+    with pytest.raises(RuntimeError, match="당시 설정"):
+        ops.start(SETTINGS.model_copy(update={"interval_ms": 2000}))
+    ops.start(SETTINGS)
+    try:
+        assert wait_for(lambda: ops.live.get("result", {}).get("processed_messages", 0) >= 1)
+        ops.pause(True)
+        assert wait_for(lambda: reg.operation()["state"] == "paused")
+        frozen = reg.operation()["virtual_checkpoint_ms"]
+        produced = ops.live["result"]["processed_messages"]
+        time.sleep(1.1)
+        assert reg.operation()["virtual_checkpoint_ms"] == frozen
+        assert ops.live["result"]["processed_messages"] == produced
+        assert ops.live["result"]["trip_count"] == 0
+        ops.pause(False)
+        assert wait_for(lambda: ops.live["result"]["processed_messages"] > produced)
+        ops.pause(True)
+        assert wait_for(lambda: reg.operation()["state"] == "paused")
+        frozen = reg.operation()["virtual_checkpoint_ms"]
+        produced = ops.live["result"]["processed_messages"]
+        ops.stop(force=True)
+        assert ops.wait(10)
+        restored = controller(reg, clock=time.time)
+        restored.start(SETTINGS)
+        try:
+            assert wait_for(lambda: state(reg)[0] is None)
+            assert restored.live["virtual_anchor_ms"] == frozen
+            assert restored.live["result"]["microtrip_count"] + produced == 6
+            assert restored.live["result"]["trip_count"] == 1
+        finally:
+            if restored.running():
+                restored.stop(force=True)
+                restored.wait(10)
+    finally:
+        if ops.running():
+            ops.stop(force=True)
+            ops.wait(10)
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
 def test_add_and_remove_while_running_and_duration_cap(tmp_path):
     reg = registry(tmp_path)
     ops = controller(reg, clock=lambda: datetime(2026, 11, 24, 1, 0, tzinfo=KST).timestamp())  # 운행 없는 새벽
@@ -202,14 +247,53 @@ def test_add_and_remove_while_running_and_duration_cap(tmp_path):
     assert reg.summary()["status"]["ready"]["count"] == 1
 
 
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_selected_fleet_and_virtual_window_survive_resume(tmp_path):
+    reg = registry(tmp_path, count=3)
+    midnight = datetime(2026, 11, 24, tzinfo=KST).timestamp()
+    # 선택·기간 보존만 본다. 그날 운행이 없으면 처음 시작 가상시각은 실제 시작 시각이다.
+    settings = OperationSettings(vehicle_count=2, duration_cap_days=30, day_off_probability=1)
+    ops = controller(reg, clock=lambda: midnight)
+    ops.start(settings)
+    try:
+        assert wait_for(lambda: ops.live.get("vehicles") == 2)
+        assert [v["id"] for v in reg.session_vehicles() if v["status"] == "driving"] == [1, 2]
+        deadline = reg.operation()["window_end_ms"]
+        assert ops.first_departure(settings, int(midnight * 1000)) is None
+        assert deadline == int(midnight * 1000) + 30 * 86400000
+        ops.stop(force=False)
+        assert ops.wait(10)
+        ops.start(settings)
+        assert wait_for(lambda: ops.live.get("vehicles") == 2)
+        assert reg.operation()["window_end_ms"] == deadline
+        assert [v["id"] for v in reg.session_vehicles() if v["status"] == "driving"] == [1, 2]
+    finally:
+        if ops.running():
+            ops.stop(force=True)
+            ops.wait(10)
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_window_does_not_start_a_trip_that_cannot_finish(tmp_path):
+    reg = registry(tmp_path)
+    _, row = first_trip(reg)
+    ops = controller(reg, clock=lambda: (row["start_ms"] - 500) / 1000)
+    ops.day_seconds = 2
+    ops.start(SETTINGS.model_copy(update={"duration_cap_days": 1}))
+    assert ops.wait(10)
+    assert reg.operation()["last_stop"] == "graceful"
+    assert reg.operation()["virtual_checkpoint_ms"] == reg.operation()["window_end_ms"]
+    assert ops.live["result"]["processed_messages"] == 0
+
+
 @pytest.fixture
-def fixture_profile(tmp_path):
+def fixture_profile(tmp_path, request):
     env = os.environ.copy()
     env.update(GOCACHE=str(ROOT / ".local/go-cache"), GOMODCACHE=str(ROOT / ".local/go-mod"))
     binary = tmp_path / ("fixture.exe" if os.name == "nt" else "fixture")
     subprocess.run(["go", "test", "-c", "-o", str(binary), "."], cwd=ROOT / "services/worker", env=env, check=True, timeout=180)
     profile = tmp_path / "profile.json"
-    env.update(DANGUBI_SCHEDULE_PROFILE=str(profile), DANGUBI_SCHEDULE_FAULT="none")
+    env.update(DANGUBI_SCHEDULE_PROFILE=str(profile), DANGUBI_SCHEDULE_FAULT=getattr(request, "param", "none"))
     proc = subprocess.Popen([str(binary), "-test.run=^TestScheduleMQTTFixture$"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         assert wait_for(profile.is_file, 10)
@@ -227,11 +311,12 @@ def fixture_profile(tmp_path):
 def test_mqtt_uses_fixed_operation_topic_client_and_pseudonym(tmp_path, fixture_profile):
     reg = registry(tmp_path)
     _, row = first_trip(reg)
-    arm_recovery(reg, row, remaining_ms=4000)
+    settings = OperationSettings(transport="mqtt", interval_ms=1000, client_count=2)
+    arm_recovery(reg, row, remaining_ms=4000, settings=settings)
     profile = json.loads(fixture_profile.read_text(encoding="utf-8"))
     profile.update(execution_profile="operations", max_connecting=10, enabled=True, contract_reviewed=True)
     ops = controller(reg, clock=lambda: (row["end_ms"] - 4000) / 1000)
-    ops.start(OperationSettings(transport="mqtt", interval_ms=1000, client_count=2), profile)
+    ops.start(settings, profile)
     assert wait_for(lambda: state(reg)[0] is None)
     ops.stop()
     assert ops.wait(20)
@@ -248,6 +333,36 @@ def test_mqtt_uses_fixed_operation_topic_client_and_pseudonym(tmp_path, fixture_
     with sqlite3.connect(reg.path) as con:
         raw = con.execute("SELECT vin FROM vehicles").fetchone()[0]
     assert raw not in json.dumps(report)  # 원본 VIN은 전송되지 않는다.
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+@pytest.mark.parametrize("fixture_profile", ["delay_ack"], indirect=True)
+def test_trip_checkpoint_survives_stop_before_puback(tmp_path, fixture_profile):
+    reg = registry(tmp_path)
+    _, row = first_trip(reg)
+    settings = OperationSettings(transport="mqtt", interval_ms=1000, client_count=1)
+    arm_recovery(reg, row, remaining_ms=2000, settings=settings)
+    profile = json.loads(fixture_profile.read_text(encoding="utf-8"))
+    profile.update(execution_profile="operations", max_connecting=10, enabled=True, contract_reviewed=True)
+    ops = controller(reg, clock=time.time)
+    ops.start(settings, profile)
+    try:
+        deadline = time.monotonic() + 10
+        while ops.live.get("result", {}).get("trip_count", 0) == 0 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert ops.live["result"]["trip_count"] == 1, reg.operation()
+        assert state(reg)[0] is not None
+        ops.stop()
+        assert wait_for(lambda: reg.operation()["state"] == "stopping", timeout=.2)
+        assert state(reg)[0] is not None
+        ops.stop(force=True)
+        assert ops.wait(10)
+        assert state(reg)[0] is not None
+        assert reg.operation()["last_stop"] == "abnormal"
+    finally:
+        if ops.running():
+            ops.stop(force=True)
+            ops.wait(10)
 
 
 @pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
@@ -278,9 +393,42 @@ def test_operations_api_guards_and_dry_run_cycle(tmp_path, monkeypatch):
                       "measurement": {"start": "2026-11-24T00:00:00+09:00", "end": "2026-11-24T01:00:00+09:00"}}})
         assert plan.status_code == 201, plan.text
         refused = c.post("/api/workspace/execute", json={"plan_key": plan.json()["key"]})
-        assert refused.status_code == 409 and "소량 시험" in refused.json()["detail"]
+        assert refused.status_code == 409 and "이전 운영 프로필" in refused.json()["detail"]
         assert c.post("/api/operations/stop", json={}).status_code == 200
         assert control._OPERATION.wait(20)
         status = c.get("/api/operations/status").json()
         assert status["state"] == "stopped" and status["last_stop"] == "graceful"
         assert [e["kind"] for e in c.get("/api/operations/events").json()["events"]][:2] == ["graceful_stop", "stopping"]
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_first_start_begins_at_first_departure_of_start_day(tmp_path):
+    """처음 시작은 실제 날짜의 가장 이른 출발 시각부터 가상시각을 시작하고, 편입 차량은 당일부터 운행한다."""
+    reg = Registry(tmp_path / "registry.sqlite3", DevelopmentPseudonyms(b"k" * 32), seed=7)
+    reg.register(5, {**SHORT, "trip_min_minutes": 3, "trip_max_minutes": 30})
+    noon = datetime(2026, 11, 24, 15, 0, tzinfo=KST).timestamp()  # 오후에 시작해도 그날 새벽 첫 출발부터
+    settings = OperationSettings(interval_ms=1000, client_count=1, day_off_probability=0)
+    first = OperationController(reg, WORKER, validate, clock=lambda: noon).first_departure(settings, int(noon * 1000))
+    expected = min(a for v in reg.session_vehicles() for a, _, _ in day_trips(settings, reg.seed(), vehicle_key(v["id"]), v["fixed"], DAY))
+    assert first == expected and day_of(first) == DAY and first < noon * 1000
+    ops = OperationController(reg, WORKER, validate, clock=lambda: noon)
+    ops.start(settings)
+    try:
+        assert wait_for(lambda: ops.live.get("vehicles") == 5)
+        assert ops.live["virtual_anchor_ms"] == first
+        assert {v["start_day"] for v in reg.session_vehicles()} == {DAY.isoformat()}  # 당일부터
+        assert wait_for(lambda: reg.history(1, first - 1, first + 86400000)["total_trips"] + sum(
+            reg.history(v, 0, first + 86400000)["total_trips"] for v in range(2, 6)) > 0, timeout=20)  # 바로 운행 시작
+    finally:
+        ops.stop(force=True)
+        ops.wait(20)
+    # 다시 시작하면 저장된 가상 위치에서 이어간다(첫 출발로 되돌아가지 않음).
+    resumed = OperationController(reg, WORKER, validate, clock=lambda: noon + 86400 * 3)
+    resumed.start(settings)
+    try:
+        assert wait_for(lambda: resumed.live.get("vehicles") == 5)
+        assert resumed.live["virtual_anchor_ms"] == reg.operation()["virtual_checkpoint_ms"] or resumed.live["virtual_anchor_ms"] >= first
+        assert resumed.live["virtual_anchor_ms"] < noon * 1000
+    finally:
+        resumed.stop(force=True)
+        resumed.wait(20)

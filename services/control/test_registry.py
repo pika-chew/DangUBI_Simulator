@@ -126,6 +126,19 @@ def test_capacity_and_reopen_keep_counter(tmp_path):
     assert reopened.register(2, SETTINGS)["first_id"] == 11
 
 
+def test_general_removal_cannot_bypass_cleanup_hold(tmp_path):
+    reg = make(tmp_path)
+    reg.register(1, SETTINGS)
+    reg.ensure_start_day(1, "2026-11-25")
+    reg.save_trip_start(1, {"key": "held-trip"})
+    reg.set_status([1], "cleanup_hold")
+    assert reg.request_removal([1]) == {"removed": 0, "removing": 0, "unchanged": 1}
+    assert reg.vehicles()["vehicles"][0]["status"] == "cleanup_hold"
+    assert reg.recovery_trips()[0]["trip"]["key"] == "held-trip"
+    assert reg.resolve_hold([1], "drop") == {"changed": 1, "action": "drop"}
+    assert reg.events()[0]["kind"] == "cleanup_loss"
+
+
 def test_operations_registry_api(tmp_path, monkeypatch):
     from services.control.test_app import control
     monkeypatch.setattr(control, "DB", tmp_path / "runs.sqlite3")

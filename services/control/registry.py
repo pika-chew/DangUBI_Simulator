@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -112,8 +112,21 @@ class Registry:
                     last_end_ms INTEGER, final TEXT, trip TEXT, confirmed_ts INTEGER, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS operation_events (
                     id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS trip_settings (
+                    id INTEGER PRIMARY KEY, digest TEXT NOT NULL UNIQUE, settings TEXT NOT NULL,
+                    worker_hash TEXT, destination TEXT);
+                CREATE TABLE IF NOT EXISTS trip_history (
+                    id INTEGER PRIMARY KEY, vehicle_id INTEGER NOT NULL REFERENCES vehicles(id), trip_key TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, profile TEXT NOT NULL, initial TEXT NOT NULL,
+                    settings_id INTEGER NOT NULL REFERENCES trip_settings(id), transport TEXT NOT NULL, session TEXT,
+                    status TEXT NOT NULL, confirmed_ts INTEGER, resume_after_ms INTEGER, recoveries INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL, finished_at TEXT, UNIQUE(vehicle_id, trip_key));
+                CREATE INDEX IF NOT EXISTS trip_history_vehicle ON trip_history(vehicle_id, start_ms);
             """)
             con.execute("INSERT OR IGNORE INTO operation(id, state, updated_at) VALUES (1, 'stopped', ?)", (now(),))
+            columns = {row["name"] for row in con.execute("PRAGMA table_info(operation)")}
+            if "window_end_ms" not in columns:
+                con.execute("ALTER TABLE operation ADD COLUMN window_end_ms INTEGER")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             con.execute("INSERT OR IGNORE INTO meta VALUES ('next_serial', '1')")
             # 명부 고유 seed: 같은 명부에서 특성 난수를 재현하기 위한 값이며 비밀이 아니다.
@@ -121,6 +134,9 @@ class Registry:
             stored = int(con.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0])
             if stored != SCHEMA:
                 raise RegistryError(f"지원하지 않는 명부 스키마 {stored}입니다.")
+            # 운행 이력은 이 시각 이후 시작한 운행부터 남는다. 그 전 운행은 조회 근거가 없다.
+            con.execute("INSERT OR IGNORE INTO meta VALUES ('history_since', ?)", (now(),))
+            self._backfill_history(con)
 
     @contextmanager
     def connect(self):
@@ -229,6 +245,9 @@ class Registry:
                 if action == "drop":
                     trip = json.loads(row["trip"]) if row["trip"] else None
                     self.event(con, "cleanup_loss", {"vehicle_id": vehicle, "trip_key": trip and trip["key"], "confirmed_ts": row["confirmed_ts"]})
+                    if trip:
+                        con.execute("UPDATE trip_history SET status='lost', confirmed_ts=?, finished_at=? WHERE vehicle_id=? AND trip_key=?",
+                                    (row["confirmed_ts"], stamp, vehicle, trip["key"]))
                     con.execute("UPDATE vehicle_state SET trip=NULL, confirmed_ts=NULL, updated_at=? WHERE id=?", (stamp, vehicle))
                 con.execute("UPDATE vehicles SET status=?, status_at=? WHERE id=?", ("removed" if action == "drop" else "removing", stamp, vehicle))
                 changed += 1
@@ -254,7 +273,7 @@ class Registry:
         return data
 
     def update_operation(self, **fields):
-        allowed = {"state", "settings", "virtual_checkpoint_ms", "last_stop", "stop_reason", "error", "session_started_at"}
+        allowed = {"state", "settings", "virtual_checkpoint_ms", "window_end_ms", "last_stop", "stop_reason", "error", "session_started_at"}
         if set(fields) - allowed:
             raise RegistryError("알 수 없는 운영 상태 항목입니다.")
         if "settings" in fields and fields["settings"] is not None:
@@ -270,6 +289,12 @@ class Registry:
                 FROM vehicles v LEFT JOIN vehicle_state s ON s.id=v.id
                 WHERE v.pseudonym IS NOT NULL AND v.status IN ('ready','driving','removing') ORDER BY v.id""").fetchall()
         return [self._session_row(r) for r in rows]
+
+    def recovery_trips(self):
+        with self.connect() as con:
+            rows = con.execute("""SELECT v.pseudonym, s.trip FROM vehicle_state s
+                JOIN vehicles v ON v.id=s.id WHERE s.trip IS NOT NULL AND v.status <> 'removed'""").fetchall()
+        return [{"pseudonym": row["pseudonym"], "trip": json.loads(row["trip"])} for row in rows]
 
     @staticmethod
     def _session_row(r):
@@ -296,10 +321,55 @@ class Registry:
             con.execute("INSERT OR IGNORE INTO vehicle_state(id, start_day, updated_at) VALUES (?,?,?)", (vehicle, day, now()))
             return con.execute("SELECT start_day FROM vehicle_state WHERE id=?", (vehicle,)).fetchone()[0]
 
-    def save_trip_start(self, vehicle, trip: dict):
-        """첫 메시지를 보내기 전에 기록한다. 비정상 종료 후 같은 운행을 다시 만들 근거다."""
+    def save_trip_start(self, vehicle, trip: dict, session: str | None = None):
+        """첫 메시지를 보내기 전에 기록한다. 비정상 종료 후 같은 운행을 다시 만들 근거이며,
+        같은 트랜잭션에 운행 이력(조회 재생성 근거) 한 행을 남긴다. 메시지 원문은 저장하지 않는다."""
+        stamp = now()
         with self.connect() as con:
-            con.execute("UPDATE vehicle_state SET trip=?, confirmed_ts=NULL, updated_at=? WHERE id=?", (json.dumps(trip), now(), vehicle))
+            con.execute("UPDATE vehicle_state SET trip=?, confirmed_ts=NULL, updated_at=? WHERE id=?", (json.dumps(trip), stamp, vehicle))
+            self._insert_history(con, vehicle, trip, "sending", session, stamp)
+
+    @staticmethod
+    def _settings_id(con, settings: dict, worker_hash, destination) -> int:
+        text = json.dumps(settings, sort_keys=True, ensure_ascii=False)
+        digest = hashlib.sha256(json.dumps([text, worker_hash, destination]).encode()).hexdigest()
+        con.execute("INSERT OR IGNORE INTO trip_settings(digest, settings, worker_hash, destination) VALUES (?,?,?,?)",
+                    (digest, text, worker_hash, destination))
+        return con.execute("SELECT id FROM trip_settings WHERE digest=?", (digest,)).fetchone()[0]
+
+    def _insert_history(self, con, vehicle, trip, status, session, stamp, confirmed_ts=None):
+        settings = trip.get("settings")
+        if settings is None:
+            row = con.execute("SELECT settings FROM operation WHERE id=1").fetchone()
+            settings = json.loads(row[0]) if row and row[0] else None
+        if settings is None:
+            return  # 당시 설정을 확인할 수 없으면 재생성 근거가 없으므로 이력을 만들지 않는다.
+        settings_id = self._settings_id(con, settings, trip.get("worker_hash"), trip.get("destination"))
+        con.execute("""INSERT OR IGNORE INTO trip_history(vehicle_id, trip_key, start_ms, end_ms, profile, initial, settings_id,
+                       transport, session, status, confirmed_ts, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (vehicle, trip["key"], trip["a"], trip["b"], trip["profile"], json.dumps(trip["initial"]), settings_id,
+                     settings.get("transport", "dry_run"), session, status, confirmed_ts, stamp))
+
+    def _backfill_history(self, con):
+        """이력 기능 이전에 시작돼 아직 끝나지 않은 운행은 저장된 시작 기록으로 이력을 만든다(복구 대기)."""
+        rows = con.execute("""SELECT s.id, s.trip, s.confirmed_ts FROM vehicle_state s
+            WHERE s.trip IS NOT NULL AND NOT EXISTS (SELECT 1 FROM trip_history h WHERE h.vehicle_id=s.id
+            AND h.trip_key=json_extract(s.trip, '$.key'))""").fetchall()
+        for row in rows:
+            self._insert_history(con, row["id"], json.loads(row["trip"]), "interrupted", None, now(), row["confirmed_ts"])
+
+    def mark_history_interrupted(self):
+        """비정상 종료: 전송 중이던 운행을 '중단·복구 대기'로 바꾸고 마지막 확인 시각을 옮겨 둔다."""
+        with self.connect() as con:
+            con.execute("""UPDATE trip_history SET status='interrupted', confirmed_ts=(SELECT s.confirmed_ts FROM vehicle_state s
+                WHERE s.id=trip_history.vehicle_id AND json_extract(s.trip, '$.key')=trip_history.trip_key)
+                WHERE status='sending'""")
+
+    def recover_history(self, vehicle, trip_key, confirmed_ts):
+        """복구 운행을 다시 보내기 시작한다. resume_after_ms 이후는 중복 가능 구간이다."""
+        with self.connect() as con:
+            con.execute("""UPDATE trip_history SET status='sending', recoveries=recoveries+1, resume_after_ms=?
+                WHERE vehicle_id=? AND trip_key=?""", (confirmed_ts, vehicle, trip_key))
 
     def seed(self):
         with self.connect() as con:
@@ -319,10 +389,27 @@ class Registry:
             con.executemany("UPDATE vehicle_state SET confirmed_ts=?, updated_at=? WHERE id=? AND trip IS NOT NULL",
                             [(ts, stamp, vehicle) for vehicle, ts in progress.items()])
 
-    def save_trip_end(self, vehicle, last_end_ms, final: dict):
+    def save_checkpoint(self, virtual_ms: int, progress: dict, state: str | None = None):
+        """가상시각과 차량별 확인 지점을 한 트랜잭션에 보관한다."""
+        stamp = now()
         with self.connect() as con:
+            if progress:
+                con.executemany("UPDATE vehicle_state SET confirmed_ts=?, updated_at=? WHERE id=? AND trip IS NOT NULL",
+                                [(ts, stamp, vehicle) for vehicle, ts in progress.items()])
+            con.execute("UPDATE operation SET virtual_checkpoint_ms=?, state=COALESCE(?,state), updated_at=? WHERE id=1",
+                        (virtual_ms, state, stamp))
+
+    def save_trip_end(self, vehicle, last_end_ms, final: dict):
+        """종료 Trip 확인(MQTT는 PUBACK, 송신 없는 생성은 생성 완료) 때 호출한다."""
+        stamp = now()
+        with self.connect() as con:
+            row = con.execute("SELECT trip FROM vehicle_state WHERE id=?", (vehicle,)).fetchone()
+            key = json.loads(row["trip"])["key"] if row and row["trip"] else None
             con.execute("UPDATE vehicle_state SET trip=NULL, confirmed_ts=NULL, last_end_ms=?, final=?, updated_at=? WHERE id=?",
-                        (last_end_ms, json.dumps(final), now(), vehicle))
+                        (last_end_ms, json.dumps(final), stamp, vehicle))
+            if key:
+                con.execute("UPDATE trip_history SET status='completed', confirmed_ts=?, finished_at=? WHERE vehicle_id=? AND trip_key=?",
+                            (last_end_ms, stamp, vehicle, key))
 
     def request_removal(self, ids: list[int]) -> dict:
         """운행 중인 차량은 운행을 마친 뒤 정리하도록 '정리 중'으로, 그 외는 즉시 '제외'로 바꾼다."""
@@ -331,7 +418,7 @@ class Registry:
         with self.lock, self.connect() as con:
             for vehicle in dict.fromkeys(ids):
                 row = con.execute("SELECT status FROM vehicles WHERE id=?", (vehicle,)).fetchone()
-                if row is None or row["status"] in ("removed", "removing"):
+                if row is None or row["status"] in ("removed", "removing", "cleanup_hold"):
                     changed["unchanged"] += 1
                     continue
                 target = "removing" if row["status"] == "driving" else "removed"
@@ -373,9 +460,72 @@ class Registry:
         with self.connect() as con:
             total = con.execute(f"SELECT COUNT(*) FROM vehicles {where}", args).fetchone()[0]
             rows = con.execute(f"SELECT * FROM vehicles {where} ORDER BY id LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
-        return {"total": total, "offset": offset, "limit": limit, "vehicles": [{
-            "id": r["id"], "vin_masked": vin_codec.mask(r["vin"]), "pseudonym": r["pseudonym"],
-            "status": r["status"], "status_label": STATUS_LABELS[r["status"]], "pattern": r["pattern"],
-            "anomaly_eligible": bool(r["anomaly_eligible"]), "traits": json.loads(r["traits"]),
-            "batch_id": r["batch_id"], "registered_at": r["registered_at"], "status_at": r["status_at"],
-        } for r in rows]}
+        return {"total": total, "offset": offset, "limit": limit, "vehicles": [self._public_vehicle(r) for r in rows]}
+
+    @staticmethod
+    def _public_vehicle(r):
+        return {"id": r["id"], "vin_masked": vin_codec.mask(r["vin"]), "pseudonym": r["pseudonym"],
+                "status": r["status"], "status_label": STATUS_LABELS[r["status"]], "pattern": r["pattern"],
+                "anomaly_eligible": bool(r["anomaly_eligible"]), "traits": json.loads(r["traits"]),
+                "batch_id": r["batch_id"], "registered_at": r["registered_at"], "status_at": r["status_at"]}
+
+    # ---- 운행 이력 조회 ----
+    def find_vehicle(self, query: str) -> dict | None:
+        """명부 번호 또는 가명 VIN으로 찾는다. 원본 VIN 검색·표시는 하지 않는다."""
+        text = query.strip()
+        with self.connect() as con:
+            if text.isdigit():
+                row = con.execute("SELECT * FROM vehicles WHERE id=?", (int(text),)).fetchone()
+            else:
+                row = con.execute("SELECT * FROM vehicles WHERE pseudonym IN (?,?)", (text, text.upper())).fetchone()
+        return self._public_vehicle(row) if row else None
+
+    def history(self, vehicle: int, from_ms: int | None = None, to_ms: int | None = None, limit: int = 2000) -> dict:
+        """선택 차량의 기간 내 운행 이력. 진행 중 운행의 확인 시각은 최근 체크포인트 값이다.
+        기간을 주지 않으면 마지막 운행이 있는 KST 날짜까지의 7일을 쓴다(운행이 없으면 오늘까지)."""
+        with self.connect() as con:
+            row = con.execute("SELECT * FROM vehicles WHERE id=?", (vehicle,)).fetchone()
+            if row is None:
+                raise RegistryError("명부에 없는 차량입니다.")
+            span = con.execute("SELECT COUNT(*), MIN(start_ms), MAX(end_ms) FROM trip_history WHERE vehicle_id=?", (vehicle,)).fetchone()
+            if from_ms is None or to_ms is None:
+                anchor = span[2] if span[2] is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+                kst = timezone(timedelta(hours=9))
+                midnight = datetime.combine(datetime.fromtimestamp(anchor / 1000, kst).date() + timedelta(days=1), datetime.min.time(), kst)
+                to_ms = int(midnight.timestamp() * 1000)
+                from_ms = to_ms - 7 * 86400000
+            rows = con.execute("""SELECT h.*, s.trip AS live_trip, s.confirmed_ts AS live_confirmed FROM trip_history h
+                LEFT JOIN vehicle_state s ON s.id=h.vehicle_id WHERE h.vehicle_id=? AND h.end_ms>? AND h.start_ms<?
+                ORDER BY h.start_ms LIMIT ?""", (vehicle, from_ms, to_ms, limit + 1)).fetchall()
+            state = con.execute("SELECT last_end_ms FROM vehicle_state WHERE id=?", (vehicle,)).fetchone()
+            since = self.meta(con, "history_since")
+        trips = [self._history_row(r) for r in rows[:limit]]
+        return {"vehicle": self._public_vehicle(row), "trips": trips, "has_more": len(rows) > limit, "from_ms": from_ms, "to_ms": to_ms,
+                "total_trips": span[0], "first_start_ms": span[1], "last_end_ms": span[2], "history_since": since,
+                "last_completed_end_ms": state["last_end_ms"] if state else None}
+
+    @staticmethod
+    def _history_row(r):
+        confirmed = r["confirmed_ts"]
+        live = json.loads(r["live_trip"]) if r["live_trip"] else None
+        if r["status"] == "sending" and live and live.get("key") == r["trip_key"]:
+            confirmed = r["live_confirmed"]
+        return {"vehicle_id": r["vehicle_id"], "trip_key": r["trip_key"], "start_ms": r["start_ms"], "end_ms": r["end_ms"],
+                "observed_start_ms": r["start_ms"], "observed_end_ms": r["end_ms"], "road_profile": r["profile"],
+                "status": r["status"], "transport": r["transport"], "session": r["session"], "confirmed_ts": confirmed,
+                "resume_after_ms": r["resume_after_ms"], "recoveries": r["recoveries"],
+                "started_at": r["started_at"], "finished_at": r["finished_at"]}
+
+    def history_trip(self, vehicle: int, trip_key: str) -> dict:
+        """재생성 입력: 운행 이력 + 당시 설정·Worker 지문 + 차량 고정 특성."""
+        with self.connect() as con:
+            row = con.execute("""SELECT h.*, t.settings, t.worker_hash, v.anomaly_eligible, v.pseudonym,
+                s.trip AS live_trip, s.confirmed_ts AS live_confirmed FROM trip_history h
+                JOIN trip_settings t ON t.id=h.settings_id JOIN vehicles v ON v.id=h.vehicle_id
+                LEFT JOIN vehicle_state s ON s.id=h.vehicle_id WHERE h.vehicle_id=? AND h.trip_key=?""", (vehicle, trip_key)).fetchone()
+            seed = int(self.meta(con, "seed"))
+        if row is None:
+            raise RegistryError("운행 이력에 없는 운행입니다.")
+        return {**self._history_row(row), "initial": json.loads(row["initial"]), "settings": json.loads(row["settings"]),
+                "worker_hash": row["worker_hash"], "anomaly_eligible": bool(row["anomaly_eligible"]),
+                "pseudonym": row["pseudonym"], "seed": seed}

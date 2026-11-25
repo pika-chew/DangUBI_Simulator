@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import field_validator, Field, model_validator
 from services.control.schedule import Strict, Measurement, ScheduleRequest, KST, instant, plan
 from services.control.journey_schedule import varied_day
+from services.control.operating import TRIAL_VEHICLES
 from services.control.schedule_obd import ScheduledOBDRequest, generate, key_for
 
 
@@ -61,8 +62,8 @@ class FleetRequest(Strict):
     @model_validator(mode="after")
     def feasible(self):
         self.include_em = True
-        if self.execution_profile=="small_test" and self.vehicle_count>100:
-            raise ValueError("소량 시험은 최대100대입니다. 운영 프로필을 선택하세요.")
+        if self.execution_profile=="small_test" and self.vehicle_count>TRIAL_VEHICLES:
+            raise ValueError(f"시험 실행은 최대 {TRIAL_VEHICLES:,}대입니다.")
         if self.fleet_version == "fleet-plan-4":
             if self.vehicle_variation_percent is not None:
                 raise ValueError("새 배정은 차량 간 운행 시간 편차를 사용하지 않습니다. 해당 항목을 제거하세요.")
@@ -207,7 +208,7 @@ def expand(req):
 
 def preview(req, offset=0, limit=100, vehicle_id=None):
     assigned = allocation(req)
-    if req.execution_profile=="operations":
+    if req.execution_profile=="operations" or req.vehicle_count > 100:
         from services.control.fleet_stream import preview as stream_preview
         return stream_preview(req,assigned,iter_vehicle_days,offset,limit,vehicle_id)
     schedule = selected_schedule(req,[{"vehicle_id":v,"trips":[]} for v in assigned])
@@ -221,7 +222,6 @@ def preview(req, offset=0, limit=100, vehicle_id=None):
     data["warnings"].extend([
         "전체 조건으로 배정한 개발용 합성 일정이며 한국 실차 통계로 보정하지 않았습니다.",
         "일일 목표는 운행하는 날의 전체 운행 합계입니다. 미운행·관측 경계·정수 분 반올림으로 관측 평균은 달라집니다.",
-        "설정 자동화이며 대규모 전송 지원 확대가 아닙니다. 계획100대/10000운행 상한을 유지하며 장기 상태는 제한된 요청 단위로 나누어 준비합니다.",
     ])
     return data
 

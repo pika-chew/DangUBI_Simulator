@@ -38,7 +38,7 @@ class BoundedSchedule:
         count=len(data["assignments"]);workers=len(pool.sessions)
         self.byte_cap=data.get("generation_queue_bytes",8*1024*1024)
         self.count_cap=data.get("generation_queue_messages",2000)
-        self.sequential=data.get("execution_profile")=="operations"
+        self.sequential=data.get("execution_profile")=="operations" or data.get("sequential", False)
         # 운영 경로는 모든 차량의 응답 공간을 미리 예약하지 않는다.
         # 같은 시각의 차량 수가 큐보다 많아도 뒤 시각의 페이지가 큐를 점유하지 않게 한다.
         self.frame=min(1048576,self.byte_cap//max(1,2*(workers+1))) if self.sequential else max(16384,min(1048576,self.byte_cap//max(1,count+2*workers+1)))
