@@ -19,7 +19,7 @@ def execute(manager, job, data, worker, timeout):
     paused_at = None
     result = job.result.copy()
     checkpoint = data.get("schedule_checkpoint")
-    resume_ms = checkpoint["virtual_ms"] if checkpoint else 0
+    virtual_origin_ms = checkpoint["virtual_ms"] if checkpoint else 0
     confirmed = dict(checkpoint["confirmed"]) if checkpoint else {}
     previous_count = checkpoint["count"] if checkpoint else 0
     confirmed_count = previous_count
@@ -34,7 +34,7 @@ def execute(manager, job, data, worker, timeout):
     due_offset = data.get("due_offset", lambda ts: ts - data["measurement_start_ms"])
 
     def active_ms(now):
-        return resume_ms + ((paused_at if paused_at is not None else now) - started - paused_seconds) * 1000
+        return virtual_origin_ms + ((paused_at if paused_at is not None else now) - started - paused_seconds) * 1000
 
     def checkpoint_position():
         if not data["realtime"]:
@@ -134,7 +134,7 @@ def execute(manager, job, data, worker, timeout):
         paused = paused_seconds + (now - paused_at if paused_at is not None else 0)
         if checkpoint is not None:
             position = checkpoint_position() if saved_position is None else saved_position
-            result["schedule_checkpoint"] = {**checkpoint, "virtual_ms": max(resume_ms, position),
+            result["schedule_checkpoint"] = {**checkpoint, "virtual_ms": max(virtual_origin_ms, position),
                                              "confirmed": dict(confirmed), "count": confirmed_count}
             result["recovery_available"] = state != "completed"
         result.update(elapsed_ms=int(elapsed*1000), paused_ms=int(paused*1000),
@@ -166,7 +166,7 @@ def execute(manager, job, data, worker, timeout):
             if publisher:
                 publisher.pump(allow_start=not job.pause_requested,
                                elapsed_ms=active_ms(now),
-                               origin_ms=started_wall_ms+paused_seconds*1000-resume_ms)
+                               origin_ms=started_wall_ms+paused_seconds*1000-virtual_origin_ms)
                 sync_mqtt()
             if job.pause_requested:
                 before=time.monotonic()
@@ -215,6 +215,15 @@ def execute(manager, job, data, worker, timeout):
     try:
         report(throttle=MESSAGE_SAVE_SECONDS)
         generation=GenerationPool(worker,job,manager,data.get("generation_workers",1))
+        bounded=BoundedSchedule(data,generation,gate,result,include_boundaries=mqtt and data["config"]["connection_lifetime"]=="while_driving",on_account=budget)
+        if data.get("skip_initial_idle"):
+            head=bounded.peek(bounded.heads)
+            if head is not None:
+                first_timestamp=head["due"]
+                if bounded.boundaries:
+                    first_timestamp=min(first_timestamp,bounded.boundaries[0][0])
+                virtual_origin_ms=max(0,int(due_offset(first_timestamp)))
+                result["initial_idle_skipped_ms"]=virtual_origin_ms
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
@@ -226,7 +235,6 @@ def execute(manager, job, data, worker, timeout):
                     if not gate():break
                     publisher.enqueue("connect",gate,client_id=client)
                     sync_mqtt();report(throttle=True)
-        bounded=BoundedSchedule(data,generation,gate,result,include_boundaries=mqtt and data["config"]["connection_lifetime"]=="while_driving",on_account=budget)
         replay_started=time.monotonic()
         result["execution_timing"]["preparation_ms"]=(replay_started-started)*1000
         if not mqtt:

@@ -80,9 +80,9 @@ def broker_report(profile):
 
 def test_trial_pause_and_recover_preserve_mqtt_trip(mqtt_client):
     client, profile = mqtt_client
-    source = schedule(end="08", interval=1000)
+    source = schedule(end="16", interval=1000)
     source["vehicles"] = [{"vehicle_id": "v000001", "trips": [{
-        "start": "2026-11-18T13:00:00+09:00", "end": "2026-11-18T13:00:06+09:00", "road_profile": "urban"}]}]
+        "start": "2026-11-18T13:00:08+09:00", "end": "2026-11-18T13:00:14+09:00", "road_profile": "urban"}]}]
     run_id, _ = start(client, source)
     job = "/api/jobs/" + run_id
 
@@ -98,6 +98,8 @@ def test_trial_pause_and_recover_preserve_mqtt_trip(mqtt_client):
     assert client.post(job + "/pause").status_code == 202
     paused = wait_for_result(lambda r: r["job_state"] == "paused")
     checkpoint = paused["schedule_checkpoint"]
+    assert paused["initial_idle_skipped_ms"] == 8000
+    assert checkpoint["virtual_ms"] >= 8000
     assert 0 < checkpoint["count"] < 7
     time.sleep(.35)
     assert client.get(job).json()["result"]["schedule_checkpoint"] == checkpoint
@@ -111,6 +113,7 @@ def test_trial_pause_and_recover_preserve_mqtt_trip(mqtt_client):
     result = finished(client, run_id)["result"]
     assert result["job_state"] == "completed", result["errors"]
     assert result["recovery_confirmed_before"] == checkpoint["count"]
+    assert "initial_idle_skipped_ms" not in result
     assert result["schedule_checkpoint"]["count"] == result["planned_messages"] == 7
     report = broker_report(profile)
     assert [m["ty"] for m in report["messages"]] == [4] * 6 + [3]
@@ -206,6 +209,26 @@ def test_schedule_mqtt_rejects_dedicated_synthetic_and_missing_confirmation(mqtt
     for extra in [{"mapping_mode":"dedicated"},{"force_end_trip":True}]:
         assert client.post("/api/workspace/execute",json={**base,"confirm_mqtt":True,**extra}).status_code==422
     assert control.JOBS.active_id() is None
+
+
+@pytest.mark.parametrize("lifetime", ["always", "while_driving"])
+def test_trial_basic_skips_initial_idle_but_keeps_pace_and_final_parking(mqtt_client, lifetime):
+    client, profile = mqtt_client
+    source = schedule([{"vehicle_id":"v000001","trips":[
+        {"start":"2026-11-18T13:00:12+09:00","end":"2026-11-18T13:00:14+09:00","road_profile":"urban"}
+    ]}], end="16", interval=1000)
+    run_id, _ = start(client, source, connection_lifetime=lifetime)
+    result = finished(client, run_id)["result"]
+    assert result["job_state"] == "completed"
+    assert result["initial_idle_skipped_ms"] == 12000
+    assert result["simulation_time_ms"] == 16000
+    assert 3800 <= result["elapsed_ms"] < 10000
+    assert result["puback_count"] == 3
+    report = broker_report(profile)
+    origin = datetime.fromisoformat(source["measurement"]["start"]).timestamp() * 1000
+    assert [(m["ts"]-origin,m["ty"]) for m in report["messages"]] == [(12000,4),(13000,4),(14000,3)]
+    received = [datetime.fromisoformat(ts) for ts in report["received_at"]]
+    assert (received[-1]-received[0]).total_seconds() >= 1.7
 
 
 def test_trial_fast_and_basic_send_identical_payloads(mqtt_client):

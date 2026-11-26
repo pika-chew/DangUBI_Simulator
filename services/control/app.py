@@ -718,6 +718,8 @@ def execute_saved_schedule(body: ScheduleExecutionRequest, recovery=None):
             return fleet_obd(FleetOBDRequest(fleet=source.fleet,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch),vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
         return generate_scheduled_obd(scheduled_body,vehicle,key,WORKER,None,None,offset,limit,checkpoint_store=execution_checkpoints,session=session)
     data={"operation":body.transport,"execution_profile":mode,"config":config,"planned_messages":planned,"assignments":assignments,"client_by_vehicle":{a["vehicle_id"]:a["client_id"] for a in assignments},"generate":stream.generate if stream else generate,"measurement_start_ms":start,"duration_ms":end-start,"realtime":body.realtime,"validate_message":validate_message}
+    if mode=="small_test" and body.realtime and recovery is None:
+        data["skip_initial_idle"]=True
     if stream:data["generate_batch"]=stream.generate_many
     if len(vehicle_ids) > 100:
         data["sequential"] = True
