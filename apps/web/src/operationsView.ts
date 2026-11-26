@@ -9,7 +9,7 @@ export type RegisterInput={count:number;pattern_mix:{commute:number;daytime:numb
 export type StatusCount={label:string;count:number};
 export type RegistrySummary={active:number;max_active:number;status:Record<string,StatusCount>;
   patterns:Record<string,{count:number;percent:number}>;anomaly_eligible:number;serial_remaining:number;
-  pseudonym_provider:string;provider_allows_real_transport:boolean;target:RegisterInput|null};
+  pseudonym_provider:string;provider_allows_real_transport:boolean;send_identity?:"pseudonym"|"synthetic_raw";target:RegisterInput|null};
 export type OperationStatus={state:"stopped"|"running"|"pausing"|"paused"|"stopping";running:boolean;settings:OperationSettings|null;last_stop:null|"graceful"|"abnormal";
   stop_reason:string|null;error:string|null;virtual_checkpoint_ms:number|null;window_end_ms?:number|null;session_started_at:string|null;
   live:{state?:string;stopping?:boolean;stop_reason?:string|null;recovering?:boolean;vehicles?:number;virtual_anchor_ms?:number;virtual_now_ms?:number;

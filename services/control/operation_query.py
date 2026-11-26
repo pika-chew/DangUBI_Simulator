@@ -63,13 +63,14 @@ def generate(trip: dict, worker: Path, start_ms, end_ms, offset, limit, search_e
         raise ValueError(result.get("error", "운행 OBD 재생성에 실패했습니다."))
     output = result["scheduled"]
     same_worker = trip["worker_hash"] == worker_hash if trip["worker_hash"] else None
-    warnings = ["메시지 원문은 저장하지 않습니다. 저장된 초기 상태와 당시 설정으로 같은 운행을 다시 생성한 결과이며 브로커 수신 기록이 아닙니다.",
-                "실제 전송 본문은 맨 앞에 vehicleId(가명 VIN)가 붙은 {vehicleId, ty, ts, pld}입니다."]
+    warnings = ["메시지 원문은 저장하지 않습니다. 저장된 초기 상태와 당시 설정으로 같은 운행을 다시 생성한 결과이며 브로커 수신 기록이 아닙니다."]
+    if not trip.get("identity_recorded"):
+        warnings.append("이 운행에 송신 식별자 기록이 없어 현재 VIN 모드를 기준으로 vehicleId를 표시합니다.")
     if same_worker is False:
         warnings.insert(0, "현재 Worker가 이 운행을 보낸 당시 Worker와 다릅니다. 재생성 값이 실제로 보낸 값과 다를 수 있습니다.")
     elif same_worker is None:
         warnings.insert(0, "이 운행의 당시 Worker 지문이 없어 재생성 값과 실제 전송 값의 일치를 확인할 수 없습니다.")
-    return {"status": "generated_local_only", "vehicle_id": trip["vehicle_id"], "pseudonym": trip["pseudonym"], "trip_key": trip["trip_key"],
+    return {"status": "generated_local_only", "vehicle_id": trip["vehicle_id"], "pseudonym": trip["pseudonym"], "vehicleId": trip.get("vehicleId"), "trip_key": trip["trip_key"],
             "model": output["model"], "event_search": output.get("event_search"), "initial_state": trip["initial"],
             "messages": output["messages"], "trace": output.get("trace", []), "microtrip_count": output["microtrip_count"],
             "has_more": offset + len(output["messages"]) < output["microtrip_count"], "trip": output.get("trip"),

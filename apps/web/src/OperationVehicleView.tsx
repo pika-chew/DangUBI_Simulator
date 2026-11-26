@@ -7,14 +7,14 @@ import {readJSONResponse} from "./http";
 import type {Message,TracePoint} from "./SimulationTools";
 import {historyStatusLabels,kstDay,dayRange,patternLabels,roadLabels} from "./operationsView";
 
-type PublicVehicle={id:number;vin_masked:string;pseudonym:string|null;status_label:string;pattern:string;anomaly_eligible:boolean};
+type PublicVehicle={id:number;vin?:string|null;vin_masked:string;pseudonym:string|null;status_label:string;pattern:string;anomaly_eligible:boolean};
 export type HistoryTrip={vehicle_id:number;trip_key:string;start_ms:number;end_ms:number;observed_start_ms:number;observed_end_ms:number;
   road_profile:string;status:keyof typeof historyStatusLabels;transport:"dry_run"|"mqtt";session:string|null;confirmed_ts:number|null;
   resume_after_ms:number|null;recoveries:number;started_at:string;finished_at:string|null};
 type History={vehicle:PublicVehicle;trips:HistoryTrip[];has_more:boolean;from_ms:number;to_ms:number;total_trips:number;
   first_start_ms:number|null;last_end_ms:number|null;history_since:string;last_completed_end_ms:number|null};
 type Delivery={status:string;status_label:string;transport:string;confirmed_ts:number|null;description:string;recoveries:number;duplicate_risk_after_ms:number|null};
-type OBD={messages:Message[];trace:TracePoint[];microtrip_count:number;has_more:boolean;trip:Message|null;model:string;pseudonym:string|null;
+type OBD={vehicleId?:string|null;messages:Message[];trace:TracePoint[];microtrip_count:number;has_more:boolean;trip:Message|null;model:string;pseudonym:string|null;
   initial_state:{lat:number;lon:number;odometer_m:number;coolant_c:number};same_worker:boolean|null;delivery:Delivery;warnings:string[];
   settings:{interval_ms:number;transport:string}};
 type Loaded={data:OBD;start:number;end:number;offset:number};
@@ -28,6 +28,10 @@ const tripEvidence=(t:HistoryTrip)=>t.status==="completed"?(t.transport==="mqtt"
   :t.status==="lost"?"보내지 않은 Trip · 손실 기록":"아직 확인되지 않은 Trip · 운행 종료 때 보낼 값";
 
 /** 상시 운영 차량 운행 조회. 운행 이력의 초기 상태·당시 설정으로 선택 운행을 다시 생성해 보여 준다(메시지 원문 저장 없음). */
+function withIdentity(message:Message, vehicleId?:string|null):Message {
+  return vehicleId ? {vehicleId,...message} : message;
+}
+
 export function OperationVehicleView({request,renderMessages,onActivity}:{request:{id:number;token:number}|null;
   renderMessages:(messages:Message[],vehicle:string,offset?:number)=>ReactNode;onActivity:(text:string)=>void}) {
   const [query,setQuery]=useState("");
@@ -100,7 +104,7 @@ export function OperationVehicleView({request,renderMessages,onActivity}:{reques
   return <>
     <section ref={top} className="card"><div className="panel-heading"><div><h2>차량 운행 조회</h2>
       <p className="note">운행마다 초기 상태와 당시 설정만 기록하고, 선택한 운행을 같은 조건으로 다시 생성해 보여 줍니다. 메시지 원문은 저장하지 않습니다.</p></div>
-      <InfoHint label="차량 운행 조회" text="명부 번호 또는 가명 VIN으로 찾습니다. 원본 VIN으로는 찾거나 표시하지 않습니다."/></div>
+      <InfoHint label="차량 운행 조회" text="명부 번호 또는 가명 VIN으로 찾습니다. 시뮬레이터 합성 VIN은 전체를 표시하지만 검색 입력으로는 받지 않습니다."/></div>
       <div className="schedule-actions">
         <label>명부 번호 또는 가명 VIN<input value={query} maxLength={128} placeholder="예: 1 또는 PS…" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void lookup();}}/></label>
         <button className="primary" disabled={!!busy||!query.trim()} onClick={()=>void lookup()}>차량 조회</button>
@@ -108,7 +112,7 @@ export function OperationVehicleView({request,renderMessages,onActivity}:{reques
       {busy&&<p role="status" className="schedule-status">{busy}</p>}
       {error&&<p role="alert" className="error">{error}</p>}
       {history&&<>
-        <p>차량 {history.vehicle.id} · VIN <code>{history.vehicle.vin_masked}</code> · 가명 VIN <code>{history.vehicle.pseudonym??"—"}</code> · {history.vehicle.status_label} · {patternLabels[history.vehicle.pattern]??history.vehicle.pattern}{history.vehicle.anomaly_eligible?" · 이상 이벤트 대상":""}</p>
+        <p>차량 {history.vehicle.id} · VIN <code>{history.vehicle.vin??history.vehicle.vin_masked}</code> · 가명 VIN <code>{history.vehicle.pseudonym??"—"}</code> · {history.vehicle.status_label} · {patternLabels[history.vehicle.pattern]??history.vehicle.pattern}{history.vehicle.anomaly_eligible?" · 이상 이벤트 대상":""}</p>
         <fieldset disabled={!!busy} className="schedule-fieldset"><div className="schedule-actions">
           <label>시작 날짜 (KST)<input type="date" value={fromDay} onChange={e=>setFromDay(e.target.value)}/></label>
           <label>종료 날짜 (KST)<input type="date" value={toDay} min={fromDay} onChange={e=>setToDay(e.target.value)}/></label>
@@ -141,7 +145,7 @@ export function OperationVehicleView({request,renderMessages,onActivity}:{reques
       <p>{label} · {clock(trip.start_ms)} 출발 · 모델 {detail.model} · Microtrip 주기 {detail.settings.interval_ms/1000}초</p>
       <ul className="note">{detail.warnings.map(w=><li key={w}>{w}</li>)}</ul>
       <p className="note">출발 위치 {detail.initial_state.lat.toFixed(6)}, {detail.initial_state.lon.toFixed(6)} · 초기 총주행거리 {(detail.initial_state.odometer_m/1000).toFixed(3)} km</p>
-      {summary&&<>{summary.trip?<details><summary>종료 Trip 요약 · 총주행시간 {length(Number(summary.trip.pld.edt)-Number(summary.trip.pld.stt))} · {tripEvidence(trip)} · 표/JSON 보기</summary>{renderMessages([summary.trip],label)}</details>
+      {summary&&<>{summary.trip?<details><summary>종료 Trip 요약 · 총주행시간 {length(Number(summary.trip.pld.edt)-Number(summary.trip.pld.stt))} · {tripEvidence(trip)} · 표/JSON 보기</summary>{renderMessages([withIdentity(summary.trip,summary.vehicleId)],label)}</details>
         :<p className="note">종료 Trip이 없습니다.</p>}</>}
       {!summary&&<p className="note">선택한 구간의 결과입니다. 종료 Trip 요약은 ‘전체 운행 보기’로 확인합니다.</p>}
       <h3>Microtrip 구간 조회</h3>
@@ -158,7 +162,7 @@ export function OperationVehicleView({request,renderMessages,onActivity}:{reques
         <div className="schedule-actions"><b>Microtrip · {loaded.data.microtrip_count?loaded.offset+1:0}~{loaded.offset+loaded.data.messages.length} / {loaded.data.microtrip_count.toLocaleString()}건</b>
           <button disabled={!!busy||loaded.offset===0} onClick={()=>void obd(loaded.start,loaded.end,Math.max(0,loaded.offset-100))}>이전 100건</button>
           <button disabled={!!busy||!loaded.data.has_more} onClick={()=>void obd(loaded.start,loaded.end,loaded.offset+100)}>다음 100건</button></div>
-        <div className="interval-messages">{renderMessages(loaded.data.messages,label,loaded.offset)}</div>
+        <div className="interval-messages">{renderMessages(loaded.data.messages.map(message=>withIdentity(message,loaded.data.vehicleId)),label,loaded.offset)}</div>
       </>}
     </section>}
   </>;

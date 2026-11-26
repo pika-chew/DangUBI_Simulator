@@ -185,7 +185,7 @@ def arm(reg: Registry, settings: OperationSettings, anchor: int, worker_hash: st
         if current:
             a, b, profile = current
             trip = json.dumps({"key": trip_key(key, a, b, profile), "a": a, "b": b, "profile": profile, "initial": dict(INITIAL_STATE),
-                               "worker_hash": worker_hash, "alias": v["pseudonym"], "destination": None, "settings": snapshot})
+                               "worker_hash": worker_hash, "alias": v["wire_identity"], "destination": None, "settings": snapshot})
         rows.append((v["id"], day.isoformat(), max(ended) if ended else None, None, trip, anchor if trip else None, stamp))
     with sqlite3.connect(reg.path) as con:
         con.executemany("INSERT OR REPLACE INTO vehicle_state(id, start_day, last_end_ms, final, trip, confirmed_ts, updated_at) VALUES (?,?,?,?,?,?,?)", rows)
@@ -217,7 +217,7 @@ def live_part(args, base_registry: Path, scenario: str, out: Path) -> dict:
         path = folder / "registry.sqlite3"
         with sqlite3.connect(base_registry) as src, sqlite3.connect(path) as dst:
             src.backup(dst)
-        reg = Registry(path, DevelopmentPseudonyms())
+        reg = Registry(path, DevelopmentPseudonyms(), synthetic_raw_vin=args.vin_mode == "synthetic_raw")
         settings = settings_for(args, scenario == "focus")
         worker = Path(args.worker)
         worker_hash = hashlib.sha256(worker.read_bytes()).hexdigest()
@@ -306,7 +306,7 @@ def live_part(args, base_registry: Path, scenario: str, out: Path) -> dict:
         windows = [{"minute": k, "messages": v[0], "max_lag_ms": round(v[1])} for k, v in sorted(state.pop("by_window").items())]
         focus_rows = [r["focus"] for r in sampler.rows if r.get("focus")]
         result = {
-            "scenario": scenario, "vehicles": args.vehicles, "interval_ms": args.interval_ms, "generation_workers": args.workers,
+            "scenario": scenario, "vehicles": args.vehicles, "interval_ms": args.interval_ms, "generation_workers": args.workers, "vin_mode": args.vin_mode,
             "virtual_start": datetime.fromtimestamp(anchor / 1000, KST).isoformat(), "minutes": args.minutes, "elapsed_s": round(elapsed, 1),
             "prepare_s": round(prepare_s, 1), "in_progress_trips_at_start": in_progress, "stopped_early": error,
             "messages_generated": state["count"], "messages_per_second_avg": round(state["count"] / max(1, elapsed), 1),
@@ -367,6 +367,7 @@ def main():
     parser.add_argument("--start-time", default="08:15")
     parser.add_argument("--minutes", type=int, default=36)
     parser.add_argument("--workers", type=int, default=1, choices=[1, 2, 4])
+    parser.add_argument("--vin-mode", default="pseudonym", choices=["pseudonym", "synthetic_raw"], help="상시 운영 송신 VIN 모드")
     parser.add_argument("--scenarios", default="baseline,focus")
     parser.add_argument("--skip-plan", action="store_true")
     parser.add_argument("--skip-live", action="store_true")

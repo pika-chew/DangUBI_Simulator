@@ -41,12 +41,12 @@ def test_history_lifecycle_and_lookup(tmp_path):
     vehicle = reg.vehicles()["vehicles"][0]
     assert reg.find_vehicle("1")["id"] == 1 and reg.find_vehicle(vehicle["pseudonym"])["id"] == 1
     assert reg.find_vehicle("999") is None
-    # 원본 VIN으로는 찾지 않고 응답에도 넣지 않는다.
+    # 등록된 합성 VIN은 표시하되 조회 입력은 차량 번호·가명을 유지한다.
     with sqlite3.connect(reg.path) as con:
         raw = con.execute("SELECT vin FROM vehicles WHERE id=1").fetchone()[0]
     assert reg.find_vehicle(raw) is None
     found = reg.history(1, row["start_ms"] - 1, row["end_ms"] + 1)
-    assert raw not in json.dumps(found)
+    assert found["vehicle"]["vin"] == raw
     assert [t["status"] for t in found["trips"]] == ["sending"] and found["total_trips"] == 1
     reg.save_confirmed({1: row["start_ms"] + 3000})
     assert reg.history(1, 0, row["end_ms"] + 1)["trips"][0]["confirmed_ts"] == row["start_ms"] + 3000  # 진행 중 확인 시각
@@ -187,3 +187,31 @@ def test_recovery_requirement_is_visible_and_names_changed_settings(tmp_path):
         ops.start(changed)
     assert "운영 차량 수" in str(error.value) and "Client 수" in str(error.value) and "당시 설정 불러오기" in str(error.value)
     assert not ops.running()
+
+
+def test_history_identity_column_migration_and_legacy_rows(tmp_path):
+    """송신 식별자 열이 없던 기존 명부: 열을 추가하고 기존 이력은 보존한다. 기록이 없는 운행은 현재 모드 값으로 표시하고 안내한다."""
+    reg = registry(tmp_path)
+    _, row = first_trip(reg)
+    start_record(reg, row)
+    with sqlite3.connect(reg.path) as con:
+        con.execute("ALTER TABLE trip_history DROP COLUMN wire_identity")  # 이전 버전 명부 상태
+        before = con.execute("SELECT vehicle_id, trip_key, status, start_ms, end_ms FROM trip_history").fetchall()
+    pseudo = type(reg)(reg.path, reg.provider)
+    with sqlite3.connect(reg.path) as con:
+        assert con.execute("SELECT vehicle_id, trip_key, status, start_ms, end_ms FROM trip_history").fetchall() == before
+        assert con.execute("SELECT wire_identity FROM trip_history").fetchone()[0] is None
+    legacy = pseudo.history_trip(1, row["trip_key"])
+    assert legacy["vehicleId"] == legacy["pseudonym"] and not legacy["identity_recorded"]
+    page = regenerate(legacy, WORKER, None, None, 0, 1)
+    assert page["vehicleId"] == legacy["pseudonym"] and any("송신 식별자 기록이 없어" in w for w in page["warnings"])
+    raw_mode = type(reg)(reg.path, reg.provider, synthetic_raw_vin=True)
+    with sqlite3.connect(reg.path) as con:
+        raw = con.execute("SELECT vin FROM vehicles WHERE id=1").fetchone()[0]
+    assert raw_mode.history_trip(1, row["trip_key"])["vehicleId"] == raw  # 기록 없는 운행은 현재 모드 기준
+    # 새로 기록하는 운행은 당시 송신 식별자를 저장하고 모드가 바뀌어도 그 값을 보여 준다.
+    with sqlite3.connect(reg.path) as con:
+        con.execute("DELETE FROM trip_history")
+    start_record(reg, row)
+    assert raw_mode.history_trip(1, row["trip_key"])["vehicleId"] == legacy["pseudonym"]
+    assert raw_mode.history(1, 0, row["end_ms"] + 1)["vehicle"]["vin"] == raw  # 합성 VIN 전체 표시

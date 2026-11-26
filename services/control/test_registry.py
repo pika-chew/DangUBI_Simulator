@@ -76,14 +76,17 @@ def all_vehicles(reg):
             return out
 
 
-def test_responses_never_contain_raw_vin(tmp_path):
+def test_synthetic_vin_is_shown_only_in_vin_field(tmp_path):
+    """합성 VIN 전체 표시: 차량 목록의 vin 필드에만 17자리를 넣고, 가린 값·요약에는 넣지 않는다."""
     reg = make(tmp_path)
     reg.register(5, SETTINGS)
     with sqlite3.connect(tmp_path / "registry.sqlite3") as con:
-        raws = [r[0] for r in con.execute("SELECT vin FROM vehicles")]
-    text = repr(reg.vehicles()) + repr(reg.summary())
+        raws = [r[0] for r in con.execute("SELECT vin FROM vehicles ORDER BY id")]
     assert all(vin.is_valid(r) for r in raws)
-    assert not any(r in text for r in raws)
+    listed = reg.vehicles()["vehicles"]
+    assert [v["vin"] for v in listed] == raws
+    hidden = [{k: x for k, x in v.items() if k != "vin"} for v in listed]
+    assert not any(r in repr(hidden) + repr(reg.summary()) for r in raws)
     pseudonyms = [v["pseudonym"] for v in reg.vehicles()["vehicles"]]
     assert all(p.startswith("PS") and len(p) == 17 for p in pseudonyms) and len(set(pseudonyms)) == 5
 
@@ -155,3 +158,9 @@ def test_operations_registry_api(tmp_path, monkeypatch):
         assert summary["active"] == 9 and summary["provider_allows_real_transport"] is False
         assert c.post("/api/operations/vehicles", json={"count": 1, "trip_min_minutes": 50, "trip_max_minutes": 10}).status_code == 422
         assert c.get("/api/operations/vehicles", params={"status": "bogus"}).status_code == 422
+
+
+def test_summary_reports_send_identity_mode(tmp_path):
+    reg = make(tmp_path)
+    assert reg.summary()["send_identity"] == "pseudonym"
+    assert Registry(reg.path, reg.provider, synthetic_raw_vin=True).summary()["send_identity"] == "synthetic_raw"

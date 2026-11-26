@@ -1,6 +1,6 @@
-"""상시 운영 실행기. 명부 차량을 연속 가상시계로 운행시키고 가명 VIN으로 전송한다.
+"""상시 운영 실행기. 명부 차량을 연속 가상시계로 운행시키고 송신 VIN(기본 가명 VIN, 임시 모드는 합성 VIN)으로 전송한다.
 
-- 토픽 `{prefix}/ops-main/{가명VIN}/obd`, Client `sim-ops-main-cNNN`, 본문 `{vehicleId, ty, ts, pld}`.
+- 토픽 `{prefix}/ops-main/{송신VIN}/obd`, Client `sim-ops-main-cNNN`, 본문 `{vehicleId, ty, ts, pld}`.
 - 정상 중단: 진행 중 운행은 끝까지 보내고 아직 시작하지 않은 운행은 보내지 않는다.
 - 강제 중단·오류: 운행 시작 상태와 마지막 PUBACK 확인 시각으로 다음 시작 때 같은 운행을 다시 만들어
   확인된 메시지 다음부터 이어 보낸다(미확인 구간은 동일 내용 중복 가능, 기록).
@@ -319,7 +319,7 @@ class OperationController:
                 if different:
                     raise RuntimeError(f"복구 대기 운행 {len(snapshots):,}건은 비정상 종료 때 보내던 운행이라 당시 설정으로만 이어 보낼 수 있습니다. "
                                        f"다른 항목: {', '.join(different)}. 화면의 '당시 설정 불러오기'로 맞춘 뒤 시작하세요.")
-                if trip.get("worker_hash", worker_hash) != worker_hash or trip.get("alias", vehicle["pseudonym"]) != vehicle["pseudonym"] or trip.get("destination", destination) != destination:
+                if trip.get("worker_hash", worker_hash) != worker_hash or trip.get("alias", vehicle["pseudonym"]) != vehicle["wire_identity"] or trip.get("destination", destination) != destination:
                     raise RuntimeError("복구할 운행의 Worker, 차량 식별자 또는 전송 대상이 바뀌었습니다. 기존 구성으로 복구하세요.")
             self.graceful.clear()
             self.pause_request.clear()
@@ -440,8 +440,8 @@ class OperationController:
             vehicle = vehicle_key(info["id"])
             day = day or registry.ensure_start_day(info["id"], first_day(start_day_ms, same_day))
             client = load.pick()
-            client_by_alias[info["pseudonym"]] = client
-            vstates[vehicle] = dict(info=info, alias=info["pseudonym"], client=client, start_day=day, active_key=None,
+            client_by_alias[info["wire_identity"]] = client
+            vstates[vehicle] = dict(info=info, alias=info["wire_identity"], client=client, start_day=day, active_key=None,
                                     final=False, removing=info["status"] == "removing", pending_end=None)
             generator.add(vehicle, info)
             planner.add(info["id"], info["fixed"])
@@ -509,10 +509,10 @@ class OperationController:
                 vehicle = known.get(info["id"])
                 if vehicle is None and info["status"] == "ready" and not live["stopping"] and live["vehicles"] < vehicle_limit:
                     vehicle = include(info, virtual_now())
-                    alias_to_vehicle[info["pseudonym"]] = vehicle
+                    alias_to_vehicle[info["wire_identity"]] = vehicle
                     registry.set_status([info["id"]], "driving", only_from=("ready",))
                     if mqtt_mode:
-                        publisher.enqueue("attach", hard_gate, route=vstates[vehicle]["client"], vehicle_id=info["pseudonym"], client_id=vstates[vehicle]["client"])
+                        publisher.enqueue("attach", hard_gate, route=vstates[vehicle]["client"], vehicle_id=info["wire_identity"], client_id=vstates[vehicle]["client"])
                     bounded.add(vehicle)
                     live["vehicles"] += 1
                     restart["flag"] = True
@@ -662,7 +662,7 @@ class OperationController:
             days = registry.ensure_start_days([(info["id"], first_day(anchor, fresh)) for info in selected])
             for info in selected:
                 vehicle = include(info, anchor, same_day=fresh, day=days[info["id"]])
-                alias_to_vehicle[info["pseudonym"]] = vehicle
+                alias_to_vehicle[info["wire_identity"]] = vehicle
             registry.set_status([vs["info"]["id"] for vs in vstates.values()], "driving", only_from=("ready",))
             live["vehicles"] = len(vstates)
             data = {"execution_profile": "operations", "realtime": True, "config": {"interval_ms": settings.interval_ms},

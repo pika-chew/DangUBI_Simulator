@@ -88,9 +88,10 @@ def deficit_order(current: dict[str, int], weights: dict[str, float], count: int
 
 
 class Registry:
-    def __init__(self, path: Path, provider: PseudonymProvider, max_active: int = 25000, seed: int | None = None):
+    def __init__(self, path: Path, provider: PseudonymProvider, max_active: int = 25000, seed: int | None = None, *, synthetic_raw_vin: bool = False):
         self.path = Path(path)
         self.provider = provider
+        self.synthetic_raw_vin = synthetic_raw_vin
         self.max_active = max_active
         self.lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +134,8 @@ class Registry:
             columns = {row["name"] for row in con.execute("PRAGMA table_info(operation)")}
             if "window_end_ms" not in columns:
                 con.execute("ALTER TABLE operation ADD COLUMN window_end_ms INTEGER")
+            if "wire_identity" not in {row["name"] for row in con.execute("PRAGMA table_info(trip_history)")}:
+                con.execute("ALTER TABLE trip_history ADD COLUMN wire_identity TEXT")
             con.execute("INSERT OR IGNORE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             con.execute("INSERT OR IGNORE INTO meta VALUES ('next_serial', '1')")
             # 명부 고유 seed: 같은 명부에서 특성 난수를 재현하기 위한 값이며 비밀이 아니다.
@@ -287,10 +290,18 @@ class Registry:
         with self.connect() as con:
             con.execute(f"UPDATE operation SET {', '.join(f'{k}=?' for k in fields)}, updated_at=? WHERE id=1", (*fields.values(), now()))
 
+    def wire_identity(self, row):
+        if not self.synthetic_raw_vin:
+            return row["pseudonym"]
+        raw = row["vin"]
+        if not raw.startswith(vin_codec.VIRTUAL_WMI) or not vin_codec.is_valid(raw):
+            raise RegistryError("임시 송신 경로는 시뮬레이터 합성 VIN만 지원합니다.")
+        return raw
+
     def session_vehicles(self) -> list[dict]:
-        """운영에 넣을 차량: 가명이 있고 제외·보류가 아닌 차량. 원본 VIN은 넣지 않는다."""
+        """운영에 넣을 차량과 실행 내부의 송신 식별자를 반환한다."""
         with self.connect() as con:
-            rows = con.execute("""SELECT v.id, v.pseudonym, v.status, v.pattern, v.anomaly_eligible, v.traits,
+            rows = con.execute("""SELECT v.id, v.vin, v.pseudonym, v.status, v.pattern, v.anomaly_eligible, v.traits,
                 s.start_day, s.last_end_ms, s.final, s.trip, s.confirmed_ts
                 FROM vehicles v LEFT JOIN vehicle_state s ON s.id=v.id
                 WHERE v.pseudonym IS NOT NULL AND v.status IN ('ready','driving','removing') ORDER BY v.id""").fetchall()
@@ -298,14 +309,13 @@ class Registry:
 
     def recovery_trips(self):
         with self.connect() as con:
-            rows = con.execute("""SELECT v.pseudonym, s.trip FROM vehicle_state s
+            rows = con.execute("""SELECT v.vin, v.pseudonym, s.trip FROM vehicle_state s
                 JOIN vehicles v ON v.id=s.id WHERE s.trip IS NOT NULL AND v.status <> 'removed'""").fetchall()
-        return [{"pseudonym": row["pseudonym"], "trip": json.loads(row["trip"])} for row in rows]
+        return [{"pseudonym": row["pseudonym"], "wire_identity": self.wire_identity(row), "trip": json.loads(row["trip"])} for row in rows]
 
-    @staticmethod
-    def _session_row(r):
+    def _session_row(self, r):
         fixed = {**json.loads(r["traits"]), "pattern": r["pattern"], "anomaly_eligible": bool(r["anomaly_eligible"])}
-        return {"id": r["id"], "pseudonym": r["pseudonym"], "status": r["status"], "fixed": fixed,
+        return {"id": r["id"], "pseudonym": r["pseudonym"], "wire_identity": self.wire_identity(r), "status": r["status"], "fixed": fixed,
                 "start_day": r["start_day"], "last_end_ms": r["last_end_ms"],
                 "final": json.loads(r["final"]) if r["final"] else None,
                 "trip": json.loads(r["trip"]) if r["trip"] else None, "confirmed_ts": r["confirmed_ts"]}
@@ -365,9 +375,9 @@ class Registry:
             return  # 당시 설정을 확인할 수 없으면 재생성 근거가 없으므로 이력을 만들지 않는다.
         settings_id = self._settings_id(con, settings, trip.get("worker_hash"), trip.get("destination"))
         con.execute("""INSERT OR IGNORE INTO trip_history(vehicle_id, trip_key, start_ms, end_ms, profile, initial, settings_id,
-                       transport, session, status, confirmed_ts, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       transport, session, status, confirmed_ts, started_at, wire_identity) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (vehicle, trip["key"], trip["a"], trip["b"], trip["profile"], json.dumps(trip["initial"]), settings_id,
-                     settings.get("transport", "dry_run"), session, status, confirmed_ts, stamp))
+                     settings.get("transport", "dry_run"), session, status, confirmed_ts, stamp, trip.get("alias")))
 
     def _backfill_history(self, con):
         """이력 기능 이전에 시작돼 아직 끝나지 않은 운행은 저장된 시작 기록으로 이력을 만든다(복구 대기)."""
@@ -483,6 +493,7 @@ class Registry:
                 "serial_remaining": vin_codec.SERIAL_MAX - int(self.meta(con, "next_serial")) + 1,
                 "pseudonym_provider": self.provider.name,
                 "provider_allows_real_transport": self.provider.allows_real_transport,
+                "send_identity": "synthetic_raw" if self.synthetic_raw_vin else "pseudonym",
             }
 
     def vehicles(self, status: str | None = None, offset: int = 0, limit: int = 100) -> dict:
@@ -497,7 +508,8 @@ class Registry:
 
     @staticmethod
     def _public_vehicle(r):
-        return {"id": r["id"], "vin_masked": vin_codec.mask(r["vin"]), "pseudonym": r["pseudonym"],
+        synthetic_vin = r["vin"] if r["vin"].startswith(vin_codec.VIRTUAL_WMI) and vin_codec.is_valid(r["vin"]) else None
+        return {"id": r["id"], "vin": synthetic_vin, "vin_masked": vin_codec.mask(r["vin"]), "pseudonym": r["pseudonym"],
                 "status": r["status"], "status_label": STATUS_LABELS[r["status"]], "pattern": r["pattern"],
                 "anomaly_eligible": bool(r["anomaly_eligible"]), "traits": json.loads(r["traits"]),
                 "batch_id": r["batch_id"], "registered_at": r["registered_at"], "status_at": r["status_at"]}
@@ -564,7 +576,7 @@ class Registry:
     def history_trip(self, vehicle: int, trip_key: str) -> dict:
         """재생성 입력: 운행 이력 + 당시 설정·Worker 지문 + 차량 고정 특성."""
         with self.connect() as con:
-            row = con.execute("""SELECT h.*, t.settings, t.worker_hash, v.anomaly_eligible, v.pseudonym,
+            row = con.execute("""SELECT h.*, t.settings, t.worker_hash, v.anomaly_eligible, v.pseudonym, v.vin,
                 s.trip AS live_trip, s.confirmed_ts AS live_confirmed FROM trip_history h
                 JOIN trip_settings t ON t.id=h.settings_id JOIN vehicles v ON v.id=h.vehicle_id
                 LEFT JOIN vehicle_state s ON s.id=h.vehicle_id WHERE h.vehicle_id=? AND h.trip_key=?""", (vehicle, trip_key)).fetchone()
@@ -573,4 +585,5 @@ class Registry:
             raise RegistryError("운행 이력에 없는 운행입니다.")
         return {**self._history_row(row), "initial": json.loads(row["initial"]), "settings": json.loads(row["settings"]),
                 "worker_hash": row["worker_hash"], "anomaly_eligible": bool(row["anomaly_eligible"]),
-                "pseudonym": row["pseudonym"], "seed": seed}
+                "pseudonym": row["pseudonym"], "vehicleId": row["wire_identity"] or self.wire_identity(row),
+                "identity_recorded": bool(row["wire_identity"]), "seed": seed}

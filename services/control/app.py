@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import threading
@@ -48,7 +49,8 @@ def registry():
     # 상시 운영 명부. 실제 vault 연동 전에는 개발용 가명 발급기만 연결한다(실제 전송 불가 표시).
     global _REGISTRY
     if _REGISTRY is None:
-        _REGISTRY = Registry(RUNTIME.registry, DevelopmentPseudonyms(), max_active=MAX_VEHICLES)
+        _REGISTRY = Registry(RUNTIME.registry, DevelopmentPseudonyms(), max_active=MAX_VEHICLES,
+                             synthetic_raw_vin=os.environ.get("DANGUBI_OPERATION_VIN_MODE") == "synthetic_raw")
     return _REGISTRY
 @asynccontextmanager
 async def lifespan(_app):
@@ -817,7 +819,7 @@ def prepare_operation(body: StartOperation):
         profile=mqtt_profile()
         from urllib.parse import urlsplit
         loopback=urlsplit(profile["broker_url"]).hostname in ("127.0.0.1","::1")
-        if not registry().provider.allows_real_transport and not loopback:
+        if not (registry().synthetic_raw_vin or registry().provider.allows_real_transport or loopback):
             raise HTTPException(409, detail="개발용 가명 발급기로 만든 가명 VIN은 외부 브로커 전송에 쓸 수 없습니다. vault 연동 후 사용하세요(로컬 브로커 검증만 허용).")
         if profile["execution_profile"]!="operations":
             raise HTTPException(409, detail="운영 MQTT 서버 프로필이 필요합니다.")
@@ -1005,5 +1007,6 @@ async def current_web_page(request: Request, call_next):
     return response
 
 
-if (ROOT / "apps/web/dist").is_dir():
-    app.mount("/", StaticFiles(directory=ROOT / "apps/web/dist", html=True), name="web")
+web_dist = Path(os.environ.get("DANGUBI_WEB_DIST", ROOT / "apps/web/dist"))
+if web_dist.is_dir():
+    app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")

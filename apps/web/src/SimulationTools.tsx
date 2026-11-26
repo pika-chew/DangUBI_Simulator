@@ -10,7 +10,7 @@ type FieldSchema = {
   minimum?: number;
   maximum?: number;
 };
-export type Message = { ty: number; ts: number; pld: Record<string, unknown> };
+export type Message = { vehicleId?:string; ty: number; ts: number; pld: Record<string, unknown> };
 type Profile = {
   title: string;
   example: Message;

@@ -108,9 +108,11 @@ def controller(reg, clock):
     return OperationController(reg, WORKER, validate, clock=clock)
 
 
-def arm_recovery(reg, row, remaining_ms=5000, settings=SETTINGS):
+def arm_recovery(reg, row, remaining_ms=5000, settings=SETTINGS, alias=None):
     """비정상 종료 직후 상태: 운행 시작 기록과 마지막 확인 시각을 둔다."""
     trip = {"key": row["trip_key"], "a": row["start_ms"], "b": row["end_ms"], "profile": row["road_profile"], "initial": dict(INITIAL_STATE)}
+    if alias is not None:
+        trip["alias"] = alias
     reg.save_trip_start(row_id(row), trip)
     reg.save_confirmed({row_id(row): row["end_ms"] - remaining_ms})
     reg.update_operation(last_stop="abnormal", virtual_checkpoint_ms=row["end_ms"] - remaining_ms,
@@ -308,11 +310,16 @@ def fixture_profile(tmp_path, request):
 
 
 @pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
-def test_mqtt_uses_fixed_operation_topic_client_and_pseudonym(tmp_path, fixture_profile):
+@pytest.mark.parametrize("synthetic_raw", [False, True])
+def test_mqtt_uses_fixed_operation_topic_client_and_identity(tmp_path, fixture_profile, synthetic_raw):
     reg = registry(tmp_path)
+    if synthetic_raw:
+        reg = Registry(reg.path, reg.provider, synthetic_raw_vin=True)
+    info = reg.session_vehicles()[0]
+    alias = info["wire_identity"]
     _, row = first_trip(reg)
-    settings = OperationSettings(transport="mqtt", interval_ms=1000, client_count=2)
-    arm_recovery(reg, row, remaining_ms=4000, settings=settings)
+    settings = OperationSettings(transport="mqtt", interval_ms=1000, client_count=1)
+    arm_recovery(reg, row, remaining_ms=4000, settings=settings, alias=alias)
     profile = json.loads(fixture_profile.read_text(encoding="utf-8"))
     profile.update(execution_profile="operations", max_connecting=10, enabled=True, contract_reviewed=True)
     ops = controller(reg, clock=lambda: (row["end_ms"] - 4000) / 1000)
@@ -325,14 +332,30 @@ def test_mqtt_uses_fixed_operation_topic_client_and_pseudonym(tmp_path, fixture_
     report_path = Path(str(fixture_profile) + ".report")
     assert wait_for(report_path.is_file, 10)
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    alias = reg.vehicles()["vehicles"][0]["pseudonym"]
     assert report["received"] == 4  # 남은 Microtrip 3건 + Trip 1건
+    assert ops.live["result"]["confirmed_messages"] == 4
+    assert [message["ty"] for message in report["messages"]] == [4, 4, 4, 3]
     assert set(report["topics"]) == {f"{profile['topic_prefix']}/ops-main/{alias}/obd"}
-    assert set(report["client_ids"]) <= {"sim-ops-main-c001", "sim-ops-main-c002"}
+    assert set(report["client_ids"]) == {"sim-ops-main-c001"}
     assert all(m["vehicleId"] == alias for m in report["messages"])
     with sqlite3.connect(reg.path) as con:
         raw = con.execute("SELECT vin FROM vehicles").fetchone()[0]
-    assert raw not in json.dumps(report)  # 원본 VIN은 전송되지 않는다.
+    if synthetic_raw:
+        assert alias == raw and alias != info["pseudonym"]
+    else:
+        assert raw not in json.dumps(report)
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_raw_vin_mode_cannot_resume_trip_with_previous_pseudonym(tmp_path):
+    reg = registry(tmp_path)
+    info, row = first_trip(reg)
+    arm_recovery(reg, row, alias=info["pseudonym"])
+    raw_reg = Registry(reg.path, reg.provider, synthetic_raw_vin=True)
+    ops = controller(raw_reg, clock=lambda: row["start_ms"] / 1000)
+    with pytest.raises(RuntimeError):
+        ops.start(SETTINGS)
+    assert raw_reg.recovery_trips()[0]["trip"]["alias"] == info["pseudonym"]
 
 
 @pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
@@ -524,3 +547,59 @@ def test_client_load_matches_linear_choice():
             assert fast.pick() == expected, (count, step)
             owned.append(expected)
         assert fast.load == load
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_raw_vin_mqtt_pause_resume_end_trip_and_history_identity(tmp_path, fixture_profile):
+    """Vault 도입 전 임시 모드: 새 운행을 일반 MQTT로 보내며 일시중지·재개 후 종료 Trip까지 PUBACK을 받는다.
+    토픽·본문 vehicleId·운행 이력·조회 재생성 JSON이 모두 같은 합성 VIN이다."""
+    from services.control.operation_query import generate as regenerate
+    base = Registry(tmp_path / "registry.sqlite3", DevelopmentPseudonyms(b"k" * 32), seed=7)
+    base.register(1, {**SHORT, "trip_min_minutes": 1, "trip_max_minutes": 1})
+    base.ensure_start_day(1, DAY.isoformat())
+    reg = Registry(base.path, base.provider, synthetic_raw_vin=True)
+    settings = OperationSettings(transport="mqtt", interval_ms=2000, client_count=1, day_off_probability=0)
+    info = reg.session_vehicles()[0]
+    row = next(upcoming(settings, reg.seed(), 1, info["fixed"], DAY, 0, None))
+    with sqlite3.connect(reg.path) as con:
+        raw = con.execute("SELECT vin FROM vehicles WHERE id=1").fetchone()[0]
+    assert info["wire_identity"] == raw != info["pseudonym"]
+    profile = json.loads(fixture_profile.read_text(encoding="utf-8"))
+    # 브로커 fixture 기본 실행 한도(30초)로는 1분 운행과 일시중지를 다 볼 수 없어 이 시험에서만 늘린다.
+    profile.update(execution_profile="operations", max_connecting=10, enabled=True, contract_reviewed=True, max_duration_seconds=110)
+    ops = controller(reg, clock=lambda: row["start_ms"] / 1000)
+    ops.start(settings, profile)
+    try:
+        assert wait_for(lambda: ops.live.get("result", {}).get("confirmed_messages", 0) >= 3, timeout=30)
+        ops.pause(True)
+        assert wait_for(lambda: reg.operation()["state"] == "paused")
+        frozen = reg.operation()["virtual_checkpoint_ms"]
+        sent = ops.live["result"]["processed_messages"]
+        time.sleep(2.5)
+        assert reg.operation()["virtual_checkpoint_ms"] == frozen and ops.live["result"]["processed_messages"] == sent
+        ops.pause(False)
+        assert wait_for(lambda: reg.history(1, 0, row["end_ms"] + 1)["trips"][0]["status"] == "completed", timeout=100), reg.operation()
+        ops.stop()
+        assert ops.wait(30)
+    finally:
+        if ops.running():
+            ops.stop(force=True)
+            ops.wait(10)
+    assert reg.operation()["last_stop"] == "graceful", reg.operation()
+    Path(str(fixture_profile) + ".done").touch()
+    report_path = Path(str(fixture_profile) + ".report")
+    assert wait_for(report_path.is_file, 10)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    mine = [m for m in report["messages"] if m["pld"]["tid"] == row["tid"]]
+    expected = list(range(row["start_ms"], row["end_ms"], 2000))
+    assert [m["ty"] for m in mine] == [4] * len(expected) + [3]  # 2초 주기 Microtrip 전체 + 종료 Trip
+    assert [m["ts"] for m in mine[:-1]] == expected  # 일시중지 전후 누락·중복 없음
+    assert report["received"] == ops.live["result"]["confirmed_messages"]  # 발행 = PUBACK 확인
+    assert set(report["topics"]) == {f"{profile['topic_prefix']}/ops-main/{raw}/obd"}
+    assert all(m["vehicleId"] == raw for m in report["messages"])  # 키 순서는 envelope 시험에서 확인(보고서는 Go map이라 정렬됨)
+    trip = reg.history_trip(1, row["trip_key"])
+    assert trip["vehicleId"] == raw and trip["identity_recorded"]
+    page = regenerate(trip, WORKER, None, None, 0, 100)
+    assert page["vehicleId"] == raw and not any("송신 식별자 기록이 없어" in w for w in page["warnings"])
+    assert [m["ts"] for m in page["messages"]] == [m["ts"] for m in mine[:-1]]
+    assert page["trip"]["pld"] == mine[-1]["pld"]  # 조회 재생성 = 실제 전송
