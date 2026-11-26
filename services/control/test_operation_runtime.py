@@ -432,3 +432,95 @@ def test_first_start_begins_at_first_departure_of_start_day(tmp_path):
     finally:
         resumed.stop(force=True)
         resumed.wait(20)
+
+
+def _history(reg):
+    with sqlite3.connect(reg.path) as con:
+        return con.execute("SELECT vehicle_id, trip_key, status, recoveries, resume_after_ms FROM trip_history ORDER BY vehicle_id").fetchall()
+
+
+def test_batched_start_writes_match_one_by_one(tmp_path):
+    """시작 단계 묶음 저장: 덩어리로 나눠 확정해도 한 건씩 저장한 것과 남는 기록이 같다."""
+    regs = []
+    for name in ("one", "batch"):
+        (tmp_path / name).mkdir()
+        reg = registry(tmp_path / name, count=23)
+        reg.update_operation(settings=SETTINGS.model_dump())
+        items = []
+        for info in reg.session_vehicles():
+            row = next(upcoming(SETTINGS, reg.seed(), info["id"], info["fixed"], DAY, 0, None))
+            reg.save_trip_start(info["id"], {"key": row["trip_key"], "a": row["start_ms"], "b": row["end_ms"],
+                                             "profile": row["road_profile"], "initial": dict(INITIAL_STATE)})
+            items.append((info["id"], row["trip_key"], row["start_ms"] + 3000))
+        reg.mark_history_interrupted()
+        if name == "one":
+            for vehicle, key, ts in items:
+                reg.add_event("recover_trip", {"vehicle_id": vehicle, "trip_key": key, "confirmed_ts": ts})
+                reg.recover_history(vehicle, key, ts)
+        else:
+            reg.recover_trips(items, chunk=7)  # 7·7·7·2 덩어리
+        regs.append(reg)
+    one, batch = regs
+    assert _history(one) == _history(batch) and all(r[2] == "sending" and r[3] == 1 for r in _history(batch))
+    pick = lambda reg: [(e["kind"], e["detail"]) for e in reg.events(100) if e["kind"] == "recover_trip"]
+    assert pick(one) == pick(batch) and len(pick(batch)) == 23
+    # 첫 운행 날짜: 이미 정해진 차량은 유지하고 새 차량만 정한다(한 대씩과 같은 결과).
+    batch.register(5, SHORT)
+    ids = [v["id"] for v in batch.session_vehicles()]
+    days = batch.ensure_start_days([(i, "2026-12-01") for i in ids], chunk=4)
+    assert days == {i: (DAY.isoformat() if i <= 23 else "2026-12-01") for i in ids}
+    assert days == {i: batch.ensure_start_day(i, "2027-01-01") for i in ids}
+
+
+@pytest.mark.skipif(not WORKER.is_file(), reason="Worker 필요")
+def test_start_commits_recovery_records_once_before_first_message(tmp_path):
+    reg = registry(tmp_path, count=3)
+    rows = []
+    for vehicle in (1, 2, 3):
+        _, row = first_trip(reg, vehicle)
+        rows.append(row)
+    end = min(r["end_ms"] for r in rows)
+    reg.update_operation(settings=SETTINGS.model_dump())
+    for row in rows:
+        reg.save_trip_start(row_id(row), {"key": row["trip_key"], "a": row["start_ms"], "b": row["end_ms"],
+                                          "profile": row["road_profile"], "initial": dict(INITIAL_STATE), "settings": SETTINGS.model_dump()})
+        reg.save_confirmed({row_id(row): max(row["start_ms"], end - 5000)})
+    reg.update_operation(last_stop="abnormal", virtual_checkpoint_ms=end - 5000)
+    reg.mark_history_interrupted()
+    sent, calls = [], []
+    original = reg.recover_trips
+
+    def recorded(items, *a, **k):
+        calls.append((len(items), len(sent)))
+        return original(items, *a, **k)
+
+    reg.recover_trips = recorded
+    ops = OperationController(reg, WORKER, lambda m: sent.append(m) or validate(m), clock=lambda: (end - 5000) / 1000)
+    ops.start(SETTINGS)
+    assert wait_for(lambda: len(sent) >= 3)
+    ops.stop(force=True)
+    assert ops.wait(20)
+    assert calls[0] == (3, 0)  # 3건을 한 번에, 첫 메시지 전에 확정
+    assert sum(1 for e in reg.events(100) if e["kind"] == "recover_trip") == 3
+    assert ops.live["result"]["recovered_trips"] == 3
+
+
+def test_client_load_matches_linear_choice():
+    """Client 배정: 힙으로 골라도 min(clients, key=(차량 수, ID))와 순서·결과가 같다(추가·해제 섞어서)."""
+    import random
+    from services.control.operation_runtime import ClientLoad, client_id
+    for count in (1, 3, 500):
+        clients = [client_id(i) for i in range(count)]
+        fast, load, owned = ClientLoad(clients), {c: 0 for c in clients}, []
+        rng = random.Random(count)
+        for step in range(5000):
+            if owned and rng.random() < .3:
+                client = owned.pop(rng.randrange(len(owned)))
+                fast.release(client)
+                load[client] -= 1
+                continue
+            expected = min(clients, key=lambda c: (load[c], c))
+            load[expected] += 1
+            assert fast.pick() == expected, (count, step)
+            owned.append(expected)
+        assert fast.load == load

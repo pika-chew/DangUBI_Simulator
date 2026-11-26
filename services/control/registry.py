@@ -65,6 +65,9 @@ class DevelopmentPseudonyms:
         return result
 
 
+BATCH_ROWS = 1000  # 시작 단계 묶음 저장의 한 번 확정 크기(다른 쓰기 요청의 대기 시간을 짧게 유지)
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -324,6 +327,19 @@ class Registry:
             con.execute("INSERT OR IGNORE INTO vehicle_state(id, start_day, updated_at) VALUES (?,?,?)", (vehicle, day, now()))
             return con.execute("SELECT start_day FROM vehicle_state WHERE id=?", (vehicle,)).fetchone()[0]
 
+    def ensure_start_days(self, items, chunk=BATCH_ROWS) -> dict:
+        """ensure_start_day의 묶음판: [(차량 id, 날짜)] → {차량 id: 첫 운행 날짜}. 이미 있으면 유지."""
+        result = {}
+        for i in range(0, len(items), chunk):
+            part = items[i:i + chunk]
+            stamp = now()
+            with self.connect() as con:
+                con.executemany("INSERT OR IGNORE INTO vehicle_state(id, start_day, updated_at) VALUES (?,?,?)",
+                                [(vehicle, day, stamp) for vehicle, day in part])
+                for vehicle, _ in part:
+                    result[vehicle] = con.execute("SELECT start_day FROM vehicle_state WHERE id=?", (vehicle,)).fetchone()[0]
+        return result
+
     def save_trip_start(self, vehicle, trip: dict, session: str | None = None):
         """첫 메시지를 보내기 전에 기록한다. 비정상 종료 후 같은 운행을 다시 만들 근거이며,
         같은 트랜잭션에 운행 이력(조회 재생성 근거) 한 행을 남긴다. 메시지 원문은 저장하지 않는다."""
@@ -371,8 +387,22 @@ class Registry:
     def recover_history(self, vehicle, trip_key, confirmed_ts):
         """복구 운행을 다시 보내기 시작한다. resume_after_ms 이후는 중복 가능 구간이다."""
         with self.connect() as con:
-            con.execute("""UPDATE trip_history SET status='sending', recoveries=recoveries+1, resume_after_ms=?
-                WHERE vehicle_id=? AND trip_key=?""", (confirmed_ts, vehicle, trip_key))
+            self._recover_history(con, vehicle, trip_key, confirmed_ts)
+
+    @staticmethod
+    def _recover_history(con, vehicle, trip_key, confirmed_ts):
+        con.execute("""UPDATE trip_history SET status='sending', recoveries=recoveries+1, resume_after_ms=?
+            WHERE vehicle_id=? AND trip_key=?""", (confirmed_ts, vehicle, trip_key))
+
+    def recover_trips(self, items, chunk=BATCH_ROWS):
+        """시작 때 이어 보낼 운행들의 복구 이벤트와 이력 '송신 중'을 덩어리 단위로 함께 확정한다.
+        items: [(차량 id, trip_key, confirmed_ts)]. 한 건씩 확정하는 것과 남는 기록은 같고 확정 횟수만 줄인다.
+        덩어리를 나눠 다른 쓰기 요청이 오래 기다리지 않게 한다."""
+        for i in range(0, len(items), chunk):
+            with self.connect() as con:
+                for vehicle, trip_key, confirmed_ts in items[i:i + chunk]:
+                    self.event(con, "recover_trip", {"vehicle_id": vehicle, "trip_key": trip_key, "confirmed_ts": confirmed_ts})
+                    self._recover_history(con, vehicle, trip_key, confirmed_ts)
 
     def seed(self):
         with self.connect() as con:

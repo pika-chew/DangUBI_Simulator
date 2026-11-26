@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import hashlib
+import heapq
 import math
 from pathlib import Path
 import threading
@@ -46,6 +47,29 @@ def settings_diff(saved: dict, requested: dict) -> list[str]:
 
 def client_id(index: int) -> str:
     return f"sim-{RUN_ID}-c{index + 1:03d}"
+
+
+class ClientLoad:
+    """배정 차량이 가장 적은 Client(같으면 ID가 앞선 것)를 고른다. min(clients, key=(차량 수, ID))와 같은 결과를
+    힙으로 낸다(Client 수만큼 훑지 않음). 차량 수가 바뀐 Client는 새 항목을 넣고 낡은 항목은 꺼낼 때 버린다."""
+
+    def __init__(self, clients):
+        self.load = {c: 0 for c in clients}
+        self.heap = [(0, c) for c in sorted(self.load)]
+
+    def pick(self) -> str:
+        while True:
+            count, client = self.heap[0]
+            if self.load[client] == count:
+                break
+            heapq.heappop(self.heap)  # 낡은 항목
+        self.load[client] = count + 1
+        heapq.heapreplace(self.heap, (count + 1, client))
+        return client
+
+    def release(self, client):
+        self.load[client] -= 1
+        heapq.heappush(self.heap, (self.load[client], client))
 
 
 class OperationJob:
@@ -356,7 +380,7 @@ class OperationController:
         generator = OperationGenerator(registry, self.worker, settings, seed)
         vstates = {}                # 내부 차량키 → 실행 상태
         clients = [client_id(i) for i in range(settings.client_count)]
-        load = {c: 0 for c in clients}
+        load = ClientLoad(clients)
         client_by_alias = {}
         progress = {}               # 차량 id → 마지막 확인 ts (체크포인트 대기)
         mqtt_mode = settings.transport == "mqtt"
@@ -392,8 +416,11 @@ class OperationController:
                 vs["active_key"] = row["trip_key"]
                 result["recovered_trips"] += 1
                 result["duplicate_risk_trips"] += 1
-                registry.add_event("recover_trip", {"vehicle_id": info["id"], "trip_key": trip["key"], "confirmed_ts": info["confirmed_ts"]})
-                registry.recover_history(info["id"], trip["key"], info["confirmed_ts"])
+                recovery = (info["id"], trip["key"], info["confirmed_ts"])
+                if deferred_recovery is not None:
+                    deferred_recovery.append(recovery)  # 시작 단계: 첫 메시지 전에 묶어서 확정한다
+                else:
+                    registry.recover_trips([recovery])
                 yield row
                 last_end, not_before = trip["b"], trip["b"]
             for row in upcoming(settings, seed, info["id"], info["fixed"], day_of_iso(vs["start_day"]), not_before, last_end, planner):
@@ -404,12 +431,15 @@ class OperationController:
                 generator.remember(row)
                 yield row
 
-        def include(info, start_day_ms, same_day=False):
-            """운영 중 편입 차량은 다음 가상 날짜부터, 처음 시작 때 들어가는 차량은 시작일부터 운행한다."""
+        def first_day(start_day_ms, same_day=False):
+            return (day_of(start_day_ms) + timedelta(days=0 if same_day else 1)).isoformat()
+
+        def include(info, start_day_ms, same_day=False, day=None):
+            """운영 중 편입 차량은 다음 가상 날짜부터, 처음 시작 때 들어가는 차량은 시작일부터 운행한다.
+            day: 시작 단계에서 묶어 정한 첫 운행 날짜(없으면 한 대씩 정한다)."""
             vehicle = vehicle_key(info["id"])
-            day = registry.ensure_start_day(info["id"], (day_of(start_day_ms) + timedelta(days=0 if same_day else 1)).isoformat())
-            client = min(clients, key=lambda c: (load[c], c))
-            load[client] += 1
+            day = day or registry.ensure_start_day(info["id"], first_day(start_day_ms, same_day))
+            client = load.pick()
             client_by_alias[info["pseudonym"]] = client
             vstates[vehicle] = dict(info=info, alias=info["pseudonym"], client=client, start_day=day, active_key=None,
                                     final=False, removing=info["status"] == "removing", pending_end=None)
@@ -438,6 +468,7 @@ class OperationController:
 
         alias_to_vehicle = {}
         message_ty = {}
+        deferred_recovery = []      # 시작 단계 복구 기록. 생성 준비 뒤 첫 메시지 전에 확정하고 이후에는 None(즉시 기록).
         removals = []               # PUBACK 처리 중에는 대기열을 바꾸지 않고 gate에서 정리한다.
 
         def finish_removal(vehicle):
@@ -449,7 +480,7 @@ class OperationController:
             live["vehicles"] -= 1
             if mqtt_mode:
                 publisher.enqueue("detach", hard_gate, route=vs["client"], vehicle_id=vs["alias"])
-            load[vs["client"]] -= 1
+            load.release(vs["client"])
             registry.set_status([vs["info"]["id"]], "removed", only_from=("removing", "driving"))
             registry.add_event("removed", {"vehicle_id": vs["info"]["id"]})
 
@@ -627,8 +658,10 @@ class OperationController:
                 if info["status"] == "removing" and not info["trip"]:
                     registry.set_status([info["id"]], "removed", only_from=("removing",))
                     registry.add_event("removed", {"vehicle_id": info["id"]})
-            for info in initial_selection(registry.session_vehicles(), vehicle_limit):
-                vehicle = include(info, anchor, same_day=fresh)
+            selected = initial_selection(registry.session_vehicles(), vehicle_limit)
+            days = registry.ensure_start_days([(info["id"], first_day(anchor, fresh)) for info in selected])
+            for info in selected:
+                vehicle = include(info, anchor, same_day=fresh, day=days[info["id"]])
                 alias_to_vehicle[info["pseudonym"]] = vehicle
             registry.set_status([vs["info"]["id"] for vs in vstates.values()], "driving", only_from=("ready",))
             live["vehicles"] = len(vstates)
@@ -653,6 +686,9 @@ class OperationController:
                         break
                     publisher.enqueue("connect", hard_gate, client_id=client)
             bounded = BoundedSchedule(data, generation, gate, result)
+            # 진행 중이던 운행의 복구 기록: 검사·생성 준비가 끝난 뒤, 첫 메시지를 보내기 전에 묶어서 확정한다.
+            pending_recovery, deferred_recovery = deferred_recovery, None
+            registry.recover_trips(pending_recovery)
             while not job.stop_requested:
                 for timestamp, vehicle, message, synthetic in bounded:
                     consume(timestamp, vehicle, message, synthetic)
