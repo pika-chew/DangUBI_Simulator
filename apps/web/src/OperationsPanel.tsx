@@ -12,7 +12,7 @@ type VehiclePage={total:number;offset:number;limit:number;vehicles:Vehicle[]};
 type OperationEvent={id:number;at:string;kind:string;detail:Record<string,unknown>};
 const statusFilters:[string,string][]=[["","전체"],["pending_pseudonym","가명 대기"],["ready","대기"],["driving","운행"],["removing","정리 중"],["cleanup_hold","정리 보류"],["removed","제외"]];
 
-/** 상시 운영: 차량 명부(합성 VIN·가명 VIN)와 연속 운행·전송을 관리한다. 합성 VIN은 전체를 표시한다. */
+/** 상시 운영: 차량 명부(VIN·가명 VIN)와 연속 운행·전송을 관리한다. 가명 VIN 생성 기능 연결 전까지 송신 식별자는 VIN이다. */
 export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:string)=>void;renderMessages:(messages:Message[],vehicle:string,offset?:number)=>ReactNode}) {
   const [status,setStatus]=useState<OperationStatus|null>(null);
   const [settings,setSettings]=useState<OperationSettings>(defaultOperationSettings);
@@ -107,7 +107,7 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
 
     <section className="card"><div className="panel-heading"><h2>운영 설정</h2><InfoHint label="운영 설정" text="실행 중에는 고정됩니다. 실행 중에 바꾸고 ‘설정 적용(자동 재시작)’을 누르면 진행 중 운행을 마친 뒤 새 설정으로 자동 시작합니다."/></div>
       <fieldset disabled={busy||waiting} className="schedule-fieldset"><div className="fields">
-        <label><span className="label-line">전송 방식 <InfoHint label="전송 방식" text="송신 없는 생성은 외부로 보내지 않습니다. 실제 MQTT는 서버 운영 프로필과 vault 가명 VIN이 필요합니다(개발용 가명은 로컬 브로커만)."/></span><select value={settings.transport} onChange={e=>{setSettings({...settings,transport:e.target.value as OperationSettings["transport"]});setConfirmMqtt(false);}}><option value="dry_run">송신 없는 생성</option><option value="mqtt">실제 MQTT 송신</option></select></label>
+        <label><span className="label-line">전송 방식 <InfoHint label="전송 방식" text="송신 없는 생성은 외부로 보내지 않습니다. 실제 MQTT는 서버 운영 프로필이 필요합니다. 송신 식별자는 서버의 VIN 송신 모드를 따릅니다(기본 VIN)."/></span><select value={settings.transport} onChange={e=>{setSettings({...settings,transport:e.target.value as OperationSettings["transport"]});setConfirmMqtt(false);}}><option value="dry_run">송신 없는 생성</option><option value="mqtt">실제 MQTT 송신</option></select></label>
         <label><span className="label-line">Microtrip 주기 (초)</span>{num(settings.interval_ms/1000,n=>setSettings({...settings,interval_ms:Math.round(n*1000)}),1,60)}</label>
         <label><span className="label-line">Client 수 <InfoHint label="Client 수" text="연결 풀 크기입니다. 차량은 차량 수가 가장 적은 Client에 배정합니다." range="1~25,000 · 서버 상한 별도"/></span>{num(settings.client_count,n=>setSettings({...settings,client_count:n}),1,25000)}</label>
         <label><span className="label-line">가상 운영 기간 (일) <InfoHint label="가상 운영 기간" text="일시중지 시간은 제외합니다. 종료 전에 마칠 수 있는 운행을 시작합니다." range="1~30일 · 기본 7일"/></span>{num(settings.duration_cap_days,n=>setSettings({...settings,duration_cap_days:n}),1,30)}</label>
@@ -136,7 +136,7 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
     </section>
 
     <section className="card"><div className="panel-heading"><div><h2>차량 명부</h2><p className="note">{registry?`${registry.active.toLocaleString()} / ${registry.max_active.toLocaleString()}대 · 이상 이벤트 대상 ${registry.anomaly_eligible.toLocaleString()}대 · VIN 일련번호 잔여 ${registry.serial_remaining.toLocaleString()}`:"조회 중"}</p></div></div>
-      {registry?.send_identity==="synthetic_raw"?<p className="context-note">Vault 도입 전 임시 송신 모드입니다. 토픽과 본문 vehicleId에 가명 대신 시뮬레이터 합성 VIN을 보냅니다(서버 설정 DANGUBI_OPERATION_VIN_MODE).</p>
+      {registry?.send_identity==="synthetic_raw"?<p className="context-note">가명 VIN 생성 기능을 연결하기 전까지 토픽과 본문 vehicleId에 VIN(시뮬레이터 합성 VIN)을 보냅니다. 가명 VIN은 명부에만 보관합니다.</p>
         :registry&&!registry.provider_allows_real_transport&&<p className="context-note">현재 가명 VIN은 개발용 발급기로 만든 값입니다. 외부 브로커(AWS) 전송에는 vault 연동이 필요하며, 로컬 브로커 검증에만 쓸 수 있습니다.</p>}
       {registry&&<div className="metric-grid">
         {Object.entries(registry.patterns).map(([k,v])=><div key={k}><span>{patternLabels[k]??k}</span><b>{v.count.toLocaleString()}대 · {v.percent}%</b></div>)}
@@ -159,7 +159,7 @@ export function OperationsPanel({onActivity,renderMessages}:{onActivity:(text:st
       </details>
     </section>
 
-    <section className="card"><div className="panel-heading"><h2>차량 목록</h2><InfoHint label="차량 목록" text="시뮬레이터 합성 VIN은 17자리 전체를 표시합니다. 외부로 나가는 식별자는 서버의 VIN 송신 모드를 따릅니다: 기본은 가명 VIN, Vault 도입 전 임시 모드(synthetic_raw)는 합성 VIN."/></div>
+    <section className="card"><div className="panel-heading"><h2>차량 목록</h2><InfoHint label="차량 목록" text="VIN(시뮬레이터 합성 VIN)은 17자리 전체를 표시합니다. 가명 VIN 생성 기능을 연결하기 전까지 토픽·본문·운행 이력의 송신 식별자는 VIN입니다."/></div>
       <div className="record-filters" role="group" aria-label="차량 상태">{statusFilters.map(([k,label])=><button key={k} aria-pressed={filter===k} onClick={()=>{setFilter(k);setOffset(0);setSelected([]);}}>{label}</button>)}</div>
       <div className="table-scroll"><table><thead><tr><th><span className="sr-only">선택</span></th><th>번호</th><th>VIN</th><th>가명 VIN</th><th>상태</th><th>생활패턴</th><th>이상 이벤트</th><th>등록</th><th><span className="sr-only">운행 조회</span></th></tr></thead>
         <tbody>{page?.vehicles.map(v=><tr key={v.id}><td><input type="checkbox" aria-label={`차량 ${v.id} 선택`} disabled={v.status==="removed"} checked={selected.includes(v.id)} onChange={e=>setSelected(old=>e.target.checked?[...old,v.id]:old.filter(x=>x!==v.id))}/></td><td>{v.id}</td><td><code>{v.vin??v.vin_masked}</code></td><td><code>{v.pseudonym??"—"}</code></td><td>{v.status_label}</td><td>{patternLabels[v.pattern]??v.pattern}</td><td>{v.anomaly_eligible?"대상":"—"}</td><td>{formatKST(Date.parse(v.registered_at))}</td><td><button onClick={()=>setInspect({id:v.id,token:Date.now()})}>운행 조회</button></td></tr>)}</tbody></table>

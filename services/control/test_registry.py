@@ -164,3 +164,15 @@ def test_summary_reports_send_identity_mode(tmp_path):
     reg = make(tmp_path)
     assert reg.summary()["send_identity"] == "pseudonym"
     assert Registry(reg.path, reg.provider, synthetic_raw_vin=True).summary()["send_identity"] == "synthetic_raw"
+
+
+def test_operation_vin_mode_defaults_to_vin(monkeypatch):
+    """가명 VIN 생성 기능 연결 전까지 서버 기본 송신 식별자는 VIN이다."""
+    from services.control.app import operation_vin_mode
+    monkeypatch.delenv("DANGUBI_OPERATION_VIN_MODE", raising=False)
+    assert operation_vin_mode() == "synthetic_raw"
+    monkeypatch.setenv("DANGUBI_OPERATION_VIN_MODE", "pseudonym")
+    assert operation_vin_mode() == "pseudonym"
+    monkeypatch.setenv("DANGUBI_OPERATION_VIN_MODE", "raw")
+    with pytest.raises(RuntimeError):
+        operation_vin_mode()

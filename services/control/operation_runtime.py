@@ -1,6 +1,6 @@
-"""상시 운영 실행기. 명부 차량을 연속 가상시계로 운행시키고 송신 VIN(기본 가명 VIN, 임시 모드는 합성 VIN)으로 전송한다.
+"""상시 운영 실행기. 명부 차량을 연속 가상시계로 운행시키고 송신 식별자(기본 VIN, 가명 VIN 생성 기능 연결 후 가명 VIN)로 전송한다.
 
-- 토픽 `{prefix}/ops-main/{송신VIN}/obd`, Client `sim-ops-main-cNNN`, 본문 `{vehicleId, ty, ts, pld}`.
+- 토픽 `{prefix}/ops-main/{송신 식별자}/obd`, Client `sim-ops-main-cNNN`, 본문 `{vehicleId, ty, ts, pld}`.
 - 정상 중단: 진행 중 운행은 끝까지 보내고 아직 시작하지 않은 운행은 보내지 않는다.
 - 강제 중단·오류: 운행 시작 상태와 마지막 PUBACK 확인 시각으로 다음 시작 때 같은 운행을 다시 만들어
   확인된 메시지 다음부터 이어 보낸다(미확인 구간은 동일 내용 중복 가능, 기록).

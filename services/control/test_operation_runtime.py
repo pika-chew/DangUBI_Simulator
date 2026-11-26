@@ -102,6 +102,11 @@ def test_vehicle_id_envelope_is_first_and_keeps_body():
     wire = with_vehicle_id("PS64C36B1HDA81N43", prepare_message({"ty": 4, "ts": 5, "pld": {"tid": 1}}))
     assert wire.text == '{"vehicleId":"PS64C36B1HDA81N43","ty":4,"ts":5,"pld":{"tid":1}}'
     assert wire.size == len(wire.text.encode()) and wire["ts"] == 5
+    # Worker 응답은 키가 알파벳순(pld, ts, ty)이어도 계약 순서(vehicleId, ty, ts, pld)로 보낸다.
+    worker_order = {"pld": {"tid": 1, "a": 2}, "ts": 5, "ty": 4}
+    wire = with_vehicle_id("0DSVCNEX7RS000001", prepare_message(worker_order))
+    assert wire.text == '{"vehicleId":"0DSVCNEX7RS000001","ty":4,"ts":5,"pld":{"tid":1,"a":2}}'
+    assert list(json.loads(wire.text)) == ["vehicleId", "ty", "ts", "pld"] and wire.size == len(wire.text.encode())
 
 
 def controller(reg, clock):
@@ -596,7 +601,8 @@ def test_raw_vin_mqtt_pause_resume_end_trip_and_history_identity(tmp_path, fixtu
     assert [m["ts"] for m in mine[:-1]] == expected  # 일시중지 전후 누락·중복 없음
     assert report["received"] == ops.live["result"]["confirmed_messages"]  # 발행 = PUBACK 확인
     assert set(report["topics"]) == {f"{profile['topic_prefix']}/ops-main/{raw}/obd"}
-    assert all(m["vehicleId"] == raw for m in report["messages"])  # 키 순서는 envelope 시험에서 확인(보고서는 Go map이라 정렬됨)
+    assert all(m["vehicleId"] == raw for m in report["messages"])  # 보고서는 Go map이라 키가 정렬되어 순서는 아래 실제 본문으로 확인
+    assert ops.live["result"]["samples"] and all(list(json.loads(s["message"])) == ["vehicleId", "ty", "ts", "pld"] for s in ops.live["result"]["samples"])
     trip = reg.history_trip(1, row["trip_key"])
     assert trip["vehicleId"] == raw and trip["identity_recorded"]
     page = regenerate(trip, WORKER, None, None, 0, 100)

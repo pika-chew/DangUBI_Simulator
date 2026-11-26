@@ -528,13 +528,15 @@ class Registry:
 
     # ---- 운행 이력 조회 ----
     def find_vehicle(self, query: str) -> dict | None:
-        """명부 번호 또는 가명 VIN으로 찾는다. 원본 VIN 검색·표시는 하지 않는다."""
+        """명부 번호, 시뮬레이터 합성 VIN 또는 가명 VIN으로 찾는다."""
         text = query.strip()
         with self.connect() as con:
             if text.isdigit():
                 row = con.execute("SELECT * FROM vehicles WHERE id=?", (int(text),)).fetchone()
             else:
                 row = con.execute("SELECT * FROM vehicles WHERE pseudonym IN (?,?)", (text, text.upper())).fetchone()
+                if row is None and text.upper().startswith(vin_codec.VIRTUAL_WMI):
+                    row = con.execute("SELECT * FROM vehicles WHERE vin=?", (text.upper(),)).fetchone()
         return self._public_vehicle(row) if row else None
 
     def history(self, vehicle: int, from_ms: int | None = None, to_ms: int | None = None, limit: int = 2000) -> dict:

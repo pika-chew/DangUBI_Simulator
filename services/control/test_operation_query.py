@@ -41,10 +41,10 @@ def test_history_lifecycle_and_lookup(tmp_path):
     vehicle = reg.vehicles()["vehicles"][0]
     assert reg.find_vehicle("1")["id"] == 1 and reg.find_vehicle(vehicle["pseudonym"])["id"] == 1
     assert reg.find_vehicle("999") is None
-    # 등록된 합성 VIN은 표시하되 조회 입력은 차량 번호·가명을 유지한다.
+    # 합성 VIN은 표시하고 조회 입력으로도 쓴다(대소문자 무관).
     with sqlite3.connect(reg.path) as con:
         raw = con.execute("SELECT vin FROM vehicles WHERE id=1").fetchone()[0]
-    assert reg.find_vehicle(raw) is None
+    assert reg.find_vehicle(raw)["id"] == 1 and reg.find_vehicle(raw.lower())["id"] == 1
     found = reg.history(1, row["start_ms"] - 1, row["end_ms"] + 1)
     assert found["vehicle"]["vin"] == raw
     assert [t["status"] for t in found["trips"]] == ["sending"] and found["total_trips"] == 1

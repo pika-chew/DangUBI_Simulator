@@ -16,8 +16,15 @@ class WireMessage:
         raise KeyError(key)
 
 
+ENVELOPE_ORDER=("vehicleId","ty","ts","pld")
+
+
 def prepare_message(message):
-    raw=json.dumps(message,ensure_ascii=False,separators=(",",":"))
+    """전송 본문을 계약 순서(contracts envelopes.*.order: vehicleId, ty, ts, pld)로 직렬화한다.
+    Worker 응답은 키가 알파벳순이므로 순서를 다시 맞춘다. 그 밖의 키는 뒤에 원래 순서로 둔다."""
+    ordered={k:message[k] for k in ENVELOPE_ORDER if k in message}
+    ordered.update((k,v) for k,v in message.items() if k not in ordered)
+    raw=json.dumps(ordered,ensure_ascii=False,separators=(",",":"))
     return WireMessage(raw,len(raw.encode("utf-8")),message["ts"])
 
 

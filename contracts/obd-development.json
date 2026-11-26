@@ -380,7 +380,7 @@
   "envelopes": {
     "operations": {
       "title": "상시 운영 전송 본문",
-      "description": "상시 운영 Trip/Microtrip은 profiles 본문의 루트 맨 앞에 vehicleId(송신 VIN)를 둔다. 기본은 가명 VIN이며, Vault 도입 전 임시 모드(DANGUBI_OPERATION_VIN_MODE=synthetic_raw)에서는 시뮬레이터 합성 VIN(WMI 0DS)을 쓴다.",
+      "description": "상시 운영 Trip/Microtrip은 profiles 본문의 루트를 order 순서({vehicleId, ty, ts, pld})로 둔다. vehicleId는 송신 식별자로, 가명 VIN 생성 기능 연결 전까지 시뮬레이터 합성 VIN(WMI 0DS)이며 연결 후 설정(DANGUBI_OPERATION_VIN_MODE=pseudonym)으로 가명 VIN을 쓴다.",
       "order": [
         "vehicleId",
         "ty",
@@ -390,7 +390,7 @@
       "vehicleId": {
         "type": "string",
         "pattern": "^[a-zA-Z0-9_-]{1,128}$",
-        "title": "송신 VIN: 가명 VIN 또는 임시 모드의 합성 VIN(토픽 차량 식별자와 같음)"
+        "title": "송신 식별자: VIN(기본) 또는 가명 VIN(토픽 차량 식별자와 같음)"
       },
       "topic": "{topic_prefix}/ops-main/{vehicleId}/obd",
       "client_id": "sim-ops-main-cNNN"

@@ -45,12 +45,20 @@ _REGISTRY = None
 _OPERATION = None
 
 
+def operation_vin_mode() -> str:
+    """상시 운영 송신 식별자. 가명 VIN 생성 기능이 연결되기 전까지 기본은 원본(합성) VIN이다."""
+    mode = os.environ.get("DANGUBI_OPERATION_VIN_MODE", "synthetic_raw")
+    if mode not in ("synthetic_raw", "pseudonym"):
+        raise RuntimeError("DANGUBI_OPERATION_VIN_MODE는 synthetic_raw 또는 pseudonym입니다.")
+    return mode
+
+
 def registry():
     # 상시 운영 명부. 실제 vault 연동 전에는 개발용 가명 발급기만 연결한다(실제 전송 불가 표시).
     global _REGISTRY
     if _REGISTRY is None:
         _REGISTRY = Registry(RUNTIME.registry, DevelopmentPseudonyms(), max_active=MAX_VEHICLES,
-                             synthetic_raw_vin=os.environ.get("DANGUBI_OPERATION_VIN_MODE") == "synthetic_raw")
+                             synthetic_raw_vin=operation_vin_mode() == "synthetic_raw")
     return _REGISTRY
 @asynccontextmanager
 async def lifespan(_app):

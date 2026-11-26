@@ -104,9 +104,9 @@ export function OperationVehicleView({request,renderMessages,onActivity}:{reques
   return <>
     <section ref={top} className="card"><div className="panel-heading"><div><h2>차량 운행 조회</h2>
       <p className="note">운행마다 초기 상태와 당시 설정만 기록하고, 선택한 운행을 같은 조건으로 다시 생성해 보여 줍니다. 메시지 원문은 저장하지 않습니다.</p></div>
-      <InfoHint label="차량 운행 조회" text="명부 번호 또는 가명 VIN으로 찾습니다. 시뮬레이터 합성 VIN은 전체를 표시하지만 검색 입력으로는 받지 않습니다."/></div>
+      <InfoHint label="차량 운행 조회" text="명부 번호, VIN(시뮬레이터 합성 VIN) 또는 가명 VIN으로 찾습니다."/></div>
       <div className="schedule-actions">
-        <label>명부 번호 또는 가명 VIN<input value={query} maxLength={128} placeholder="예: 1 또는 PS…" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void lookup();}}/></label>
+        <label>명부 번호, VIN 또는 가명 VIN<input value={query} maxLength={128} placeholder="예: 1 또는 0DS…" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void lookup();}}/></label>
         <button className="primary" disabled={!!busy||!query.trim()} onClick={()=>void lookup()}>차량 조회</button>
       </div>
       {busy&&<p role="status" className="schedule-status">{busy}</p>}

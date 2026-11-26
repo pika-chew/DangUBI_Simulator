@@ -367,7 +367,7 @@ def main():
     parser.add_argument("--start-time", default="08:15")
     parser.add_argument("--minutes", type=int, default=36)
     parser.add_argument("--workers", type=int, default=1, choices=[1, 2, 4])
-    parser.add_argument("--vin-mode", default="pseudonym", choices=["pseudonym", "synthetic_raw"], help="상시 운영 송신 VIN 모드")
+    parser.add_argument("--vin-mode", default="synthetic_raw", choices=["pseudonym", "synthetic_raw"], help="상시 운영 송신 VIN 모드")
     parser.add_argument("--scenarios", default="baseline,focus")
     parser.add_argument("--skip-plan", action="store_true")
     parser.add_argument("--skip-live", action="store_true")
