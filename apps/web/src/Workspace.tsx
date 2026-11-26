@@ -5,7 +5,7 @@ import { ScheduleExecution } from "./ScheduleExecution";
 import { SchedulePanel } from "./SchedulePanel";
 import { TransmissionPerformance } from "./TransmissionPerformance";
 import { runView } from "./runView";
-import { api, activeStates, Info, DrivingResult, MessageViewer, stateLabel, TransmissionBench, type Catalog, type Result, type SavedRun } from "./SimulationTools";
+import { api, activeStates, Info, DrivingResult, MessageViewer, stateLabel, type Catalog, type Result, type SavedRun } from "./SimulationTools";
 import type { PlanInput, PlanRecord, RunRecord, View, WorkspaceRecord } from "./workspaceTypes";
 
 const titles: Record<View,string> = {settings:"조건 설정",data:"차량 데이터",transmission:"연결·전송",storage:"저장소"};
@@ -108,7 +108,7 @@ export function Workspace() {
       {catalog&&<div hidden={planView==="none" || view==="transmission"}><SchedulePanel view={planView} record={selectedPlan} draftToken={draftToken} draftInput={draftInput} onRecorded={recorded} onConfigure={()=>setView("settings")} onActivity={log} renderMessages={(messages,vehicle,offset=0)=><MessageViewer catalog={catalog} localOnly samples={messages.map((message,i)=>({message,vehicle_id:vehicle,sequence:offset+i+1,client_id:"",topic:""}))}/>} /></div>}
       {selectedRun&&catalog&&view==="data"&&<RunInspector record={selectedRun} catalog={catalog} onRun={onRun} onOpenPlan={key=>void open(key)}/>}
       {selectedRun&&view==="settings"&&<section className="card"><h2>실행 당시 설정</h2><p className="note">이 기록은 실행한 시점의 설정과 생성 모델로 조회합니다. 새 일정 설정과 자동 변환하거나 기존 기록을 변경하지 않습니다.</p><pre>{JSON.stringify(selectedRun.request,null,2)}</pre><button onClick={()=>newWork()}>새 일정 조건 설정</button></section>}
-      <div hidden={view!=="transmission"}><ScheduleExecution onHealth={ready=>setHealth(h=>({...h,mqtt_ready:ready}))} onEdit={()=>selectedPlan?.request?.fleet?newWork({...selectedPlan.request,title:selectedPlan.title+" · 실행 조건 수정"}):newWork()} mqttReady={health.mqtt_ready} plan={selectedPlan} activeId={activeId} onRun={onRun}/><details className="card"><summary>개발용 · 별도 입력으로 접속 확인</summary><p className="context-note">선택 일정과 무관한 별도 접속 시험입니다. 일반 일정 실행에는 필요하지 않습니다.</p><TransmissionBench onRun={onRun} activeId={activeId}/></details></div>
+      <div hidden={view!=="transmission"}><ScheduleExecution onHealth={ready=>setHealth(h=>({...h,mqtt_ready:ready}))} onEdit={()=>selectedPlan?.request?.fleet?newWork({...selectedPlan.request,title:selectedPlan.title+" · 실행 조건 수정"}):newWork()} mqttReady={health.mqtt_ready} plan={selectedPlan} activeId={activeId} onRun={onRun}/></div>
       </div>
       <section className={`workspace-bottom ${bottom?"open":""}`}><div className="bottom-tabs"><button aria-pressed={bottom==="activity"} onClick={()=>setBottom(v=>v==="activity"?null:"activity")}>작업 활동</button><button aria-pressed={bottom==="settings"} onClick={()=>setBottom(v=>v==="settings"?null:"settings")}>선택 기록의 설정</button><button className="bottom-close" aria-label="하단 패널 접기" onClick={()=>setBottom(null)}>×</button></div>{bottom==="activity"&&<div className="activity-output" role="log" aria-label="작업 활동">{events.length?events.map((e,i)=><div key={i}><time>{e.time}</time><span>{e.text}</span></div>):<p>현재 화면에서 수행한 작업이 여기에 표시됩니다. 전송 원문 로그가 아닙니다.</p>}</div>}{bottom==="settings"&&<pre>{record?.request?JSON.stringify(record.request,null,2):"저장된 작업 기록을 선택하면 설정을 확인할 수 있습니다."}</pre>}</section>
       </main></>}
