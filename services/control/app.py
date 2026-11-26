@@ -63,9 +63,14 @@ def registry():
 @asynccontextmanager
 async def lifespan(_app):
     JOBS.recover()
+    # 시험 실행 자동 이어가기: 자동 이어가기를 켠 최근 실행이 오류·재시작으로 멈췄으면 확인 지점부터 다시 시작한다.
+    from services.control.auto_resume import AutoResumer
+    resumer = AutoResumer(JOBS, lambda run_id: recover_schedule(run_id, RecoverScheduleRequest(confirm_mqtt=True)))
+    resumer.start()
     try:
         yield
     finally:
+        resumer.stop()
         JOBS.shutdown()
         # 서버 종료 시 상시 운영은 강제 중단으로 기록해 다음 시작 때 확인된 지점부터 이어 보낸다.
         if _OPERATION is not None and _OPERATION.running():
@@ -230,6 +235,8 @@ class MQTTProfile(BaseModel):
     max_connecting: int = Field(default=100, ge=1, le=1000)
     timeout_ms: int = Field(default=3000, ge=100, le=5000)
     reconnect_attempts: int = Field(default=2, ge=0, le=3)
+    # 발행 응답 지연·연결 끊김 때 재접속 뒤 같은 메시지를 다시 보내며 버티는 시간(초, 0이면 즉시 중지).
+    retry_window_seconds: int = Field(default=300, ge=0, le=3600)
 
     @model_validator(mode="after")
     def profile_bounds(self):
@@ -440,6 +447,7 @@ def recover_schedule(run_id: str, body: RecoverScheduleRequest):
         connection_lifetime=config["connection_lifetime"], force_end_trip=request["force_end_trip"],
         confirm_mqtt=body.confirm_mqtt, generation_workers=generation["workers"],
         generation_queue_messages=generation["queue_messages"], generation_queue_bytes=generation["queue_bytes"],
+        auto_resume=bool(request.get("auto_resume", False)),
     )
     return execute_saved_schedule(execution, recovery=run)
 
@@ -608,6 +616,8 @@ class ScheduleExecutionRequest(BaseModel):
     generation_workers: int = Field(default=1,ge=1,le=4,strict=True)
     generation_queue_messages: int = Field(default=2000,ge=256,le=65536)
     generation_queue_bytes: int = Field(default=8388608,ge=4194304,le=67108864)
+    # 오류로 멈추거나 서버가 재시작되면 서버가 확인 지점부터 자동으로 이어간다(화면 기본 사용).
+    auto_resume: bool = False
 
     @model_validator(mode="after")
     def worker_count(self):
@@ -684,6 +694,12 @@ def execute_saved_schedule(body: ScheduleExecutionRequest, recovery=None):
         minimum_seconds = (end-start)/1000 if body.realtime else planned/profile["publish_per_second"]
         if clients>profile["max_clients"] or planned>profile["max_messages"] or minimum_seconds>=profile["max_duration_seconds"]:
             raise HTTPException(422,detail="서버 MQTT 연결·메시지·시간 상한을 초과했습니다. 접속·응답 여유를 포함해 일정을 줄이세요.")
+        if body.realtime and not recovery:
+            # 실제 경과 시간 한도에는 시작 준비·일시중지·재접속 대기가 함께 들어간다. 일정 길이의 10%를 남긴다.
+            needed = int(minimum_seconds * 1.1) + 1
+            if profile["max_duration_seconds"] < needed:
+                raise HTTPException(422,detail=f"서버 MQTT 프로필의 실행 시간 한도(max_duration_seconds {profile['max_duration_seconds']:,}초)가 일정 {int(minimum_seconds):,}초에 비해 여유가 부족합니다. "
+                                               f"일시중지·재접속 대기를 고려해 {needed:,}초 이상으로 설정하세요.")
         if mode=="operations":
             profile={**profile,"max_duration_seconds":min(profile["max_duration_seconds"],(end-start+999)//1000+600)}
         if not WORKER.is_file():
@@ -693,7 +709,7 @@ def execute_saved_schedule(body: ScheduleExecutionRequest, recovery=None):
     vehicle_alias=plan_vins(fleet=source.fleet,schedule=source.schedule) if mode=="small_test" else {}
     assignments=[{"vehicle_id":v,"client_id":f"sim-{run_id}-c{i%clients+1:03d}",**({"vin":vehicle_alias[v]} if vehicle_alias else {})} for i,v in enumerate(vehicle_ids)]
     config={"vehicle_count":len(vehicle_ids),"client_count":clients,"mapping_mode":body.mapping_mode,"messages_per_vehicle":0,"interval_ms":req.interval_ms,"connection_lifetime":body.connection_lifetime}
-    request={"config":config,"execution_profile":mode,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip}
+    request={"config":config,"execution_profile":mode,"transport":body.transport,"realtime":body.realtime,"source_plan_key":body.plan_key,"schedule_plan":source.model_dump(exclude_none=True),"force_end_trip":body.force_end_trip,"auto_resume":body.auto_resume}
     from services.control.execution_checkpoints import ExecutionCheckpoints
     execution_checkpoints=ExecutionCheckpoints();checkpoint_epoch=0
     scheduled_body=ScheduledOBDRequest(schedule=source.schedule,force_end_trip=body.force_end_trip,checkpoint_epoch=checkpoint_epoch) if source.schedule else None
@@ -717,6 +733,8 @@ def execute_saved_schedule(body: ScheduleExecutionRequest, recovery=None):
             raise HTTPException(409, detail="복구할 Worker, 차량 VIN 또는 MQTT 전송 대상이 바뀌었습니다.")
         data["schedule_checkpoint"] = (recovery["result"]["schedule_checkpoint"] if recovery
                                        else {**identity, "virtual_ms": 0, "confirmed": {}, "count": 0})
+    if recovery and recovery["result"].get("auto_recovery"):
+        data["auto_recovery"] = recovery["result"]["auto_recovery"]  # 자동 이어가기 기록을 새 실행 결과로 넘긴다
     if mode=="operations":
         data.update(transmission_queue_messages=min(4096,max(100,clients*2)),transmission_queue_bytes=8388608,stop_grace_seconds=15)
     request["generation"]={"workers":body.generation_workers,"queue_messages":body.generation_queue_messages,"queue_bytes":body.generation_queue_bytes}
@@ -987,7 +1005,7 @@ class OperationOBDRequest(BaseModel):
     model_config=ConfigDict(extra="forbid",strict=True)
     checkpoint_epoch: int | None=None  # 공용 이벤트 찾기 화면이 보내는 값. 상시 운영 조회는 중간 상태를 쓰지 않는다.
     search_events: bool=False
-    event_mask: int=Field(default=0,ge=0,le=383)
+    event_mask: int=Field(default=0,ge=0,le=255)
 
 
 @app.post("/api/operations/obd/{vehicle_id}/{trip_key}")
@@ -995,8 +1013,6 @@ def operations_obd(body: OperationOBDRequest, vehicle_id: int, trip_key: str, st
     from services.control.operation_query import generate as regenerate
     if not WORKER.is_file():
         raise HTTPException(503, detail="Worker 빌드가 필요합니다.")
-    if body.event_mask & 128:
-        raise HTTPException(422, detail="예약된 이벤트 비트입니다.")
     try:
         trip=registry().history_trip(vehicle_id, trip_key)
     except RegistryError as error:

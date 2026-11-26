@@ -12,5 +12,6 @@
   "connect_per_second": 2,
   "publish_per_second": 10,
   "timeout_ms": 3000,
-  "reconnect_attempts": 2
+  "reconnect_attempts": 2,
+  "retry_window_seconds": 0
 }

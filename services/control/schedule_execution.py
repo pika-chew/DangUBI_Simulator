@@ -9,6 +9,9 @@ from services.control.schedule_publisher import SchedulePublisher
 from services.control.message_codec import with_vehicle_id
 
 
+TRANSMISSION_QUEUE_MESSAGES = 1000  # 시험 실행 송신 대기 기본값(이전 100). 빠른 전송·재접속 뒤 따라잡기에서 일하는 Client를 늘린다.
+MESSAGE_SAVE_SECONDS = 1.0  # 메시지 처리 중 실행 결과 저장 최소 간격(이전: 메시지마다)
+
 def execute(manager, job, data, worker, timeout):
     started = time.monotonic()
     started_wall_ms = time.time()*1000
@@ -23,6 +26,8 @@ def execute(manager, job, data, worker, timeout):
     result["processed_messages"] = previous_count
     if checkpoint:
         result["recovery_confirmed_before"] = previous_count
+    if data.get("auto_recovery"):
+        result["auto_recovery"] = data["auto_recovery"]
     alias = data.get("vehicle_alias") or {}
     vehicle_by_alias = {value: key for key, value in alias.items()}
     wire_id = lambda vehicle: alias.get(vehicle, vehicle)
@@ -77,7 +82,7 @@ def execute(manager, job, data, worker, timeout):
         p=publisher.state if publisher else {}
         count=g.get("reserved_messages",0)+p.get("reserved_commands",0)
         size=g.get("reserved_bytes",0)+p.get("reserved_bytes",0)
-        b=result.setdefault("buffer_budget",dict(max_messages=data.get("generation_queue_messages",2000)+data.get("transmission_queue_messages",100),
+        b=result.setdefault("buffer_budget",dict(max_messages=data.get("generation_queue_messages",2000)+data.get("transmission_queue_messages",TRANSMISSION_QUEUE_MESSAGES),
                     max_bytes=data.get("generation_queue_bytes",8388608)+data.get("transmission_queue_bytes",1048576),
                     peak_reserved_messages=0,peak_reserved_bytes=0))
         if count>b["max_messages"] or size>b["max_bytes"]:raise GenerationFailure("생성·송신 통합 예약 예산을 초과했습니다.")
@@ -120,7 +125,8 @@ def execute(manager, job, data, worker, timeout):
         nonlocal last_save
         # 연결 경계가 몰려도 DB에 차량 수만큼 연속 저장하지 않는다.
         # 최종 상태와 상태 전환은 제한하지 않으며 gate의 중단/일시정지 확인도 유지한다.
-        if throttle and not final and result.get("job_state")==state and time.monotonic()-last_save<.1:return
+        # throttle=True는 0.1초, 숫자는 그 초만큼 저장 간격을 둔다(메시지마다 저장하지 않음 — 복구는 마지막 저장 지점부터).
+        if throttle and not final and result.get("job_state")==state and time.monotonic()-last_save<(.1 if throttle is True else throttle):return
         if bounded:result["generation_pool"]={"assignments":bounded.assignments[:100] if paginate_assignments else bounded.assignments,"assignment_count":len(bounded.assignments),"queue":bounded.stats.copy(),"workers":[dict(s.stats,worker_index=i,work_ms=generation.work_ms[i]) for i,s in enumerate(generation.sessions)],"execution_checkpoints":data["execution_checkpoint_stats"]()}
         budget()
         now = time.monotonic()
@@ -207,13 +213,13 @@ def execute(manager, job, data, worker, timeout):
             result["samples"].append(dict(vehicle_id=vehicle,vin=alias.get(vehicle),client_id=data["client_by_vehicle"][vehicle],topic=f"{data["mqtt"]["topic_prefix"]}/{job.id}/{wire_id(vehicle)}/obd" if mqtt else "",sequence=sequences[vehicle],message=shown,synthetic_trip=synthetic))
 
     try:
-        report()
+        report(throttle=MESSAGE_SAVE_SECONDS)
         generation=GenerationPool(worker,job,manager,data.get("generation_workers",1))
         if mqtt:
             bridge=MQTTBridge(worker,data,job)
             bridge.receive()
             publisher=SchedulePublisher(bridge,result,{wire_id(v):c for v,c in data["client_by_vehicle"].items()},data["measurement_start_ms"],on_account=budget,due_offset=due_offset,
-                                        queue_capacity=data.get("transmission_queue_messages",100),queue_bytes=data.get("transmission_queue_bytes",1048576),
+                                        queue_capacity=data.get("transmission_queue_messages",TRANSMISSION_QUEUE_MESSAGES),queue_bytes=data.get("transmission_queue_bytes",1048576),
                                         on_confirm=on_confirm if checkpoint is not None else None,measure_schedule=data["realtime"])
             if data["config"]["connection_lifetime"]=="always":
                 for client in sorted(set(data["client_by_vehicle"].values())):
@@ -254,9 +260,11 @@ def execute(manager, job, data, worker, timeout):
             result["simulation_time_ms"]=data["duration_ms"]
         if job.timed_out:
             result["errors"]=["실행 제한시간을 초과했습니다."]
+        result["failure_kind"]="timeout" if job.timed_out else "user" if job.stop_requested else None
         finish("failed" if job.timed_out else "stopped" if job.stop_requested else "completed")
     except Exception as error:
         if mqtt:sync_mqtt()
+        result["failure_kind"]="timeout" if job.timed_out else "user" if job.stop_requested else "error"
         result["errors"]=[str(error) if isinstance(error,(MQTTFailure,GenerationFailure)) else "일정 생성 또는 전송에 실패했습니다. 일부 결과만 보관하며 자동 재실행하지 않습니다."]
         finish("failed" if job.timed_out else "stopped" if job.stop_requested else "failed")
     finally:

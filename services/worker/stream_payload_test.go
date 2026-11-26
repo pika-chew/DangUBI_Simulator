@@ -10,7 +10,7 @@ import (
 
 func TestStreamRawPayloadPreservesBytesAndLegacyValues(t *testing.T) {
 	for _, raw := range []string{
-		`{"ty":4,"ts":1795129202000,"pld":{"tid":123,"sp":3.25,"em":256}}`,
+		`{"ty":4,"ts":1795129202000,"pld":{"tid":123,"sp":3.25,"em":128}}`,
 		` { "pld":{"tid":123,"xyz":"한글","sp":1e-7}, "ts":2, "ty":4.0 } `,
 		`{"ty":3,"ts":3,"pld":{"tid":123}}`,
 	} {

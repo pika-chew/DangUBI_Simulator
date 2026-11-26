@@ -44,6 +44,8 @@ type streamStats struct {
 	Published              int                         `json:"mqtt_published"`
 	Puback                 int                         `json:"puback_count"`
 	Unconfirmed            int                         `json:"unconfirmed_messages"`
+	Resent                 int                         `json:"resent_messages"`
+	RetryWaits             int                         `json:"publish_retry_count"`
 	Reconnects             int                         `json:"reconnect_count"`
 	Connections            int                         `json:"connection_count"`
 	Disconnections         int                         `json:"disconnect_count"`
@@ -234,9 +236,24 @@ func (s *mqttSession) counts() map[string]any {
 		"connected_clients": v.Connected, "active_clients": v.Active, "peak_active_clients": v.Peak,
 		"publish_attempts": v.Attempts, "mqtt_published": v.Published, "puback_count": v.Puback,
 		"unconfirmed_messages": v.Unconfirmed, "reconnect_count": v.Reconnects,
+		"resent_messages": v.Resent, "publish_retry_count": v.RetryWaits,
 		"connection_count": v.Connections, "disconnect_count": v.Disconnections,
 		"schedule_delay_ms": v.ScheduleDelay, "initial_connect_ms": v.InitialConnectMS,
 	}
+}
+
+// dropConnection은 응답이 끊긴 연결을 닫아 다음 발행에서 새로 접속하게 한다(주차 해제가 아니므로 재접속으로 센다).
+func (s *mqttSession) dropConnection(id string) {
+	c := s.clients[id]
+	if c == nil {
+		return
+	}
+	c.Disconnect(0)
+	until := time.Now().Add(time.Duration(s.profile.TimeoutMS) * time.Millisecond)
+	for c.IsConnectionOpen() && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	s.refreshClient(id)
 }
 
 func (s *mqttSession) disconnect(id string) {
@@ -410,72 +427,107 @@ func (s *mqttSession) command(ctx context.Context, runID string, c streamCommand
 		if err != nil {
 			return err
 		}
-		if err = s.connect(ctx, id); err != nil {
-			return err
+		// 한 번의 발행 시도. 반환: (발행했는지, 다시 시도할 만한 실패인지, 오류)
+		attempt := func(first bool) (bool, bool, error) {
+			if err := s.connect(ctx, id); err != nil {
+				return false, ctx.Err() == nil, err
+			}
+			if p := s.clientPublish[id]; p != nil {
+				if err := p.wait(ctx); err != nil {
+					return false, false, err
+				}
+			}
+			// 모든 Client가 같은 속도 제한을 공유한다. 토큰 대기는 잠금 밖이다.
+			s.publishMu.Lock()
+			waitStarted := time.Now()
+			expectedWait := max(time.Duration(0), time.Until(s.publishPacer.next))
+			if s.publishLimiter != nil {
+				expectedWait, err = s.publishLimiter.wait(ctx)
+			} else {
+				err = s.publishPacer.wait(ctx)
+			}
+			waited := time.Since(waitStarted)
+			s.mu.Lock()
+			s.stats.PublishRateWaitMS += float64(waited) / float64(time.Millisecond)
+			s.stats.PublishRateOvershootMS += float64(max(time.Duration(0), waited-expectedWait)) / float64(time.Millisecond)
+			s.mu.Unlock()
+			if err != nil {
+				s.publishMu.Unlock()
+				return false, false, err
+			}
+			s.mu.Lock()
+			if s.stats.Attempts >= s.profile.MaxMessages {
+				s.mu.Unlock()
+				s.publishMu.Unlock()
+				return false, false, errors.New("발행 상한을 초과했습니다.")
+			}
+			s.stats.Attempts++
+			if c.DueAtMS > 0 && first {
+				delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
+				if trace := s.parkingTrace; trace != nil && ty == 4 && len(trace.firstSends[c.VehicleID]) < 2 {
+					if tid != trace.lastTrip[c.VehicleID] {
+						trace.lastTrip[c.VehicleID] = tid
+						trace.firstSends[c.VehicleID] = append(trace.firstSends[c.VehicleID], parkingSend{id, timestamp, delay})
+					}
+				}
+				if s.profile.LocalBenchmark && s.parkingTrace == nil {
+					window := min(len(s.publishWindows)-1, int(time.Since(s.started)/(10*time.Second)))
+					s.publishWindows[window].add(time.Duration(delay) * time.Millisecond)
+				}
+				s.stats.ScheduleDelay = max(s.stats.ScheduleDelay, delay)
+				s.metrics.schedule.add(time.Duration(delay) * time.Millisecond)
+				if !s.connectedAt.IsZero() && c.DueAtMS >= s.connectedAt.UnixMilli() {
+					s.postConnect.add(time.Duration(delay) * time.Millisecond)
+				}
+			}
+			s.mu.Unlock()
+			started := time.Now()
+			token := s.clients[id].Publish(fmt.Sprintf("%s/%s/%s/obd", s.profile.TopicPrefix, runID, c.VehicleID), 1, false, encoded)
+			s.publishMu.Unlock()
+			err := waitToken(ctx, token, time.Duration(s.profile.TimeoutMS)*time.Millisecond)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.metrics.ack.add(time.Since(started))
+			if err != nil {
+				return true, ctx.Err() == nil, err
+			}
+			s.stats.Published++
+			s.stats.Puback++
+			return true, false, nil
 		}
-		if p := s.clientPublish[id]; p != nil {
-			if err = p.wait(ctx); err != nil {
+		// 응답 지연·연결 끊김은 retry_window_seconds 동안 재접속 뒤 같은 메시지를 다시 보낸다(QoS1 중복 가능, 건수 기록).
+		// 0이면 이전처럼 재발행하지 않고 멈춘다.
+		window := time.Duration(s.profile.RetryWindowSeconds) * time.Second
+		until := time.Now().Add(window)
+		for n := 0; ; n++ {
+			published, retry, err := attempt(n == 0)
+			if err == nil {
+				return nil
+			}
+			if !retry || window <= 0 || !time.Now().Before(until) {
+				if published {
+					s.mu.Lock()
+					s.stats.Unconfirmed++
+					s.mu.Unlock()
+					if window > 0 {
+						return fmt.Errorf("발행 응답을 %d초 동안 재시도했지만 확인하지 못했습니다.", int(window.Seconds()))
+					}
+					return errors.New("발행 응답이 미확인입니다. 자동 재발행하지 않습니다.")
+				}
+				return err
+			}
+			s.mu.Lock()
+			if published {
+				s.stats.Resent++
+			}
+			s.stats.RetryWaits++
+			s.mu.Unlock()
+			s.dropConnection(id)
+			delay := min(30*time.Second, time.Second<<min(n, 5)) + time.Duration(rand.Int64N(int64(250*time.Millisecond)))
+			if err := sleepUntil(ctx, time.Now().Add(delay)); err != nil {
 				return err
 			}
 		}
-		// 모든 Client가 같은 속도 제한을 공유한다. 토큰 대기는 잠금 밖이다.
-		s.publishMu.Lock()
-		waitStarted := time.Now()
-		expectedWait := max(time.Duration(0), time.Until(s.publishPacer.next))
-		if s.publishLimiter != nil {
-			expectedWait, err = s.publishLimiter.wait(ctx)
-		} else {
-			err = s.publishPacer.wait(ctx)
-		}
-		waited := time.Since(waitStarted)
-		s.mu.Lock()
-		s.stats.PublishRateWaitMS += float64(waited) / float64(time.Millisecond)
-		s.stats.PublishRateOvershootMS += float64(max(time.Duration(0), waited-expectedWait)) / float64(time.Millisecond)
-		s.mu.Unlock()
-		if err != nil {
-			s.publishMu.Unlock()
-			return err
-		}
-		s.mu.Lock()
-		if s.stats.Attempts >= s.profile.MaxMessages {
-			s.mu.Unlock()
-			s.publishMu.Unlock()
-			return errors.New("발행 상한을 초과했습니다.")
-		}
-		s.stats.Attempts++
-		if c.DueAtMS > 0 {
-			delay := max(int64(0), time.Now().UnixMilli()-c.DueAtMS)
-			if trace := s.parkingTrace; trace != nil && ty == 4 && len(trace.firstSends[c.VehicleID]) < 2 {
-				if tid != trace.lastTrip[c.VehicleID] {
-					trace.lastTrip[c.VehicleID] = tid
-					trace.firstSends[c.VehicleID] = append(trace.firstSends[c.VehicleID], parkingSend{id, timestamp, delay})
-				}
-			}
-			if s.profile.LocalBenchmark && s.parkingTrace == nil {
-				window := min(len(s.publishWindows)-1, int(time.Since(s.started)/(10*time.Second)))
-				s.publishWindows[window].add(time.Duration(delay) * time.Millisecond)
-			}
-			s.stats.ScheduleDelay = max(s.stats.ScheduleDelay, delay)
-			s.metrics.schedule.add(time.Duration(delay) * time.Millisecond)
-			if !s.connectedAt.IsZero() && c.DueAtMS >= s.connectedAt.UnixMilli() {
-				s.postConnect.add(time.Duration(delay) * time.Millisecond)
-			}
-		}
-		s.mu.Unlock()
-		started := time.Now()
-		token := s.clients[id].Publish(fmt.Sprintf("%s/%s/%s/obd", s.profile.TopicPrefix, runID, c.VehicleID), 1, false, encoded)
-		s.publishMu.Unlock()
-		err = waitToken(ctx, token, time.Duration(s.profile.TimeoutMS)*time.Millisecond)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.metrics.ack.add(time.Since(started))
-		if err != nil {
-			s.stats.Unconfirmed++
-			return errors.New("발행 응답이 미확인입니다. 자동 재발행하지 않습니다.")
-		}
-		s.stats.Published++
-		s.stats.Puback++
-		return nil
 	default:
 		return errors.New("지원하지 않는 연결 명령입니다.")
 	}

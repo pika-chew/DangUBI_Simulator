@@ -169,7 +169,7 @@ def test_operations_query_api(tmp_path, monkeypatch):
             search = c.post(f"/api/operations/obd/1/{row['trip_key']}?limit=100", json={"search_events": True, "event_mask": 0}).json()
             assert search["event_search"] is not None
         assert c.post("/api/operations/obd/1/" + "0" * 64, json={}).status_code == 404
-        assert c.post(f"/api/operations/obd/1/{row['trip_key']}", json={"event_mask": 128}).status_code == 422
+        assert c.post(f"/api/operations/obd/1/{row['trip_key']}", json={"event_mask": 256}).status_code == 422  # bit8 이상 없음
 
 
 def test_recovery_requirement_is_visible_and_names_changed_settings(tmp_path):

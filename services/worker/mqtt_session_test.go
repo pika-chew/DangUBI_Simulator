@@ -343,6 +343,12 @@ func TestScheduleMQTTFixture(t *testing.T) {
 		broker.ackDelay = 300 * time.Millisecond
 		broker.mu.Unlock()
 	}
+	if fault == "drop_ack_once" {
+		broker.mu.Lock()
+		broker.dropAcks = 1
+		broker.mu.Unlock()
+		p.RetryWindowSeconds = 20
+	}
 	if fault == "split_ack" {
 		broker.mu.Lock()
 		broker.ackDelay = 400 * time.Millisecond

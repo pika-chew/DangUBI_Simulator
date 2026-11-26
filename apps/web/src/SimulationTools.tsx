@@ -97,6 +97,8 @@ type TimingSummary = {
 export type Result = {
   recovery_available?: boolean;
   recovery_confirmed_before?: number;
+  resent_messages?: number;
+  auto_recovery?: {attempts?:number;without_progress?:number;next_at?:number|null;last_at?:string;last_error?:string|null;gave_up?:boolean;history?:{at:string;state:string;cause:string;confirmed:number}[]};
   initial_connect_ms?: number;
   execution_timing?: {
     preparation_ms?:number;replay_ms?:number;measurement_wait_ms?:number;drain_ms?:number;cleanup_ms?:number;
@@ -224,6 +226,11 @@ export function stateLabel(result: Result): string {
     failed: "실행 실패 · 결과 확인 필요",
     interrupted: "이전 실행 종료 미확인",
   };
+  const auto = result.auto_recovery;
+  if ((result.job_state === "failed" || result.job_state === "interrupted") && auto) {
+    if (auto.gave_up) return "자동 이어가기 중지 · 확인 필요";
+    if (auto.next_at) return `자동 이어가기 대기 · ${new Date(auto.next_at * 1000).toLocaleTimeString("ko-KR", {timeZone: "Asia/Seoul", hour12: false})} 예정`;
+  }
   return (
     labels[result.job_state || ""] ||
     (result.state === "mqtt_completed"
@@ -573,7 +580,7 @@ export function MessageViewer({samples,catalog,localOnly=false}: {samples:Sample
   function display(key:string,value:unknown) {
     if (value === undefined || value === null) return "—";
     if (key === "em" && typeof value === "number") {
-      const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","","과속"];
+      const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","과속"];
       return `${value} · 0x${value.toString(16).toUpperCase().padStart(2,"0")} · ${names.filter((_,bit)=>(value & (1<<bit))!==0).join(", ") || "이벤트 없음"}`;
     }
     if (["ts","clt","stt","edt"].includes(key) && typeof value === "number") return new Date(value).toLocaleString("ko-KR",{timeZone:"Asia/Seoul"})+" · UTC ms "+value;

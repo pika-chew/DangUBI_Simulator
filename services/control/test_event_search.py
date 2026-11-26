@@ -57,7 +57,7 @@ def test_schedule_search_distinguishes_missing_and_zero(client,monkeypatch):
     body["schedule"]["include_em"]=True
     on=client.post(url,json=body).json()["event_search"]
     assert on["zero"]==on["total"] and on["missing"]==0 and on["complete"]
-    bad=copy.deepcopy(body);bad["event_mask"]=128
+    bad=copy.deepcopy(body);bad["event_mask"]=256  # bit8 이상 없음(과속은 bit7)
     assert client.post(url,json=bad).status_code==422
     assert client.get("/api/health").json()["features"]["microtrip_event_search"]
 
@@ -79,12 +79,14 @@ def test_event_thirty_second_detail_query_needs_no_whole_trip_query(client,monke
     assert client.get("/api/runs").json()==[]
 
 
-def test_microtrip_schema_requires_em_and_reserves_bit_seven():
+def test_microtrip_schema_requires_em_with_overspeed_bit_seven():
     body=copy.deepcopy(control.CATALOG["profiles"]["4"]["example"])
-    body["pld"]["em"]=256|32
+    body["pld"]["em"]=128|32  # 과속 bit7 + 급가속 bit5
+    control.validate_message(body)
+    body["pld"]["em"]=255
     control.validate_message(body)
     import pytest
-    body["pld"]["em"]=128
+    body["pld"]["em"]=256  # bit8 이상은 없다
     with pytest.raises(HTTPException) as error:control.validate_message(body)
     assert error.value.status_code==422
     del body["pld"]["em"]

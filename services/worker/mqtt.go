@@ -34,6 +34,8 @@ type MQTTProfile struct {
 	PublishPerSecond   int    `json:"publish_per_second"`
 	TimeoutMS          int    `json:"timeout_ms"`
 	ReconnectAttempts  int    `json:"reconnect_attempts"`
+	// 발행 응답 지연·연결 끊김 때 같은 메시지를 다시 보내며 버티는 시간(초). 0이면 재발행하지 않는다.
+	RetryWindowSeconds int `json:"retry_window_seconds"`
 }
 
 func (p *MQTTProfile) validate() error {
@@ -66,7 +68,7 @@ func (p *MQTTProfile) validate() error {
 			maxClients, maxMessages, maxSeconds, maxConnect, maxPublish = 8, 128, 1880, 5, 70
 		}
 	}
-	if p.MaxClients < 1 || p.MaxClients > maxClients || p.MaxMessages < 1 || p.MaxMessages > maxMessages || p.MaxDurationSeconds < 1 || p.MaxDurationSeconds > maxSeconds || p.ConnectPerSecond < 1 || p.ConnectPerSecond > maxConnect || p.PublishPerSecond < 1 || p.PublishPerSecond > maxPublish || p.TimeoutMS < 100 || p.TimeoutMS > 5000 || p.ReconnectAttempts < 0 || p.ReconnectAttempts > 3 {
+	if p.MaxClients < 1 || p.MaxClients > maxClients || p.MaxMessages < 1 || p.MaxMessages > maxMessages || p.MaxDurationSeconds < 1 || p.MaxDurationSeconds > maxSeconds || p.ConnectPerSecond < 1 || p.ConnectPerSecond > maxConnect || p.PublishPerSecond < 1 || p.PublishPerSecond > maxPublish || p.TimeoutMS < 100 || p.TimeoutMS > 5000 || p.ReconnectAttempts < 0 || p.ReconnectAttempts > 3 || p.RetryWindowSeconds < 0 || p.RetryWindowSeconds > 3600 {
 		return errors.New("소량 MQTT 시험의 연결·건수·시간·속도 상한을 확인하세요.")
 	}
 	if p.TopicPrefix == "" || len(p.TopicPrefix) > 80 || strings.ContainsAny(p.TopicPrefix, "+#\x00") || strings.HasPrefix(p.TopicPrefix, "$") || strings.Count(p.TopicPrefix, "/") > 3 || strings.HasSuffix(p.TopicPrefix, "/") {

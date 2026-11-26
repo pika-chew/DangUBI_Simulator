@@ -57,7 +57,7 @@ func intervalEventMask(segments []motionSegment, from, until float64) int {
 	for i := first; i < len(segments) && segments[i].Start <= until; i++ {
 		s := segments[i]
 		if a, b, ok := overspeedSpan(s); ok && math.Max(a, from) < math.Min(b, until) {
-			mask |= 1 << 8
+			mask |= 1 << 7 // 과속: bit7(128). 예약 비트 없이 em은 bit0~7(0~255)
 		}
 		event := maneuverEvent(s)
 		// 출발 속도/정지 도달/유턴 각도는 실제 기동 완료 시점에 확정한다.

@@ -93,14 +93,8 @@ class FleetOBDRequest(Strict):
     checkpoint_epoch: int | None = Field(default=None, ge=0)
     force_end_trip: bool = False
     search_events: bool = False
-    event_mask: int = Field(default=0, ge=0, le=383)
+    event_mask: int = Field(default=0, ge=0, le=255)
 
-    @field_validator("event_mask")
-    @classmethod
-    def reserved_event_bit(cls, value):
-        if value & 128:
-            raise ValueError("bit7은 예약 비트입니다. 과속은 bit8(256)을 사용하세요.")
-        return value
 
 
 

@@ -101,7 +101,7 @@ func searchEventMessages(s *ScheduledInput, r Request, first, last int64, messag
 						if bits&127 != 0 {
 							row.Evidence = append(row.Evidence, searchEvidence(seg, s.StartMS, seg.Start, math.Min(seg.End, t), kind))
 						}
-						if bits&(1<<8) != 0 {
+						if bits&(1<<7) != 0 {
 							a, b, _ := overspeedSpan(seg)
 							row.Evidence = append(row.Evidence, searchEvidence(seg, s.StartMS, math.Max(a, from), math.Min(b, t), "과속"))
 						}

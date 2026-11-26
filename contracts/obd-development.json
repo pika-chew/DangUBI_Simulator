@@ -95,18 +95,10 @@
               },
               "em": {
                 "type": "integer",
-                "title": "주기 내 이벤트 · bit8 과속은 시뮬레이터 확장",
+                "title": "주기 내 이벤트 · bit0~6 급기동, bit7 과속",
                 "default": 0,
                 "minimum": 0,
-                "maximum": 383,
-                "anyOf": [
-                  {
-                    "maximum": 127
-                  },
-                  {
-                    "minimum": 256
-                  }
-                ]
+                "maximum": 255
               },
               "el": {
                 "type": "number",

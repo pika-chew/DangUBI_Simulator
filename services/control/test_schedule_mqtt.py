@@ -467,3 +467,88 @@ def test_schedule_mqtt_automatic_fleet_window_preserves_microtrip_only(mqtt_clie
     report=broker_report(profile)
     assert all(m["ty"]==4 and set(m)=={"vehicleId","ty","ts","pld"} for m in report["messages"])
     assert {t.split("/")[-2] for t in report["topics"]}=={m["vehicleId"] for m in report["messages"]}
+
+
+@pytest.mark.parametrize("mqtt_client",["drop_ack_once"],indirect=True)
+def test_missing_puback_is_resent_and_run_completes(mqtt_client):
+    """응답이 한 번 빠져도 실행을 멈추지 않고 재접속 뒤 같은 메시지를 다시 보내 완료한다(중복 1건 기록)."""
+    client,profile=mqtt_client
+    run_id,_=start(client,schedule(),realtime=False)
+    result=finished(client,run_id)["result"]
+    assert result["job_state"]=="completed",result["errors"]
+    assert result["resent_messages"]==1 and result["unconfirmed_messages"]==0
+    assert result["transmission"]["queue_capacity"]==1000  # 시험 실행 송신 대기 기본값
+    assert result["puback_count"]==result["planned_messages"]
+    report=broker_report(profile)
+    assert report["received"]==result["planned_messages"]+1  # 원본이 실제로 도착했다면 중복 1건
+    unique={(m["vehicleId"],m["pld"]["tid"],m["ts"],m["ty"]) for m in report["messages"]}
+    assert len(unique)==result["planned_messages"]
+
+
+def test_auto_resume_continues_interrupted_trial_and_skips_user_stop(mqtt_client):
+    """서버 재시작으로 끊긴 실행은 자동으로 확인 지점부터 이어가고, 사용자가 중단한 실행은 그대로 둔다."""
+    import sqlite3
+    from services.control.auto_resume import AutoResumer
+    client,profile=mqtt_client
+    source=schedule(end="08",interval=1000)
+    source["vehicles"]=[{"vehicle_id":"v000001","trips":[{"start":"2026-11-18T13:00:00+09:00","end":"2026-11-18T13:00:06+09:00","road_profile":"urban"}]}]
+    run_id,_=start(client,source,auto_resume=True)
+    job="/api/jobs/"+run_id
+    for _ in range(300):
+        r=client.get(job).json()["result"]
+        if r["puback_count"]>=1:break
+        time.sleep(.02)
+    client.post(job+"/pause")
+    for _ in range(300):
+        r=client.get(job).json()["result"]
+        if r["job_state"]=="paused":break
+        time.sleep(.02)
+    client.post(job+"/stop")
+    stopped=finished(client,run_id)["result"]
+    assert stopped["job_state"]=="stopped" and stopped["failure_kind"]=="user"
+    recovered=[]
+    resumer=AutoResumer(control.JOBS,lambda rid:recovered.append(rid) or control.recover_schedule(rid,control.RecoverScheduleRequest(confirm_mqtt=True)),delays=(0,))
+    resumer.tick();resumer.tick()
+    assert recovered==[]  # 직접 중단은 이어가지 않는다
+    # 제어 API 재시작으로 끊긴 기록을 만든다(JOBS.recover가 남기는 상태와 같다).
+    with sqlite3.connect(control.DB) as db:
+        raw=db.execute("SELECT result FROM runs WHERE id=?",(run_id,)).fetchone()[0]
+        result=json.loads(raw);result.update(job_state="interrupted",state="interrupted",failure_kind=None)
+        db.execute("UPDATE runs SET result=? WHERE id=?",(json.dumps(result),run_id))
+    checkpoint=result["schedule_checkpoint"]["count"]
+    resumer.tick()  # 대기 예약
+    assert client.get(job).json()["result"]["auto_recovery"]["next_at"] is not None
+    resumer.tick()  # 이어가기
+    assert recovered==[run_id]
+    done=finished(client,run_id)["result"]
+    assert done["job_state"]=="completed",done["errors"]
+    assert done["recovery_confirmed_before"]==checkpoint and done["schedule_checkpoint"]["count"]==7
+    assert done["auto_recovery"]["attempts"]==1 and done["auto_recovery"]["history"][0]["state"]=="interrupted"
+    report=broker_report(profile)
+    unique={(m["pld"]["tid"],m["ts"],m["ty"]) for m in report["messages"]}
+    assert len(unique)==7 and sorted(unique)[-1][2]==3  # 확인 지점 이후 재전송 중복을 빼면 계획 7건(종료 Trip 포함)
+
+
+@pytest.mark.parametrize("mqtt_client",["no_ack"],indirect=True)
+def test_auto_resume_gives_up_without_progress(mqtt_client):
+    """확인 지점이 나아가지 않는 실패가 반복되면 자동 이어가기를 멈추고 기록한다."""
+    from services.control.auto_resume import AutoResumer
+    client,profile=mqtt_client
+    run_id,_=start(client,schedule(),realtime=False,auto_resume=True)
+    first=finished(client,run_id)["result"]
+    assert first["job_state"]=="failed" and first["failure_kind"]=="error"
+    resumer=AutoResumer(control.JOBS,lambda rid:control.recover_schedule(rid,control.RecoverScheduleRequest(confirm_mqtt=True)),delays=(0,),max_without_progress=2)
+    for _ in range(8):
+        resumer.tick()
+        if control.JOBS.active_id():finished(client,run_id)
+    final=client.get("/api/jobs/"+run_id).json()["result"]
+    assert final["auto_recovery"]["gave_up"] and final["auto_recovery"]["attempts"]==2
+
+
+def test_realtime_mqtt_requires_duration_margin(mqtt_client):
+    """1배속 실제 MQTT는 프로필 실행 시간 한도가 일정 길이보다 10% 이상 넉넉해야 시작한다(fixture 한도 30초)."""
+    client,_=mqtt_client
+    source=schedule(end="28")
+    plan=client.post("/api/workspace/plans",json={"title":"여유 부족","schedule":source}).json()
+    response=client.post("/api/workspace/execute",json={"plan_key":plan["key"],"transport":"mqtt","confirm_mqtt":True,"realtime":True})
+    assert response.status_code==422 and "여유" in response.json()["detail"]

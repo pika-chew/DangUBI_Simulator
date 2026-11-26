@@ -58,7 +58,7 @@ func TestMicrotripMandatoryEMAndCachedPages(t *testing.T) {
 		for i, m := range on.Scheduled.Messages {
 			p := m["pld"].(map[string]any)
 			mask, ok := p["em"].(int)
-			if !ok || mask < 0 || mask > 383 || mask&128 != 0 {
+			if !ok || mask < 0 || mask > 255 {
 				t.Fatal("비트마스크 없음/범위 초과")
 			}
 			found = found || mask != 0

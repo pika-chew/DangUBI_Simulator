@@ -5,7 +5,7 @@ import "testing"
 func TestOverspeedThresholdWindowAndCombination(t *testing.T) {
 	road := roadContext{"도심 도로", 50, .3}
 	s := motionSegment{Start: 0, End: 2, V0: 15, V1: 25, Road: road, Event: "급가속"}
-	if got := intervalEventMask([]motionSegment{s}, 0, 1); got != 256|32 {
+	if got := intervalEventMask([]motionSegment{s}, 0, 1); got != 128|32 {
 		t.Fatal("과속과 급가속 결합", got)
 	}
 	if got := intervalEventMask([]motionSegment{s}, 2, 3); got != 0 {
@@ -21,7 +21,7 @@ func TestOverspeedThresholdWindowAndCombination(t *testing.T) {
 	}
 	s.V0 = 50.02 / 3.6
 	s.V1 = s.V0
-	if got := intervalEventMask([]motionSegment{s}, 0, 2); got != 256 {
+	if got := intervalEventMask([]motionSegment{s}, 0, 2); got != 128 {
 		t.Fatal("과속 누락", got)
 	}
 	s.Road.Limit = 0
@@ -39,7 +39,7 @@ func TestOverspeedCrossingDoesNotReportFuture(t *testing.T) {
 	if got := intervalEventMask([]motionSegment{s}, 0, 5); got != 0 {
 		t.Fatal("초과 전 미래 판정", got)
 	}
-	if got := intervalEventMask([]motionSegment{s}, 5, 6); got != 256 {
+	if got := intervalEventMask([]motionSegment{s}, 5, 6); got != 128 {
 		t.Fatal("보고 사이 초과 누락", got)
 	}
 	s.V0, s.V1 = 20, 10
@@ -58,19 +58,19 @@ func TestMandatoryOverspeedMessageAndSearchAgree(t *testing.T) {
 	segment := motionSegment{Start: 0, End: 20, V0: 20, V1: 20, Road: roadContext{"도심 도로", 50, .3}}
 	r.Generation.cache = &scenarioCache{plans: map[int]*scenarioPlan{0: {Segments: []motionSegment{segment}, Duration: 20}}}
 	message := func(seq int) map[string]any { m, _ := automaticMessage(r, 0, seq); return m }
-	if em := message(1)["pld"].(map[string]any)["em"]; em != 256 {
+	if em := message(1)["pld"].(map[string]any)["em"]; em != 128 {
 		t.Fatal("include_em 기본false여도 필수", em)
 	}
 	if _, ok := message(10)["pld"].(map[string]any)["em"]; ok {
 		t.Fatal("Trip에 em 추가")
 	}
-	s := &ScheduledInput{StartMS: 100000, IntervalMS: 2000, Limit: 100, EventMask: 256}
+	s := &ScheduledInput{StartMS: 100000, IntervalMS: 2000, Limit: 100, EventMask: 128}
 	result := searchEventMessages(s, r, 0, 9, message)
 	if !result.Complete || len(result.Rows) != 9 || result.Zero != 1 {
 		t.Fatal(result)
 	}
 	for _, row := range result.Rows {
-		if row.Message["pld"].(map[string]any)["em"] != 256 || len(row.Evidence) != 1 || row.Evidence[0].Kind != "과속" || row.Evidence[0].Limit != 50 {
+		if row.Message["pld"].(map[string]any)["em"] != 128 || len(row.Evidence) != 1 || row.Evidence[0].Kind != "과속" || row.Evidence[0].Limit != 50 {
 			t.Fatal(row)
 		}
 	}

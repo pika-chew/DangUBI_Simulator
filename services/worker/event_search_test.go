@@ -37,7 +37,7 @@ func TestEventSearchMatchesEveryActualMicrotripAndPages(t *testing.T) {
 				break
 			}
 		}
-		for _, filter := range []int{0, 1, 8, 64, 256, 1 | 8 | 64 | 256} {
+		for _, filter := range []int{0, 1, 8, 64, 128, 1 | 8 | 64 | 128} {
 			found := []map[string]any{}
 			nonzero, zero := int64(0), int64(0)
 			cursor := int64(0)
@@ -120,8 +120,12 @@ func TestEventSearchDistinguishesDisabledEmptyAndZero(t *testing.T) {
 	if p := c.Scheduled.EventSearch; p.Total != 0 || p.Missing != 0 || p.Zero != 0 || !p.Complete {
 		t.Fatal(p)
 	}
-	s.EventMask = 128
+	s.EventMask = 128 // bit7 = 과속
+	if _, err := scheduledOBD(Request{Scheduled: &s}); err != nil {
+		t.Fatal("과속 bit7 거부", err)
+	}
+	s.EventMask = 256 // bit8 이상은 없다
 	if _, err := scheduledOBD(Request{Scheduled: &s}); err == nil {
-		t.Fatal("예약 비트 허용")
+		t.Fatal("bit8 허용")
 	}
 }

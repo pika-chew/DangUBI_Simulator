@@ -37,6 +37,7 @@ type testBroker struct {
 	published         int
 	messages          []map[string]any
 	noAck             bool
+	dropAcks          int // 앞의 n건은 PUBACK을 보내지 않는다(일시 응답 누락 재현)
 	closeOnce         bool
 	closed            bool
 	ackDelay          time.Duration
@@ -171,7 +172,10 @@ func (b *testBroker) handle(conn net.Conn) {
 			if b.slowSuffix != "" && !strings.HasSuffix(clientID, b.slowSuffix) {
 				ackDelay = 0
 			}
-			noAck := b.noAck
+			noAck := b.noAck || b.dropAcks > 0
+			if b.dropAcks > 0 {
+				b.dropAcks--
+			}
 			b.closeOnce = false
 			b.mu.Unlock()
 			if ackDelay > 0 {

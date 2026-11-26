@@ -8,14 +8,14 @@ import {scheduleReadiness,type ExecutionHealth} from "./scheduleReadiness";
 export function ScheduleExecution({plan,activeId,onRun,mqttReady,onEdit,onHealth}:{plan:PlanRecord|null;activeId:string|null;mqttReady:boolean;onRun:(run:SavedRun,started?:boolean)=>void;onEdit:()=>void;onHealth:(ready:boolean)=>void}) {
   const [realtime,setRealtime]=useState(true),[clients,setClients]=useState(0),[force,setForce]=useState(false);
   const [transport,setTransport]=useState<"dry_run"|"mqtt">("dry_run"),[lifetime,setLifetime]=useState("always"),[confirmed,setConfirmed]=useState(false);
-  const [workers,setWorkers]=useState(1);
+  const [workers,setWorkers]=useState(1),[autoResume,setAutoResume]=useState(true);
   useEffect(()=>{const d=profileExecutionDefaults(plan?.request?.fleet?.execution_profile==="operations"?"operations":"small_test");setClients(d.clients);setConfirmed(false);setForce(d.force);setRealtime(d.realtime);setTransport(d.transport);setLifetime(d.lifetime);setWorkers(d.workers);},[plan?.key]);
   const [health,setHealth]=useState<ExecutionHealth|null>(null),[check,setCheck]=useState(0);
   useEffect(()=>{let mounted=true;setHealth(null);void api<ExecutionHealth>("/api/health").then(h=>{if(mounted){setHealth(h);onHealth(h.mqtt_ready);}}).catch(()=>{});return()=>{mounted=false;};},[mqttReady,check]);
   const server=health?.mqtt_limits;
   const ready=health?.mqtt_ready ?? mqttReady;
   const [busy,setBusy]=useState(false),[error,setError]=useState("");
-  async function start(){if(!plan)return;setBusy(true);setError("");try{onRun(await api<SavedRun>("/api/workspace/execute",{plan_key:plan.key,generation_workers:workers,realtime,mapping_mode:"shared",client_count:clients||undefined,force_end_trip:force,transport,confirm_mqtt:confirmed,connection_lifetime:lifetime}),true);}catch(e){setError(e instanceof Error?e.message:"실행 시작 실패");}finally{setBusy(false);}}
+  async function start(){if(!plan)return;setBusy(true);setError("");try{onRun(await api<SavedRun>("/api/workspace/execute",{plan_key:plan.key,generation_workers:workers,realtime,mapping_mode:"shared",client_count:clients||undefined,force_end_trip:force,auto_resume:autoResume,transport,confirm_mqtt:confirmed,connection_lifetime:lifetime}),true);}catch(e){setError(e instanceof Error?e.message:"실행 시작 실패");}finally{setBusy(false);}}
   const operations=plan?.request?.fleet?.execution_profile==="operations";
   const clientMax=plan?.vehicle_count??1;
   const mqttMax=server?Math.min(clientMax,server.max_clients,operations?25000:1000):null;
@@ -38,6 +38,7 @@ export function ScheduleExecution({plan,activeId,onRun,mqttReady,onEdit,onHealth
     </div>
     <label className="schedule-check"><input type="checkbox" disabled={transport==="mqtt"} checked={force} onChange={e=>setForce(e.target.checked)}/>측정 종료 시 시험용 Trip <InfoHint label="시험용 Trip" text="측정 끝에 운행 중인 차량의 종료 Trip을 시험용으로 만듭니다. 실제 MQTT에서는 사용하지 않습니다."/></label>
     {!ready&&<p className="note">실제 MQTT: 서버 접속 설정 필요. 아래 접속 설정에서 준비 방법을 확인하세요.</p>}
+    <label className="schedule-check"><input type="checkbox" checked={autoResume} onChange={e=>setAutoResume(e.target.checked)}/>장애 시 자동 이어가기 <InfoHint label="자동 이어가기" text="오류로 멈추거나 서버가 다시 시작되면, 서버가 30초~10분 뒤 마지막 확인 지점부터 같은 실행을 이어갑니다. 확인 지점 이후 메시지는 다시 보내므로 수신 측에 중복이 생길 수 있습니다. 직접 중단한 실행과 실행 시간 한도를 넘긴 실행은 이어가지 않습니다." range="확인 지점이 나아가지 않은 채 20번 연속 실패하면 멈춤"/></label>
     {transport==="mqtt"&&<label className="schedule-check"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>설정된 브로커로 실제 전송하는 데 동의합니다.</label>}
     <button className="primary" disabled={!health||!!preflight?.issues.length||(transport==="mqtt"&&!confirmed)} onClick={()=>void start()}>{busy?"시작 중…":transport==="mqtt"?"일정 MQTT 전송 시작":"일정 생성 확인 시작"}</button></fieldset>
     <details className="schedule-advanced"><summary>접속 설정·상한 자세히</summary>

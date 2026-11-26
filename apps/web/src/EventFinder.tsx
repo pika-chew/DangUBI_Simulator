@@ -2,7 +2,7 @@ import {useEffect,useRef,useState,type ReactNode} from "react";
 import type {Message} from "./SimulationTools";
 import {readJSONResponse} from "./http";
 
-const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","","과속"];
+const names=["급출발","급좌회전","급우회전","급유턴","급감속","급가속","급정지","과속"];
 const clock=(ms:number)=>new Date(ms).toLocaleString("ko-KR",{timeZone:"Asia/Seoul",hour12:false});
 type Evidence={kind:string;start_ms:number;end_ms:number;start_speed_kmh:number;end_speed_kmh:number;acceleration_mps2:number;angle_deg:number;lateral_mps2:number;road:string;speed_limit_kmh:number};
 type Row={sequence:number;message:Message;evidence:Evidence[]};
